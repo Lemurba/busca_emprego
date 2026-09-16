@@ -1,0 +1,20 @@
+{
+  "name": "radar-vagas-hermes-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --outfile=dist/public/app.js",
+    "start": "node dist/src/server.js",
+    "dev": "tsx src/server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "esbuild": "^0.25.9",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
