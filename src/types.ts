@@ -61,7 +61,7 @@ export interface Application {
   id: string;
   job_id: string;
   resume_id: string | null;
-  status: "queued" | "in_progress" | "needs_review" | "submitted" | "failed";
+  status: "queued" | "in_progress" | "needs_review" | "submitted" | "accepted" | "rejected" | "failed";
   automation_mode: "manual" | "assisted" | "authorized_auto";
   current_step: string;
   submitted_at: string | null;
