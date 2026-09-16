@@ -1,0 +1,16 @@
+services:
+  radar-dashboard:
+    build: .
+    container_name: radar-dashboard
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: 8787
+      RADAR_DB_PATH: /data/radar.sqlite
+      HERMES_API_URL: ${HERMES_API_URL:-}
+    volumes:
+      - radar_data:/data
+    restart: unless-stopped
+
+volumes:
+  radar_data:
