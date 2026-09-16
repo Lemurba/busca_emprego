@@ -1,58 +1,54 @@
 # Radar de Vagas + Hermes Agent
 
-Dashboard web leve para organizar descoberta de vagas, prazos, currículos ATS e candidaturas. A interface é HTML5/CSS puro com TypeScript empacotado, e o backend usa SQLite nativo do Node 24.
+Dashboard leve para descoberta e acompanhamento de vagas, currículos ATS e candidaturas. A interface usa HTML5, CSS e TypeScript; o backend usa SQLite nativo do Node.js 24.
 
-## Rodar localmente
+## Execução dentro do container existente do Hermes
+
+Este projeto roda como um processo Node.js dentro do container/ambiente do Hermes. Ele não cria nem inicia outro container. O ambiente deve fornecer Node.js 24 ou superior e npm.
+
+Coloque ou monte este repositório em um diretório persistente acessível dentro do container do Hermes e execute nele:
 
 ```bash
-npm install
+npm ci
 npm run build
-npm start
 ```
 
-Abra `http://localhost:8787`.
-
-Para desenvolvimento com recarga do TypeScript, use `npm run dev`.
-
-## Rodar no Docker
+Inicie o processo pelo supervisor ou gerenciador de processos já usado pelo seu Hermes:
 
 ```bash
-docker compose up -d --build
+RADAR_DB_PATH=/caminho/persistente/radar.sqlite PORT=8787 npm start
 ```
 
-O banco persistirá no volume `radar_data` e o painel ficará em `http://localhost:8787`.
+O servidor escuta na porta `8787` em `0.0.0.0`. Sub-agentes no mesmo container podem chamar `http://127.0.0.1:8787`. Para acessar a interface fora do container, exponha a porta através do mecanismo de rede/reverse proxy que já pertence ao Hermes; não crie um container dedicado para o dashboard. Mantenha o arquivo SQLite em armazenamento persistente para preservar os dados após recriações do container.
 
-## Integração com Hermes
+Para desenvolvimento, use `npm run dev`. O processo cria automaticamente o diretório do banco se ele não existir. No primeiro início, registros demonstrativos fictícios são inseridos apenas quando o banco ainda não contém vagas.
 
-O painel recebe eventos no endpoint `POST /api/agent-events`:
+## API para agentes
 
-```json
-{
-  "event": "job.discovered",
-  "job": {
-    "title": "Analista de EHS",
-    "company": "Empresa",
-    "location": "São Paulo, SP",
-    "source": "Portal autorizado",
-    "source_url": "https://exemplo.com/vaga",
-    "opening_status": "open",
-    "deadline_at": "2026-10-01T23:59:00.000Z",
-    "salary_min": 6500,
-    "salary_max": 8500,
-    "salary_source": "API/URL autorizada",
-    "salary_source_url": "https://exemplo.com/salario"
-  }
-}
-```
+O contrato FaaS/HTTP completo, com cada endpoint, campos, enums, regras de datas, respostas e exemplos para os sub-agentes, está em [`docs/agent-api.md`](docs/agent-api.md).
 
-Também são aceitos `job.updated` e `agent.status`. O contrato mantém origem, URL, prazo, status de abertura e fonte salarial para auditoria.
+Resumo dos endpoints:
 
-## Regras do ciclo de vida
+| Método | Endpoint | Uso |
+| --- | --- | --- |
+| `GET` | `/api/health` | Verificar se o processo está ativo |
+| `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, empresas, execuções e métricas |
+| `GET` | `/api/jobs/{id}` | Consultar uma vaga |
+| `POST` | `/api/jobs` | Registrar ou atualizar uma vaga descoberta |
+| `PATCH` | `/api/jobs/{id}` | Alterar dados, etapa ou decisão da vaga |
+| `POST` | `/api/resumes` | Criar currículo vinculado a uma vaga |
+| `PATCH` | `/api/resumes/{id}` | Atualizar currículo, palavras-chave ou sugestões |
+| `POST` | `/api/applications` | Criar registro de candidatura |
+| `PATCH` | `/api/applications/{id}` | Atualizar status, etapa, data ou notas |
+| `POST` | `/api/agent-events` | Enviar `job.discovered`, `job.updated` ou `agent.status` |
 
-- Uma candidatura enviada deve ser registrada como `submitted`; o painel grava a data e calcula há quantos dias ela foi feita.
-- Se o prazo passar ou a fonte informar fechamento sem candidatura enviada, a vaga vira `expired` e aparece como **Vaga perdida**.
-- `not_interested` é uma decisão diferente de vaga perdida e fica visível separadamente.
-- O dashboard não faz scraping do LinkedIn ou do Glassdoor. Para LinkedIn, use alertas/notificações e links ou textos trazidos para o painel. Para Glassdoor, use API, autorização, URL ou conferência manual, guardando fonte, confiança e data.
-- O botão de candidatura registra o envio confirmado pelo usuário. A automação futura deve permanecer assistida ou depender de integração explicitamente autorizada pelo portal.
+Todas as requisições com corpo usam JSON e `Content-Type: application/json`. A API limita o corpo a 2 MB. Ela não implementa autenticação própria: mantenha o endpoint na rede interna do container ou atrás do controle de acesso/reverse proxy do Hermes; não o exponha diretamente à internet.
 
-Os registros demonstrativos exibidos no primeiro acesso são fictícios e podem ser removidos quando você começar a alimentar o banco real.
+## Ciclo de vida das vagas
+
+- Uma candidatura só conta como enviada quando `applications.status` recebe `submitted` (ou o resultado `accepted`/`rejected`) e tem `submitted_at` registrado.
+- A resposta de `/api/bootstrap` inclui `application_date`, `application_age_days` e `lifecycle` calculados para cada vaga.
+- Vagas encerradas ou com prazo vencido, sem candidatura enviada, aparecem com `lifecycle: "lost"` e status `expired`.
+- `decision: "not_interested"` registra falta de interesse; `decision: "no_time"` registra que faltou tempo. Ambas são diferentes de `lost`.
+
+O painel não faz scraping do LinkedIn ou Glassdoor. Use alertas, links/textos fornecidos e integrações permitidas; registre a URL, fonte e data dos dados salariais.
