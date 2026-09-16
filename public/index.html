@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111b38" />
+    <meta name="description" content="Dashboard leve para descobrir, avaliar e acompanhar vagas." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <title>Radar de Vagas</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Navegação principal">
+        <div class="brand">
+          <span class="brand-mark">◈</span>
+          <span><strong>Radar</strong><small>de vagas</small></span>
+        </div>
+        <div class="sidebar-label">Workspace</div>
+        <nav class="main-nav">
+          <button class="nav-item active" data-page="overview"><span class="nav-icon">⌂</span><span>Visão geral</span></button>
+          <button class="nav-item" data-page="board"><span class="nav-icon">▦</span><span>Kanban</span><span class="nav-count" id="nav-total">0</span></button>
+          <button class="nav-item" data-page="jobs"><span class="nav-icon">⌕</span><span>Vagas</span></button>
+          <button class="nav-item" data-page="applications"><span class="nav-icon">✓</span><span>Candidaturas</span></button>
+          <button class="nav-item" data-page="resumes"><span class="nav-icon">▤</span><span>Currículos ATS</span></button>
+          <button class="nav-item" data-page="companies"><span class="nav-icon">▥</span><span>Empresas</span></button>
+          <button class="nav-item" data-page="analytics"><span class="nav-icon">◒</span><span>Análises</span></button>
+        </nav>
+        <div class="sidebar-bottom">
+          <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span><span>Configurações</span></button>
+          <div class="profile-mini"><span class="avatar">LM</span><span><strong>Leandro</strong><small>Perfil ativo</small></span></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menu">☰</button>
+          <div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="page-title">Visão geral</strong></div>
+          <div class="topbar-actions">
+            <span class="sync-status"><i></i><span id="sync-label">SQLite local</span></span>
+            <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
+            <button class="primary-button compact" id="top-add-job" data-action="add-job"><span>＋</span> Nova vaga</button>
+          </div>
+        </header>
+        <div id="view" class="page-content" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <div id="modal-root" class="modal-root" hidden></div>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
