@@ -34,6 +34,11 @@ try {
   await waitReady();
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 426, "proxy TLS gate must fail closed");
   assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 200, "LAN API must not require login or token");
+  const dashboardResponse = await fetch(`${base}/`, { headers: { "x-forwarded-proto": "https" } });
+  const csp = dashboardResponse.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /script-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet script host");
+  assert.match(csp, /style-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet stylesheet host");
+  assert.match(csp, /img-src 'self' data: https:\/\/tile\.openstreetmap\.de/, "CSP must allow map tiles");
 
   const sourceResponse = await request("/api/sources", { method: "POST", body: JSON.stringify({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor", terms_confirmation: "APROVO OS TERMOS DA FONTE" }) });
   const sourceBody = await sourceResponse.json();

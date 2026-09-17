@@ -510,20 +510,22 @@ export function listJobEnrichmentEvents(jobId?: string) {
 }
 
 export function listCompanies(): CompanySummary[] {
-  const rows = db.prepare(`
-    SELECT company, COUNT(*) AS jobs,
-      AVG(CASE WHEN salary_min IS NOT NULL THEN salary_min ELSE NULL END) AS average_salary,
-      GROUP_CONCAT(DISTINCT location) AS locations,
-      GROUP_CONCAT(DISTINCT source) AS sources
-    FROM jobs GROUP BY company ORDER BY jobs DESC, company ASC
-  `).all() as Record<string, unknown>[];
-  return rows.map((row) => ({
-    name: String(row.company),
-    jobs: Number(row.jobs),
-    average_salary: row.average_salary == null ? null : Number(row.average_salary),
-    locations: String(row.locations ?? "").split(",").filter(Boolean),
-    sources: String(row.sources ?? "").split(",").filter(Boolean)
-  }));
+  const companies = new Map<string, { jobs: number; salaries: number[]; locations: Set<string>; sources: Set<string> }>();
+  for (const job of listJobs()) {
+    const company = companies.get(job.company) ?? { jobs: 0, salaries: [], locations: new Set<string>(), sources: new Set<string>() };
+    company.jobs += 1;
+    if (job.salary_min != null) company.salaries.push(job.salary_min);
+    if (job.location) company.locations.add(job.location);
+    if (job.source) company.sources.add(job.source);
+    companies.set(job.company, company);
+  }
+  return [...companies.entries()].map(([name, company]) => ({
+    name,
+    jobs: company.jobs,
+    average_salary: company.salaries.length ? company.salaries.reduce((sum, salary) => sum + salary, 0) / company.salaries.length : null,
+    locations: [...company.locations],
+    sources: [...company.sources]
+  })).sort((left, right) => right.jobs - left.jobs || left.name.localeCompare(right.name));
 }
 
 export function getBootstrap(projectId = "busca-emprego") {
@@ -1436,18 +1438,22 @@ export function resolveFieldConflict(conflictId: string, choice: "current" | "ca
 export function seedDemo() {
   const count = Number((db.prepare("SELECT COUNT(*) AS count FROM jobs").get() as { count: number }).count);
   if (count > 0) return;
+  const timestamp = now();
   const demo = [
-    { id: "demo-01", title: "Vaga demonstrativa 01", company: "Empresa confidencial", location: "Brasil", work_model: "Não informado", seniority: "Não informado", source: "Demonstração", match_score: 0, status: "found" as JobStatus, opening_status: "unknown" as const, description: "Registro fictício usado apenas para demonstrar a interface." },
-    { id: "demo-02", title: "Vaga demonstrativa 02", company: "Empresa confidencial", location: "Brasil", work_model: "Não informado", seniority: "Não informado", source: "Demonstração", match_score: 0, status: "validation" as JobStatus, opening_status: "unknown" as const, description: "Registro fictício usado apenas para demonstrar a interface." },
-    { id: "demo-03", title: "Vaga demonstrativa 03", company: "Empresa confidencial", location: "Brasil", work_model: "Não informado", seniority: "Não informado", source: "Demonstração", match_score: 0, status: "review" as JobStatus, opening_status: "unknown" as const, description: "Registro fictício usado apenas para demonstrar a interface." }
+    { id: "demo-01", title: "Analista de dados", company: "Empresa confidencial A", location: "São Paulo, SP", latitude: -23.5505, longitude: -46.6333, work_model: "Híbrido", seniority: "Pleno", source: "Portal demonstrativo", salary_min: 9_000, salary_max: 12_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-01", salary_checked_at: timestamp, match_score: 88, status: "resume_approved" as JobStatus, opening_status: "open" as const, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." },
+    { id: "demo-02", title: "Especialista em operações", company: "Empresa confidencial B", location: "Rio de Janeiro, RJ", latitude: -22.9068, longitude: -43.1729, work_model: "Remoto", seniority: "Sênior", source: "Site demonstrativo", salary_min: 11_000, salary_max: 15_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-02", salary_checked_at: timestamp, match_score: 84, status: "strong_match" as JobStatus, opening_status: "open" as const, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." },
+    { id: "demo-03", title: "Coordenador de projetos", company: "Empresa confidencial C", location: "Curitiba, PR", latitude: -25.4284, longitude: -49.2733, work_model: "Presencial", seniority: "Sênior", source: "Agregador demonstrativo", salary_min: 8_000, salary_max: 10_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-03", salary_checked_at: timestamp, match_score: 71, status: "review" as JobStatus, opening_status: "closed" as const, closed_at: timestamp, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." }
   ];
   for (const job of demo) {
-    upsertJob({ ...job, country: "Brasil", salary_source_url: "", source_url: "", application_url: "", currency: "BRL", posted_at: null });
+    upsertJob({ ...job, country: "Brasil", source_url: `https://example.invalid/${job.id}`, application_url: "", currency: "BRL", posted_at: null });
+    db.prepare("UPDATE jobs SET status=? WHERE id=?").run(job.status, job.id);
   }
   db.prepare("UPDATE jobs SET decision = 'interested', status = 'selected' WHERE id = 'demo-01'").run();
   createResume({ id: "demo-resume", job_id: "demo-01", title: "Currículo demonstrativo", status: "draft", content: "Conteúdo fictício para demonstração.", keywords: [], changes: [] });
   db.prepare("UPDATE resumes SET status = 'approved' WHERE id = 'demo-resume'").run();
   db.prepare("UPDATE jobs SET decision = 'interested', status = 'resume_approved' WHERE id = 'demo-01'").run();
   createApplication({ id: "demo-application", job_id: "demo-01", resume_id: "demo-resume", status: "queued", automation_mode: "manual", current_step: "Exemplo do fluxo manual", notes: "Registro fictício." });
+  selectManualApplication("demo-application");
+  updateApplication("demo-application", { status: "submitted", submitted_at: timestamp });
   recordAgentRun({ id: "demo-run", agent_name: "Radar de demonstração", status: "completed", started_at: new Date(Date.now() - 3600_000).toISOString(), found_count: 5, message: "Dados locais demonstrativos carregados." });
 }

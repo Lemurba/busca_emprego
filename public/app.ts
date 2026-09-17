@@ -68,14 +68,19 @@ const statusColumns = [
 ];
 const movableStatusValues = ["found", "validation", "strong_match", "review"];
 const movableColumns = statusColumns.filter((column) => movableStatusValues.includes(column.statuses[0]));
+type VisualFilter = { type: "source" | "status" | "lifecycle" | "location" | "job"; value: string; label: string };
 
 const state = {
   page: "overview",
   data: null as Data | null,
   filters: { query: "", source: "all", lifecycle: "all" },
+  visualFilter: null as VisualFilter | null,
   selectedJobId: null as string | null,
+  mapExpanded: false,
   modalOpen: false
 };
+let activeMap: any = null;
+const activeMapMarkers = new Map<string, any>();
 
 function setTheme(theme: "light" | "dark") {
   document.body.dataset.theme = theme;
@@ -152,14 +157,69 @@ function relativeApplication(job: Job) {
   return `Candidatado há ${days} dias`;
 }
 
-function chartBars(entries: [string, number][], color = "") {
+function chartBars(entries: [string, number][], type: VisualFilter["type"], color = "", labels: Record<string, string> = {}) {
   if (!entries.length) return `<div class="empty-state"><div><strong>Sem dados ainda</strong><span>As fontes aparecerão quando novas vagas entrarem.</span></div></div>`;
   const max = Math.max(...entries.map(([, value]) => value), 1);
-  return `<div class="bar-list">${entries.slice(0, 6).map(([label, value]) => `<div class="bar-row"><span title="${escapeHtml(label)}">${escapeHtml(label)}</span><div class="bar-track"><div class="bar-fill ${color}" style="width:${Math.max(5, Math.round(value / max * 100))}%"></div></div><strong>${value}</strong></div>`).join("")}</div>`;
+  return `<div class="bar-list" role="list">${entries.slice(0, 8).map(([label, value]) => {
+    const displayLabel = labels[label] ?? label;
+    const selected = state.visualFilter?.type === type && state.visualFilter.value === label;
+    const percentage = Math.round(value / Math.max(entries.reduce((sum, [, count]) => sum + count, 0), 1) * 100);
+    return `<button class="bar-row chart-control ${selected ? "selected" : ""}" type="button" role="listitem" data-chart-filter-type="${type}" data-chart-filter-value="${escapeHtml(label)}" data-chart-filter-label="${escapeHtml(displayLabel)}" data-tooltip="${escapeHtml(`${displayLabel}: ${value} vaga${value === 1 ? "" : "s"} (${percentage}%)`)}" aria-pressed="${selected}"><span>${escapeHtml(displayLabel)}</span><progress class="bar-track ${color}" value="${value}" max="${max}" aria-hidden="true"></progress><strong>${value}</strong></button>`;
+  }).join("")}</div>`;
 }
 
-function pageHeading(eyebrow: string, title: string, subtitle: string, actions = "") {
-  return `<div class="page-heading"><div><p class="eyebrow">${escapeHtml(eyebrow)}</p><h1>${escapeHtml(title)}</h1><p class="subtitle">${escapeHtml(subtitle)}</p></div>${actions ? `<div class="button-row">${actions}</div>` : ""}</div>`;
+const lifecycleSeries = [
+  { value: "open", label: "Abertas", color: "var(--teal)" },
+  { value: "unknown", label: "A confirmar", color: "var(--orange)" },
+  { value: "applied", label: "Candidatadas", color: "var(--purple)" },
+  { value: "lost", label: "Perdidas", color: "var(--red)" },
+  { value: "not_interested", label: "Sem interesse", color: "#8a96aa" }
+];
+
+function donutChart(data: Data) {
+  const total = Math.max(data.jobs.length, 1);
+  let offset = 0;
+  const segments = lifecycleSeries.map((item) => {
+    const count = data.jobs.filter((job) => job.lifecycle === item.value).length;
+    const size = count / total * 100;
+    const selected = state.visualFilter?.type === "lifecycle" && state.visualFilter.value === item.value;
+    const segment = count ? `<circle class="donut-segment ${selected ? "selected" : ""}" cx="50" cy="50" r="42" pathLength="100" fill="none" stroke="${item.color}" stroke-width="16" stroke-dasharray="${size} ${100 - size}" stroke-dashoffset="${-offset}" tabindex="0" role="button" aria-pressed="${selected}" aria-label="${escapeHtml(`${item.label}: ${count} vaga${count === 1 ? "" : "s"}`)}" data-chart-filter-type="lifecycle" data-chart-filter-value="${item.value}" data-chart-filter-label="${escapeHtml(item.label)}"><title>${escapeHtml(`${item.label}: ${count} (${Math.round(size)}%)`)}</title></circle>` : "";
+    offset += size;
+    return segment;
+  }).join("");
+  return `<div class="donut-layout"><div class="donut-wrap"><svg class="donut-chart" viewBox="0 0 100 100" aria-label="Distribuição das vagas por situação"><circle class="donut-track" cx="50" cy="50" r="42" pathLength="100" fill="none" stroke-width="16"></circle>${segments}<text x="50" y="48" text-anchor="middle" class="donut-total">${data.jobs.length}</text><text x="50" y="60" text-anchor="middle" class="donut-caption">vagas</text></svg></div><div class="donut-legend">${lifecycleSeries.map((item, index) => { const count = data.jobs.filter((job) => job.lifecycle === item.value).length; const selected = state.visualFilter?.type === "lifecycle" && state.visualFilter.value === item.value; return `<button class="legend-item chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="lifecycle" data-chart-filter-value="${item.value}" data-chart-filter-label="${escapeHtml(item.label)}" aria-pressed="${selected}" data-tooltip="${escapeHtml(`${item.label}: ${count} vaga${count === 1 ? "" : "s"}`)}"><i class="legend-dot legend-dot-${index}"></i><span><strong>${count}</strong>${escapeHtml(item.label)}</span></button>`; }).join("")}</div></div>`;
+}
+
+function salaryChart(jobs: Job[]) {
+  const salaryJobs = jobs.filter((job) => job.salary_min != null || job.salary_max != null).sort((a, b) => (b.salary_max ?? b.salary_min ?? 0) - (a.salary_max ?? a.salary_min ?? 0)).slice(0, 8);
+  if (!salaryJobs.length) return `<div class="empty-state"><div><strong>Sem salários registrados</strong><span>Valores aparecem somente quando possuem fonte verificável.</span></div></div>`;
+  const max = Math.max(...salaryJobs.map((job) => job.salary_max ?? job.salary_min ?? 0), 1);
+  return `<div class="salary-chart" role="list" aria-label="Faixas salariais por vaga">${salaryJobs.map((job) => {
+    const minimum = job.salary_min ?? job.salary_max ?? 0;
+    const maximum = job.salary_max ?? job.salary_min ?? 0;
+    const height = Math.max(12, Math.round(maximum / max * 100));
+    const minimumHeight = Math.round(minimum / max * 100);
+    const selected = state.visualFilter?.type === "job" && state.visualFilter.value === job.id;
+    return `<button class="salary-column chart-control ${selected ? "selected" : ""}" type="button" role="listitem" data-chart-filter-type="job" data-chart-filter-value="${escapeHtml(job.id)}" data-chart-filter-label="${escapeHtml(job.title)}" data-tooltip="${escapeHtml(`${job.title}: ${salaryLabel(job)}`)}" aria-pressed="${selected}"><span class="salary-value">${escapeHtml(formatMoney(maximum, job.currency))}</span><svg class="salary-plot" viewBox="0 0 40 100" preserveAspectRatio="none" aria-hidden="true"><rect class="salary-range" x="14" y="${100 - height}" width="12" height="${height}" rx="3"></rect><line class="salary-min-marker" x1="11" x2="29" y1="${100 - minimumHeight}" y2="${100 - minimumHeight}"></line></svg><span class="salary-label">${escapeHtml(job.company)}</span></button>`;
+  }).join("")}</div>`;
+}
+
+function visualFilteredJobs(data: Data) {
+  const filter = state.visualFilter;
+  if (!filter) return data.jobs;
+  if (filter.type === "job") return data.jobs.filter((job) => job.id === filter.value);
+  return data.jobs.filter((job) => String(job[filter.type]) === filter.value);
+}
+
+function visualFilterSummary(data: Data) {
+  const filter = state.visualFilter;
+  if (!filter) return "";
+  const count = visualFilteredJobs(data).length;
+  return `<div class="chart-filter-summary" role="status"><span><strong>${escapeHtml(filter.label)}</strong> · ${count} de ${data.jobs.length} vaga${data.jobs.length === 1 ? "" : "s"} no mapa</span><button type="button" class="text-button" data-clear-chart-filter>Limpar filtro</button></div>`;
+}
+
+function pageHeading(_eyebrow: string, title: string, subtitle: string, actions = "") {
+  return `<div class="page-heading"><div><h1>${escapeHtml(title)}</h1><p class="subtitle">${escapeHtml(subtitle)}</p></div>${actions ? `<div class="button-row">${actions}</div>` : ""}</div>`;
 }
 
 function metric(label: string, value: string | number, note: string, icon: string, highlight = false) {
@@ -180,7 +240,7 @@ function jobCard(job: Job) {
 }
 
 function mapMarkup(_jobs: Job[]) {
-  return `<div id="opportunities-map" class="map-canvas" role="img" aria-label="Mapa interativo das vagas"></div>`;
+  return `<div id="opportunities-map" class="map-canvas" role="region" tabindex="0" aria-label="Mapa interativo das vagas"></div>`;
 }
 
 function initializeMap(data: Data) {
@@ -188,24 +248,77 @@ function initializeMap(data: Data) {
   if (!container) return;
   const leaflet = (window as any).L;
   if (!leaflet) { container.textContent = "Mapa indisponível: verifique a conexão com a internet."; return; }
+  activeMap?.remove();
+  activeMapMarkers.clear();
   const map = leaflet.map(container, { scrollWheelZoom: false }).setView([-14.235, -51.925], 4);
-  leaflet.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  activeMap = map;
+  leaflet.tileLayer("https://tile.openstreetmap.de/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap contributors</a>"
   }).addTo(map);
-  const located = data.jobs.filter((job) => job.latitude != null && job.longitude != null && Number.isFinite(job.latitude) && Number.isFinite(job.longitude) && Math.abs(job.latitude) <= 90 && Math.abs(job.longitude) <= 180);
+  const located = visualFilteredJobs(data).filter((job) => job.latitude != null && job.longitude != null && Number.isFinite(job.latitude) && Number.isFinite(job.longitude) && Math.abs(job.latitude) <= 90 && Math.abs(job.longitude) <= 180);
   const bounds: number[][] = [];
   for (const job of located) {
     const color = job.lifecycle === "lost" ? "#e96e72" : job.lifecycle === "applied" ? "#8b82ef" : "#209f9d";
     const point: [number, number] = [job.latitude as number, job.longitude as number];
-    leaflet.circleMarker(point, { radius: 7, color, fillColor: color, fillOpacity: 0.85, weight: 2 }).addTo(map)
-      .bindPopup(`<strong>${escapeHtml(job.title)}</strong><br>${escapeHtml(job.company)} · ${escapeHtml(job.location)}`);
+    const marker = leaflet.circleMarker(point, { radius: state.selectedJobId === job.id ? 10 : 7, color, fillColor: color, fillOpacity: 0.9, weight: state.selectedJobId === job.id ? 4 : 2 }).addTo(map)
+      .bindPopup(`<strong>${escapeHtml(job.title)}</strong><br>${escapeHtml(job.company)} · ${escapeHtml(job.location)}<br><button class="map-popup-action" data-detail="${escapeHtml(job.id)}">Abrir vaga</button>`);
+    marker.on("click", () => { state.selectedJobId = job.id; });
+    activeMapMarkers.set(job.id, marker);
     bounds.push(point);
   }
   if (bounds.length > 1) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 12 });
   else if (bounds.length === 1) map.setView(bounds[0], 10);
-  else container.setAttribute("aria-label", "Mapa do Brasil. Informe latitude e longitude nas vagas para incluir marcadores.");
+  else {
+    container.setAttribute("aria-label", "Nenhuma vaga com coordenadas corresponde ao filtro atual.");
+    leaflet.popup().setLatLng([-14.235, -51.925]).setContent("Nenhuma vaga com coordenadas neste filtro.").openOn(map);
+  }
+  if (state.selectedJobId && activeMapMarkers.has(state.selectedJobId)) {
+    const marker = activeMapMarkers.get(state.selectedJobId);
+    map.setView(marker.getLatLng(), 11);
+    marker.openPopup();
+  }
   window.setTimeout(() => map.invalidateSize(), 0);
+}
+
+function focusMapJob(jobId: string) {
+  const job = currentData().jobs.find((item) => item.id === jobId);
+  if (!job || job.latitude == null || job.longitude == null) { toast("Esta vaga ainda não possui coordenadas para exibir no mapa.", true); return; }
+  state.selectedJobId = jobId;
+  const marker = activeMapMarkers.get(jobId);
+  if (marker && activeMap) {
+    activeMap.flyTo(marker.getLatLng(), 11, { duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.45 });
+    marker.openPopup();
+    document.getElementById("opportunities-map")?.focus({ preventScroll: true });
+  }
+}
+
+function mapPanel(data: Data) {
+  const filtered = visualFilteredJobs(data);
+  const locations = Object.entries(filtered.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {}));
+  return `${visualFilterSummary(data)}<div class="map-wrap">${mapMarkup(filtered)}<div class="map-context"><div class="location-list">${locations.slice(0, 5).map(([location, count]) => { const selected = state.visualFilter?.type === "location" && state.visualFilter.value === location; return `<button class="location-row chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="location" data-chart-filter-value="${escapeHtml(location)}" data-chart-filter-label="${escapeHtml(location)}" aria-pressed="${selected}"><span>${escapeHtml(location)}</span><strong>${count}</strong></button>`; }).join("")}</div><div class="map-job-list">${filtered.slice(0, 6).map((job) => `<button type="button" class="map-job ${state.selectedJobId === job.id ? "selected" : ""}" data-map-job="${escapeHtml(job.id)}" ${job.latitude == null || job.longitude == null ? "disabled" : ""}><span>${escapeHtml(job.title)}</span><small>${escapeHtml(job.company)} · ${escapeHtml(job.location)}</small></button>`).join("") || `<p class="map-caption">Nenhuma vaga corresponde ao filtro.</p>`}</div><p class="map-caption">Selecione uma vaga para centralizar o mapa. Marcadores exigem latitude e longitude.</p></div></div>`;
+}
+
+function mapHeader(title = "Mapa de oportunidades") {
+  return `<div class="map-panel-head"><div><h2>${escapeHtml(title)}</h2><p>Clique no mapa para ampliar. Gráficos e vagas compartilham o mesmo filtro.</p></div><button class="secondary-button map-expand-button" type="button" data-expand-map aria-pressed="${state.mapExpanded}">${state.mapExpanded ? "Reduzir mapa" : "Expandir mapa"}</button></div>`;
+}
+
+function setMapExpanded(expanded: boolean) {
+  state.mapExpanded = expanded;
+  const apply = () => {
+    document.body.classList.toggle("map-expanded", expanded);
+    const shell = document.querySelector<HTMLElement>(".map-shell");
+    shell?.classList.toggle("is-expanded", expanded);
+    const button = shell?.querySelector<HTMLElement>("[data-expand-map]");
+    if (button) {
+      button.textContent = expanded ? "Reduzir mapa" : "Expandir mapa";
+      button.setAttribute("aria-pressed", String(expanded));
+    }
+    window.setTimeout(() => activeMap?.invalidateSize(), 220);
+  };
+  const transition = (document as Document & { startViewTransition?: (callback: () => void) => void }).startViewTransition;
+  if (transition && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) transition.call(document, apply);
+  else apply();
 }
 
 function currentData() {
@@ -216,20 +329,18 @@ function currentData() {
 function renderOverview(data: Data) {
   const stats = data.stats;
   const sourceEntries = Object.entries(stats.sources ?? {}) as [string, number][];
-  const locationEntries = Object.entries(stats.locations ?? {}) as [string, number][];
   const urgent = data.jobs.filter((job) => job.is_open && !job.application_date && (daysUntil(job.deadline_at) ?? 99) <= 7).sort((a, b) => (daysUntil(a.deadline_at) ?? 99) - (daysUntil(b.deadline_at) ?? 99));
-  const lastRun = data.agentRuns[0];
   return `${pageHeading("Radar de vagas", "Seu painel", "Oportunidades, currículos e candidaturas em um só lugar.", `<button class="secondary-button" data-page="analytics">Ver análises</button><button class="primary-button" data-action="add-job">＋ Adicionar vaga</button>`)}
     <div class="metric-grid">${metric("Vagas abertas", stats.openVacancies ?? 0, "Aguardando avaliação", "⌕", true)}${metric("Matches fortes", stats.strongMatches ?? 0, "Score acima de 80%", "✦")}${metric("Candidaturas", stats.applied ?? 0, "Com data registrada", "✓")}${metric("Vagas perdidas", stats.lost ?? 0, "Prazo encerrado sem envio", "! ")}</div>
     <div class="section-head"><div><h2>Panorama do radar</h2><p>Onde estão as oportunidades e de quais fontes elas vieram.</p></div><button class="text-button" data-page="jobs">Ver todas as vagas →</button></div>
-    <div class="dashboard-grid"><section class="panel chart-panel"><div class="section-head" style="margin-top:0"><div><h2>Fontes de descoberta</h2><p>Distribuição das vagas registradas</p></div><span class="chip teal">${data.jobs.length} total</span></div>${chartBars(sourceEntries)}</section>
-      <section class="panel chart-panel"><div class="section-head" style="margin-top:0"><div><h2>Pipeline atual</h2><p>Fluxo de decisão</p></div></div><div class="donut-layout"><div class="donut" data-total="${data.jobs.length}"></div><div class="donut-legend"><div class="legend-item"><i class="legend-dot" style="background:var(--teal)"></i><span><strong>${stats.openVacancies ?? 0}</strong> Abertas</span></div><div class="legend-item"><i class="legend-dot" style="background:var(--purple)"></i><span><strong>${stats.applied ?? 0}</strong> Candidatadas</span></div><div class="legend-item"><i class="legend-dot" style="background:var(--red)"></i><span><strong>${stats.lost ?? 0}</strong> Perdidas</span></div></div></div></section></div>
+    <div class="dashboard-grid"><section class="panel chart-panel"><div class="section-head flush"><div><h2>Fontes de descoberta</h2><p>Clique numa barra para filtrar mapa e vagas</p></div><span class="chip teal">${data.jobs.length} total</span></div>${chartBars(sourceEntries, "source")}</section>
+      <section class="panel chart-panel"><div class="section-head flush"><div><h2>Situação das vagas</h2><p>Dados calculados em tempo real</p></div></div>${donutChart(data)}</section></div>
     <div class="section-head"><div><h2>Prazos que merecem atenção</h2><p>Vagas abertas sem candidatura e próximas do encerramento.</p></div></div>
     <section class="panel">${urgent.length ? `<div class="deadline-list">${urgent.slice(0, 4).map((job) => `<div class="deadline-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · ${escapeHtml(job.location)}</span></div><span class="deadline-tag">${escapeHtml(deadlineText(job))}</span><button class="secondary-button" data-detail="${escapeHtml(job.id)}">Abrir</button></div>`).join("")}</div>` : `<div class="empty-state"><div><strong>Nenhum prazo crítico</strong><span>O radar está tranquilo por enquanto.</span></div></div>`}</section>
     <div class="section-head"><div><h2>Distribuição geográfica</h2><p>Localização das vagas encontradas no radar.</p></div></div>
-    <div class="dashboard-grid equal"><section class="panel map-panel"><div class="section-head" style="margin-top:0"><div><h2>Mapa de oportunidades</h2><p>Mapa real com coordenadas informadas nas vagas</p></div></div><div class="map-wrap">${mapMarkup(data.jobs)}<div><div class="location-list">${locationEntries.slice(0, 5).map(([location, count]) => `<div class="location-row"><span>${escapeHtml(location)}</span><strong>${count}</strong></div>`).join("")}</div><p class="map-caption">Os marcadores aparecem quando a vaga inclui latitude e longitude. O mapa usa OpenStreetMap.</p></div></div></section>
-      <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Atividade dos agentes</h2><p>Últimas sincronizações recebidas</p></div><button class="text-button" data-page="settings">Configurar</button></div><div class="activity-list">${data.agentRuns.slice(0, 4).map((run) => `<div class="activity-item"><i></i><div><strong>${escapeHtml(run.agent_name)}</strong><span>${escapeHtml(run.message || `${run.found_count} vagas processadas`)}</span></div><time>${escapeHtml(formatShortDate(run.finished_at || run.started_at))}</time></div>`).join("") || `<div class="empty-state"><div><strong>Aguardando agentes</strong><span>Eventos do Hermes aparecerão aqui.</span></div></div>`}</div></section></div>
-    <div class="notice warning" style="margin-top:18px"><span>ⓘ</span><div><strong>Fontes e confirmação.</strong> Salários exibidos precisam de URL e data de verificação. Glassdoor entra por fonte autorizada, API ou registro manual; o painel não faz scraping da plataforma.</div></div>`;
+    <div class="dashboard-grid equal"><section class="panel map-panel map-shell">${mapHeader()}${mapPanel(data)}</section>
+      <section class="panel"><div class="section-head flush"><div><h2>Atividade dos agentes</h2><p>Últimas sincronizações recebidas</p></div><button class="text-button" data-page="settings">Configurar</button></div><div class="activity-list">${data.agentRuns.slice(0, 4).map((run) => `<div class="activity-item"><i></i><div><strong>${escapeHtml(run.agent_name)}</strong><span>${escapeHtml(run.message || `${run.found_count} vagas processadas`)}</span></div><time>${escapeHtml(formatShortDate(run.finished_at || run.started_at))}</time></div>`).join("") || `<div class="empty-state"><div><strong>Aguardando agentes</strong><span>Eventos do Hermes aparecerão aqui.</span></div></div>`}</div></section></div>
+    <div class="notice warning notice-spaced"><span>ⓘ</span><div><strong>Fontes e confirmação.</strong> Salários exibidos precisam de URL e data de verificação. Glassdoor entra por fonte autorizada, API ou registro manual; o painel não faz scraping da plataforma.</div></div>`;
 }
 
 function renderBoard(data: Data) {
@@ -273,11 +384,11 @@ function renderApplications(data: Data) {
 function renderResumes(data: Data) {
   const jobs = new Map(data.jobs.map((job) => [job.id, job]));
   return `${pageHeading("Preparação", "Currículos ATS", "Revise o conteúdo adaptado à vaga, confira as mudanças e aprove antes de qualquer envio.", `<button class="secondary-button" data-page="jobs">Escolher uma vaga</button>`)}
-    <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Biblioteca de currículos-base</h2><p>Envie PDFs, escolha qual será usado nas próximas adaptações e baixe uma cópia.</p></div></div>
+    <section class="panel"><div class="section-head flush"><div><h2>Biblioteca de currículos-base</h2><p>Envie PDFs, escolha qual será usado nas próximas adaptações e baixe uma cópia.</p></div></div>
       <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
       <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "orange"}">${resume.is_base ? "Base selecionada" : "Biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="/api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para iniciar a adaptação por vaga.</span></div></div>`}</div></section>
     <div class="notice"><span>▤</span><div><strong>Revisão humana obrigatória.</strong> A aprovação do currículo só libera a escolha entre candidatura manual e autorização automática específica por vaga.</div></div>
-    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const status = resume.status === "approved" ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · v${escapeHtml(resume.version)}</p></div><span class="status-pill ${resume.status === "approved" ? "teal" : "orange"}">${status}</span></div><div class="progress"><span style="width:${resume.status === "approved" ? 100 : 72}%"></span></div><p>${escapeHtml(resume.status === "approved" ? "Pronto para a etapa de candidatura." : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugestões de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga para criar o primeiro rascunho ATS.</span></div></div>`}</div>`;
+    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const status = resume.status === "approved" ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · v${escapeHtml(resume.version)}</p></div><span class="status-pill ${resume.status === "approved" ? "teal" : "orange"}">${status}</span></div><div class="progress"><span class="${resume.status === "approved" ? "complete" : "review"}"></span></div><p>${escapeHtml(resume.status === "approved" ? "Pronto para a etapa de candidatura." : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugestões de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga para criar o primeiro rascunho ATS.</span></div></div>`}</div>`;
 }
 
 function renderCompanies(data: Data) {
@@ -286,14 +397,14 @@ function renderCompanies(data: Data) {
 }
 
 function renderAnalytics(data: Data) {
-  const salaryJobs = data.jobs.filter((job) => job.salary_min != null).sort((a, b) => (b.salary_min ?? 0) - (a.salary_min ?? 0));
-  const maxSalary = Math.max(...salaryJobs.map((job) => job.salary_max ?? job.salary_min ?? 0), 1);
-  const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [statusLabels[key] ?? key, Number(value)]);
+  const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [key, Number(value)]);
   return `${pageHeading("Inteligência", "Análises do radar", "Use os dados acumulados para entender onde estão os melhores matches e quais prazos estão escapando.", `<button class="secondary-button" data-page="jobs">Voltar para vagas</button>`)}
-    <div class="dashboard-grid equal"><section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Faixas salariais</h2><p>Valor mínimo e máximo informado por vaga</p></div></div><div class="analytics-chart">${salaryJobs.slice(0, 8).map((job) => `<div class="vbar"><strong>${escapeHtml(formatMoney(job.salary_min, job.currency).replace("R$", "R$ "))}</strong><div class="vbar-fill" style="height:${Math.max(8, Math.round((job.salary_max ?? job.salary_min ?? 0) / maxSalary * 100))}%"></div><label title="${escapeHtml(job.title)}">${escapeHtml(job.company.slice(0, 11))}</label></div>`).join("") || `<div class="empty-state"><div><strong>Sem salários registrados</strong></div></div>`}</div><div class="notice" style="margin-top:16px;margin-bottom:0"><span>ⓘ</span><div>O valor médio atual é <strong>${escapeHtml(data.stats.averageSalary == null ? "não informado" : formatMoney(data.stats.averageSalary))}</strong>. Cada número deve manter sua fonte e data de verificação.</div></div></section>
-      <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Etapas do pipeline</h2><p>Distribuição no quadro de trabalho</p></div></div>${chartBars(statusEntries, "purple")}</section></div>
-    <div class="section-head"><div><h2>Mapa e cobertura</h2><p>Concentração geográfica das oportunidades recebidas.</p></div></div><section class="panel map-panel"><div class="map-wrap">${mapMarkup(data.jobs)}<div><div class="location-list">${(Object.entries(data.stats.locations ?? {}) as [string, number][]).map(([location, count]) => `<div class="location-row"><span>${escapeHtml(location)}</span><strong>${count}</strong></div>`).join("")}</div><p class="map-caption">Os marcadores usam as coordenadas registradas em cada vaga; OpenStreetMap fornece o mapa-base.</p></div></div></section>
-    <div class="section-head"><div><h2>Leituras rápidas</h2></div></div><div class="insight-list"><div class="insight"><span class="insight-icon">↗</span><p><strong>${escapeHtml(data.stats.strongMatches ?? 0)} matches fortes</strong> estão acima de 80% de aderência ao perfil.</p></div><div class="insight"><span class="insight-icon">⌛</span><p><strong>${escapeHtml(data.stats.lost ?? 0)} vagas perdidas</strong> foram fechadas sem candidatura enviada; use os prazos críticos no início do dia.</p></div><div class="insight"><span class="insight-icon">◎</span><p><strong>${escapeHtml(data.companies.length)} empresas</strong> aparecem na amostra atual, com ${escapeHtml(data.jobs.filter((job) => job.salary_min != null).length)} vagas contendo faixa salarial.</p></div></div>`;
+    <div class="analytics-content"><section class="panel analytics-studio"><div class="analytics-studio-head"><div><h2>Painel analítico</h2><p>Todos os gráficos usam o mesmo conjunto de ${data.jobs.length} vagas e controlam o mapa.</p></div><div class="analytics-pulse" aria-label="Resumo dos dados"><span><strong>${escapeHtml(data.stats.strongMatches ?? 0)}</strong> matches fortes</span><span><strong>${escapeHtml(data.stats.applied ?? 0)}</strong> candidaturas</span><span><strong>${escapeHtml(data.companies.length)}</strong> empresas</span></div></div>
+      <div class="analytics-chart-grid"><div class="analytics-block salary-block"><div class="section-head flush"><div><h3>Faixas salariais</h3><p>Passe o cursor para detalhes; clique para localizar a vaga.</p></div></div>${salaryChart(data.jobs)}<p class="chart-note">Média mínima <strong>${escapeHtml(data.stats.averageSalary == null ? "não informada" : formatMoney(data.stats.averageSalary))}</strong> · valores com fonte e data de verificação.</p></div>
+      <div class="analytics-block pipeline-block"><div class="section-head flush"><div><h3>Etapas do pipeline</h3><p>Clique numa barra para filtrar mapa e vagas.</p></div></div>${chartBars(statusEntries, "status", "purple", statusLabels)}</div>
+      <div class="analytics-block distribution-block"><div class="section-head flush"><div><h3>Situação das vagas</h3><p>Totais consistentes em todos os painéis.</p></div></div>${donutChart(data)}</div></div></section>
+    <section class="panel map-panel map-shell">${mapHeader("Cobertura geográfica")}${mapPanel(data)}</section>
+    <div class="analytics-insights" aria-label="Leituras rápidas"><div class="insight"><span class="insight-icon">↗</span><p><strong>${escapeHtml(data.stats.strongMatches ?? 0)} matches fortes</strong> estão acima de 80% de aderência ao perfil.</p></div><div class="insight"><span class="insight-icon">⌛</span><p><strong>${escapeHtml(data.stats.lost ?? 0)} vagas perdidas</strong> fecharam sem candidatura enviada.</p></div><div class="insight"><span class="insight-icon">◎</span><p><strong>${escapeHtml(data.jobs.filter((job) => job.salary_min != null).length)} vagas</strong> possuem faixa salarial verificável.</p></div></div></div>`;
 }
 
 function renderAgents(data: Data) {
@@ -312,17 +423,24 @@ function renderAgents(data: Data) {
 function renderSettings(data: Data) {
   const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(source.source_type)}</td><td>${escapeHtml(source.auth_strategy)}</td><td><span class="status-pill ${source.enabled ? "teal" : "red"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}">Editar</button></td></tr>`).join("");
   return `${pageHeading("Sistema", "Configurações", "Preferências do workspace e pontos de integração com o Hermes Agent.")}
-    <div class="dashboard-grid equal"><section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Perfil de busca</h2><p>Configuração privada do workspace</p></div><span class="chip teal">Local</span></div><p>O perfil e os critérios de busca devem ser configurados no Hermes. Nenhum nome ou preferência pessoal fica embutido nesta aplicação.</p></section>
-      <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Fontes e credenciais</h2><p>Segredos permanecem no Hermes</p></div><button class="primary-button" data-action="add-source">＋ Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Autorização</th><th>Estado</th><th></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section></div>
+    <div class="dashboard-grid equal"><section class="panel"><div class="section-head flush"><div><h2>Perfil de busca</h2><p>Configuração privada do workspace</p></div><span class="chip teal">Local</span></div><p>O perfil e os critérios de busca devem ser configurados no Hermes. Nenhum nome ou preferência pessoal fica embutido nesta aplicação.</p></section>
+      <section class="panel"><div class="section-head flush"><div><h2>Fontes e credenciais</h2><p>Segredos permanecem no Hermes</p></div><button class="primary-button" data-action="add-source">＋ Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Autorização</th><th>Estado</th><th></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section></div>
     <div class="section-head"><div><h2>Contrato de eventos para o Hermes</h2><p>O dashboard recebe descobertas e enriquecimentos identificados; o executor consulta a fila autorizada separadamente.</p></div></div><section class="panel"><code class="code-note">POST /api/agent-events\n\n{\n  "event": "job.discovered",\n  "agent_id": "...",\n  "job": {\n    "title": "...", "company": "...",\n    "source": "portal autorizado",\n    "source_url": "https://...",\n    "linkedin_post_url": "https://...",\n    "job_url": "https://...",\n    "description": "...", "benefits": "..."\n  }\n}\n\njob.updated exige evidence_source_url e respeita os campos editáveis do agente.\nGET /api/authorized-applications — somente itens autorizados para candidatura</code></section>
-    <div class="notice warning" style="margin-top:18px"><span>!</span><div><strong>Autorização separada por vaga.</strong> Aprovar o currículo não autoriza candidatura automática. O modo automático exige confirmação escrita para uma vaga e uma versão específica do currículo. A integração Hermes/Browser Harness consome a fila autorizada; sem um executor configurado, nenhum envio é realizado.</div></div>`;
+    <div class="notice warning notice-spaced"><span>!</span><div><strong>Autorização separada por vaga.</strong> Aprovar o currículo não autoriza candidatura automática. O modo automático exige confirmação escrita para uma vaga e uma versão específica do currículo. A integração Hermes/Browser Harness consome a fila autorizada; sem um executor configurado, nenhum envio é realizado.</div></div>`;
 }
 
 function render() {
   if (!state.data) return;
   const data = state.data;
   const pages: Record<string, () => string> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), agents: () => renderAgents(data), settings: () => renderSettings(data) };
+  activeMap?.remove();
+  activeMap = null;
+  activeMapMarkers.clear();
   view().innerHTML = pages[state.page]?.() ?? renderOverview(data);
+  const mapShell = view().querySelector<HTMLElement>(".map-shell");
+  if (!mapShell) state.mapExpanded = false;
+  mapShell?.classList.toggle("is-expanded", state.mapExpanded);
+  document.body.classList.toggle("map-expanded", state.mapExpanded && Boolean(mapShell));
   initializeMap(data);
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.classList.toggle("active", element.dataset.page === state.page));
   const pageTitle = document.getElementById("page-title");
@@ -509,7 +627,8 @@ function showJobDetail(id: string) {
     if (application?.status !== "in_progress") actionButtons += `<button class="secondary-button" data-action="no-time" data-job-id="${escapeHtml(job.id)}">Sem tempo agora</button><button class="secondary-button" data-action="not-interested" data-job-id="${escapeHtml(job.id)}">Não tenho interesse</button>`;
   }
   const sourceLinks = `${job.linkedin_post_url ? `<a class="secondary-button" href="${escapeHtml(job.linkedin_post_url)}" target="_blank" rel="noreferrer">Post do LinkedIn ↗</a>` : ""}${job.job_url ? `<a class="secondary-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Link da vaga ↗</a>` : ""}${job.salary_source_url ? `<a class="secondary-button" href="${escapeHtml(job.salary_source_url)}" target="_blank" rel="noreferrer">Fonte do salário ↗</a>` : ""}${job.application_url ? `<a class="secondary-button" href="${escapeHtml(job.application_url)}" target="_blank" rel="noreferrer">Candidatura ↗</a>` : ""}`;
-  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Esta vaga está marcada como perdida porque foi encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Match com o perfil</span><strong>${escapeHtml(job.match_score)}%</strong></div><div class="detail-box"><span>Estado</span><strong><span class="status-pill ${lifecycle.className}">${escapeHtml(lifecycle.label)}</span></strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)} · ${escapeHtml(formatDate(job.salary_checked_at))}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Aguardando sua decisão de interesse")}</small></div></div><div class="detail-description">${escapeHtml(job.description || "Sem descrição registrada.")}</div><div class="button-row">${sourceLinks}</div><div class="modal-actions">${resume && job.decision === "interested" && resume.status !== "approved" ? `<button class="secondary-button" data-edit-resume="${escapeHtml(resume.id)}">Editar currículo</button>` : ""}${actionButtons}</div>`);
+  const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
+  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Esta vaga está marcada como perdida porque foi encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Match com o perfil</span><strong>${escapeHtml(job.match_score)}%</strong></div><div class="detail-box"><span>Estado</span><strong><span class="status-pill ${lifecycle.className}">${escapeHtml(lifecycle.label)}</span></strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)} · ${escapeHtml(formatDate(job.salary_checked_at))}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Aguardando sua decisão de interesse")}</small></div></div><div class="detail-description">${escapeHtml(job.description || "Sem descrição registrada.")}</div><div class="button-row">${sourceLinks}${mapButton}</div><div class="modal-actions">${resume && job.decision === "interested" && resume.status !== "approved" ? `<button class="secondary-button" data-edit-resume="${escapeHtml(resume.id)}">Editar currículo</button>` : ""}${actionButtons}</div>`);
   const descriptionRoot = modalRoot().querySelector<HTMLElement>(".detail-description");
   if (descriptionRoot) {
     const enrichmentEvents = data.enrichmentEvents.filter((event) => event.job_id === job.id);
@@ -539,7 +658,7 @@ function showResumeModal(id: string) {
     ? `<option value="review" selected>Retornar para revisão</option><option value="draft">Rascunho</option>`
     : `<option value="draft" ${resume.status === "draft" ? "selected" : ""}>Rascunho</option><option value="review" ${resume.status === "review" ? "selected" : ""}>Em revisão</option>`;
   const approveButton = resume.status === "approved" ? "" : `<button type="button" class="secondary-button" data-approve-resume="${escapeHtml(resume.id)}">Aprovar após revisar</button>`;
-  openModal("Editar currículo ATS", "Salve as alterações; use aprovação separada somente depois de revisar o conteúdo.", `<form data-form="resume" data-resume-id="${escapeHtml(resume.id)}"><div class="form-grid"><div class="form-field full"><label for="resume-title">Título</label><input class="input" id="resume-title" name="title" required value="${escapeHtml(resume.title)}" /></div><div class="form-field full"><label for="resume-base">Currículo-base vinculado</label><select class="select" id="resume-base" name="base_resume_id"><option value="">Sem currículo-base</option>${baseOptions}</select></div><div class="form-field"><label for="resume-status">Status de revisão</label><select class="select" id="resume-status" name="status">${statusOptions}</select></div><div class="form-field"><label for="resume-keywords">Palavras-chave</label><input class="input" id="resume-keywords" name="keywords" value="${escapeHtml(resume.keywords.join(", "))}" /></div><div class="form-field full"><label for="resume-content">Conteúdo do currículo</label><textarea class="textarea" id="resume-content" name="content" style="min-height:240px">${escapeHtml(resume.content)}</textarea></div><div class="form-field full"><label for="resume-changes">Sugestões / alterações (uma por linha)</label><textarea class="textarea" id="resume-changes" name="changes">${escapeHtml(resume.changes.join("\n"))}</textarea></div></div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button>${approveButton}<button type="submit" class="primary-button">Salvar alterações</button></div></form>`);
+  openModal("Editar currículo ATS", "Salve as alterações; use aprovação separada somente depois de revisar o conteúdo.", `<form data-form="resume" data-resume-id="${escapeHtml(resume.id)}"><div class="form-grid"><div class="form-field full"><label for="resume-title">Título</label><input class="input" id="resume-title" name="title" required value="${escapeHtml(resume.title)}" /></div><div class="form-field full"><label for="resume-base">Currículo-base vinculado</label><select class="select" id="resume-base" name="base_resume_id"><option value="">Sem currículo-base</option>${baseOptions}</select></div><div class="form-field"><label for="resume-status">Status de revisão</label><select class="select" id="resume-status" name="status">${statusOptions}</select></div><div class="form-field"><label for="resume-keywords">Palavras-chave</label><input class="input" id="resume-keywords" name="keywords" value="${escapeHtml(resume.keywords.join(", "))}" /></div><div class="form-field full"><label for="resume-content">Conteúdo do currículo</label><textarea class="textarea textarea-tall" id="resume-content" name="content">${escapeHtml(resume.content)}</textarea></div><div class="form-field full"><label for="resume-changes">Sugestões / alterações (uma por linha)</label><textarea class="textarea" id="resume-changes" name="changes">${escapeHtml(resume.changes.join("\n"))}</textarea></div></div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button>${approveButton}<button type="submit" class="primary-button">Salvar alterações</button></div></form>`);
 }
 
 async function confirmResumeApproval(id: string) {
@@ -726,12 +845,30 @@ function bindDragEvents() {
   });
 }
 
+function activateChartFilter(element: HTMLElement) {
+  const type = element.dataset.chartFilterType as VisualFilter["type"] | undefined;
+  const value = element.dataset.chartFilterValue;
+  if (!type || !value) return;
+  const current = state.visualFilter;
+  state.visualFilter = current?.type === type && current.value === value ? null : { type, value, label: element.dataset.chartFilterLabel || value };
+  state.selectedJobId = type === "job" && state.visualFilter ? value : null;
+  render();
+  window.requestAnimationFrame(() => document.getElementById("opportunities-map")?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }));
+}
+
 function bindViewEvents() {
   const root = view();
-  root.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => { state.page = element.dataset.page ?? "overview"; render(); }));
+  root.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => { state.mapExpanded = false; state.page = element.dataset.page ?? "overview"; render(); }));
   root.onclick = async (event) => {
     try {
     const target = event.target as HTMLElement;
+    const chartFilter = target.closest<HTMLElement>("[data-chart-filter-type]");
+    if (chartFilter) { activateChartFilter(chartFilter); return; }
+    if (target.closest("[data-clear-chart-filter]")) { state.visualFilter = null; state.selectedJobId = null; render(); return; }
+    if (target.closest("[data-expand-map]")) { setMapExpanded(!state.mapExpanded); return; }
+    if (target.closest(".map-canvas") && !state.mapExpanded && !target.closest(".leaflet-control, .leaflet-popup")) { setMapExpanded(true); return; }
+    const mapJob = target.closest<HTMLElement>("[data-map-job]")?.dataset.mapJob;
+    if (mapJob) { focusMapJob(mapJob); root.querySelectorAll(".map-job").forEach((item) => item.classList.toggle("selected", (item as HTMLElement).dataset.mapJob === mapJob)); return; }
     const detail = target.closest<HTMLElement>("[data-detail]")?.dataset.detail || target.closest<HTMLElement>("[data-detail-id]")?.dataset.detailId;
     if (detail && !target.closest("select")) { showJobDetail(detail); return; }
     const action = target.closest<HTMLElement>("[data-action]");
@@ -763,6 +900,7 @@ function bindViewEvents() {
       toast(error instanceof Error ? error.message : "Falha na operação", true);
     }
   };
+  root.querySelectorAll<HTMLElement>(".donut-segment").forEach((segment) => segment.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activateChartFilter(segment); } }));
   root.querySelectorAll<HTMLSelectElement>("[data-move-id]").forEach((select) => select.addEventListener("change", async () => { try { await moveJob(select.dataset.moveId ?? "", select.value); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); } }));
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-filter]").forEach((input) => input.addEventListener(input.dataset.filter === "query" ? "input" : "change", () => { state.filters[input.dataset.filter as "query" | "source" | "lifecycle"] = input.value; if (state.page === "jobs") { const body = document.querySelector("#jobs-results tbody"); if (body && state.data) body.innerHTML = jobTableRows(filterJobs(state.data)); } }));
   bindDragEvents();
@@ -784,13 +922,25 @@ document.addEventListener("DOMContentLoaded", () => {
   } catch { /* default to light */ }
   setTheme(savedTheme);
   document.getElementById("theme-toggle")?.addEventListener("click", () => setTheme(document.body.dataset.theme === "dark" ? "light" : "dark"));
-  document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => { state.page = element.dataset.page ?? "overview"; document.body.classList.remove("menu-open"); render(); }));
+  document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => { state.mapExpanded = false; state.page = element.dataset.page ?? "overview"; document.body.classList.remove("menu-open", "map-expanded"); render(); }));
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.mapExpanded) setMapExpanded(false); });
   document.getElementById("top-add-job")?.addEventListener("click", showAddJobModal);
   document.getElementById("refresh-button")?.addEventListener("click", () => loadData(true));
   document.getElementById("mobile-menu")?.addEventListener("click", () => document.body.classList.toggle("menu-open"));
   modalRoot().addEventListener("click", async (event) => {
     const target = event.target as HTMLElement;
     if (target === modalRoot() || target.closest("[data-close-modal]")) { closeModal(); return; }
+    const showOnMap = target.closest<HTMLElement>("[data-show-on-map]")?.dataset.showOnMap;
+    if (showOnMap) {
+      const job = currentData().jobs.find((item) => item.id === showOnMap);
+      closeModal();
+      state.page = "analytics";
+      state.selectedJobId = showOnMap;
+      state.visualFilter = { type: "job", value: showOnMap, label: job?.title ?? "Vaga selecionada" };
+      render();
+      window.requestAnimationFrame(() => document.getElementById("opportunities-map")?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }));
+      return;
+    }
     const approveButton = target.closest<HTMLElement>("[data-approve-resume]");
     if (approveButton?.dataset.approveResume) {
       try { await confirmResumeApproval(approveButton.dataset.approveResume); }

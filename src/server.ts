@@ -197,7 +197,7 @@ const server = createServer(async (req, res) => {
   res.setHeader("x-frame-options", "DENY");
   res.setHeader("referrer-policy", "no-referrer");
   res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
-  res.setHeader("content-security-policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader("content-security-policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de; style-src 'self' https://unpkg.com; script-src 'self' https://unpkg.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   if (process.env.RADAR_TRUST_PROXY_TLS === "true" && req.url !== "/api/health" && req.url !== "/api/ready" && req.headers["x-forwarded-proto"] !== "https") {
     return sendJson(res, 426, { error: "TLS_REQUIRED" });
   }
