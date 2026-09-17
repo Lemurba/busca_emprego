@@ -14,17 +14,17 @@ RADAR_DB_PATH=/caminho/persistente/radar.sqlite \
 PORT=8787 npm start
 ```
 
-`RADAR_AUTH_CREDENTIALS` é obrigatória e deve ser injetada no processo pelo secret store do Hermes. Não a coloque no comando, em `.env` ou no repositório. O Telegram é reutilizado automaticamente da conta/capability já vinculada ao Hermes; não há configuração de bot ou destinatário. O fluxo completo de fontes, Glassdoor e primeiro start está no [`onboarding do Hermes`](hermes-plugin/ONBOARDING.md); o contrato legível pelo host está em [`hermes-plugin/onboarding.json`](hermes-plugin/onboarding.json).
+Não existe login, token de acesso ou chave da API. O Telegram é reutilizado automaticamente da conta/capability já vinculada ao Hermes; não há configuração de bot ou destinatário. O fluxo completo de fontes, Glassdoor e primeiro start está no [`onboarding do Hermes`](hermes-plugin/ONBOARDING.md); o contrato legível pelo host está em [`hermes-plugin/onboarding.json`](hermes-plugin/onboarding.json).
 
-O servidor escuta em `0.0.0.0:8787`; agentes no mesmo container podem usar `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. A API exige Bearer token e escopo por projeto/ferramenta; injete credenciais pelo armazenamento seguro do Hermes e mantenha a porta em rede interna ou atrás de proxy TLS. Não a exponha diretamente à internet.
+O servidor escuta em `0.0.0.0:8787`. Abra `http://IP-DO-HERMES:8787` em qualquer dispositivo da rede doméstica; agentes no mesmo container usam `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. Como não há autenticação, restrinja a porta 8787 à LAN no roteador/firewall e nunca faça port forwarding ou exposição direta à internet.
 
 O banco inicia vazio. Dados demonstrativos só são criados com `RADAR_SEED_DEMO=true`. A manutenção legada de anonimização só roda quando solicitada explicitamente com `RADAR_RUN_LEGACY_ANONYMIZATION=true`; não a habilite em produção.
 
 ## Agentes, permissões e navegação
 
-O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. O usuário administrador precisa de `agents.manage`. Cada alteração gera uma versão imutável em rascunho; publicação e rollback são explícitos, e cada execução guarda a versão/snapshot publicado.
+O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfil de administrador: qualquer dispositivo que alcance a API pode administrar agentes. Cada alteração gera uma versão imutável em rascunho; publicação e rollback são explícitos, e cada execução guarda a versão/snapshot publicado.
 
-As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. A credencial HTTP do Hermes usa o escopo externo `jobs.write`; o servidor ainda cruza esse escopo com a configuração persistida do agente.
+As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. Esses limites funcionais permanecem mesmo sem autenticação HTTP.
 
 `browser.read` é estritamente leitura. Ele não compartilha sessão com o Browser Harness de candidatura e não permite preencher nem enviar formulário. A candidatura automatizada usa executor separado e requer `AUTORIZO` vigente para a vaga e versão exata do currículo; essa confirmação não concede permissões gerais ao agente.
 

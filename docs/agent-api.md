@@ -4,7 +4,7 @@ Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e 
 
 Este documento descreve a API implementada, incluindo versões imutáveis de agentes, fontes com credenciais referenciadas no Hermes e proveniência por campo.
 
-## Configuração operacional v0.3
+## Configuração operacional v0.4
 
 - `GET/POST /api/sources` e `PUT/DELETE /api/sources/{id}` configuram fonte, domínio, aceite de termos e somente a referência de autenticação do Hermes. Para Glassdoor autenticado, prefira `auth_strategy=browser_profile` e `browser_profile_id`; nunca envie cookie, senha ou token.
 - `GET /api/agents/{id}/versions` lista snapshots. `POST /api/agents/{id}/publish` recebe `{"version_id":"..."}`; `POST /api/agents/{id}/rollback` recebe a versão histórica a republicar. `PATCH` cria um rascunho e não altera execuções presas ao snapshot publicado.
@@ -18,13 +18,13 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
-- Envie `Authorization: Bearer <token>` e `X-Project-Id: busca-emprego`. Credenciais e escopos vêm de `RADAR_AUTH_CREDENTIALS`; ausência/erro retorna 401, falta de escopo 403 e limite excedido 429.
-- Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. A credencial HTTP precisa de `jobs.write`; o servidor também confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
+- Não envie `Authorization`, chave da API ou `X-Project-Id`: a instalação usa o projeto fixo `busca-emprego` e aceita requisições de qualquer cliente que alcance a porta na LAN.
+- Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. O servidor confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
 - A anonimização legada e os dados demonstrativos são opt-in e devem ficar desabilitados em produção.
 
 ## Capacidades e allowlist
 
-As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`. A capacidade efetiva é a interseção entre contrato do papel, versão da configuração e credencial do serviço. Negação é o padrão.
+As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`. A capacidade efetiva é a interseção entre contrato do papel e versão publicada da configuração. Negação é o padrão para o agente, embora a API HTTP seja aberta na LAN.
 
 `agent_configs.source_ids` identifica fontes/conectores lógicos. `agent_configs.allowed_domains` contém hosts autorizados. Um não concede o outro. `browser_enabled=true` exige `browser.read` e `allowed_domains` não vazio. A URL de criação, enriquecimento, consulta salarial ou evidência deve pertencer à allowlist da versão do agente, inclusive após redirecionamentos; URL fora dela retorna 403 e não é persistida.
 
@@ -35,7 +35,7 @@ As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.cre
 | `jobs.enrich` | Propor atualização descritiva com proveniência por campo | Sobrescrever silenciosamente dado humano/mais confiável |
 | `salary.lookup` | Consultar e registrar salário com moeda, período, confiança e evidência | Inventar valor ou converter sem taxa/configuração auditada |
 
-Administrar configurações pelo dashboard exige `agents.manage` em uma credencial de usuário. Esse escopo não é concedido ao Source Scout nem implica qualquer das capacidades acima.
+Administrar configurações pelo dashboard não exige login. As capacidades acima continuam limitando a execução dos agentes, mas não são uma fronteira entre usuários da LAN.
 
 ## Regras de preenchimento
 
@@ -93,12 +93,12 @@ Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, 
 
 ### Configuração de agentes no dashboard
 
-| Método | Endpoint | Escopo | Uso |
+| Método | Endpoint | Acesso HTTP | Uso |
 | --- | --- | --- | --- |
-| `GET` | `/api/agents` | `dashboard.read` | Listar agentes do projeto |
-| `POST` | `/api/agents` | `agents.manage` | Criar agente |
-| `PATCH` | `/api/agents/{id}` | `agents.manage` | Editar, habilitar ou pausar agente |
-| `DELETE` | `/api/agents/{id}` | `agents.manage` | Excluir agente sem histórico; com histórico, deve ser pausado |
+| `GET` | `/api/agents` | LAN, sem login | Listar agentes do projeto |
+| `POST` | `/api/agents` | LAN, sem login | Criar agente |
+| `PATCH` | `/api/agents/{id}` | LAN, sem login | Editar, habilitar ou pausar agente |
+| `DELETE` | `/api/agents/{id}` | LAN, sem login | Excluir agente sem histórico; com histórico, deve ser pausado |
 
 Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browser_enabled`, `tool_scopes`, `can_create_jobs`, `can_edit_jobs`, `editable_fields`, `concurrency`, `timeout_seconds` e `prompt`. `source_ids` e `allowed_domains` são listas distintas. A API retorna 422 para capacidade/campo desconhecido, limites inválidos ou Browser habilitado sem allowlist. Toda edição cria uma versão imutável em rascunho; publicação e rollback são explícitos e cada execução fica presa ao snapshot publicado.
 
@@ -387,11 +387,9 @@ Resposta: `201` com `AgentRun` salvo.
 | `200` | Consulta ou atualização concluída |
 | `201` | Registro criado ou upsert processado |
 | `400` | JSON inválido, evento desconhecido ou falha ao processar/gravar os dados; corpo `{ "error": "..." }` |
-| `401` | Credencial ausente ou inválida |
-| `403` | Projeto/capacidade negado, agente desabilitado ou URL fora de `allowed_domains` |
+| `403` | Capacidade interna negada, agente desabilitado ou URL fora de `allowed_domains` |
 | `404` | Rota ou registro desconhecido; corpo `{ "error": "not found" }` |
 | `409` | Conflito de versão, idempotência ou transição |
 | `422` | Schema, evidência, configuração, domínio ou precondição inválidos |
-| `429` | Rate limit excedido; respeitar `Retry-After` |
 
 Algumas rotas por ID ainda retornam `200` com `null`; a uniformização para 404 é um gate pendente. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.
