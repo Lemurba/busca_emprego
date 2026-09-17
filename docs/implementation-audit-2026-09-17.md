@@ -6,14 +6,14 @@
 
 ## Resultado executivo
 
-O repositório inicial era um protótipo funcional. Nesta rodada foram implementados e testados os fundamentos de autenticação, validação de domínio, workflow, feedback de rejeição, preferências, escalonamento de dúvidas, plugin Hermes por adapters, CI e operação SQLite. A integração real com o runtime Hermes, Telegram, Browser Harness, Geoapify e fontes ainda depende do ambiente externo. O aplicativo possui uma única configuração de produção; a validação usa o mesmo artefato antes da ativação.
+O repositório inicial era um protótipo funcional. Nesta rodada foram implementados e testados os fundamentos de acesso doméstico sem login, validação de domínio, workflow, feedback de rejeição, preferências, escalonamento de dúvidas, plugin Hermes por adapters, CI e operação SQLite. A integração real com o runtime Hermes, Telegram, Browser Harness, Geoapify e fontes ainda depende do ambiente externo. O aplicativo possui uma única configuração; a validação usa o mesmo artefato antes da ativação.
 
 Uma instalação não pode ser classificada como pronta para produção enquanto todos os gates do SDD não tiverem evidência no ambiente real.
 
 ## Requisitos novos consolidados nesta revisão
 
-- agentes configuráveis pelo dashboard, versionados/publicados com rollback e administrados com `agents.manage`; a validação no Hermes real continua como gate;
-- capacidades fechadas `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`, sempre negadas por padrão e limitadas por papel, configuração e credencial;
+- agentes configuráveis pelo dashboard, versionados/publicados com rollback e acessíveis sem login na LAN; a validação no Hermes real continua como gate;
+- capacidades fechadas `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`, sempre negadas por padrão e limitadas por papel e configuração publicada;
 - `source_ids` separado de `allowed_domains`; `browser_enabled` exige allowlist não vazia e toda URL/evidência do agente precisa pertencer a ela;
 - cartões compactos no Kanban e detalhe expandido com descrição estruturada, ocorrências, score explicado e proveniência por campo;
 - `linkedin_post_url`, `job_url`, `source_url` e `application_url` independentes, com rótulos e ações diferentes e sem fallback silencioso;
@@ -24,7 +24,7 @@ Esses itens estão especificados no SDD/BDD/TDD, contrato HTTP, segurança e che
 
 ## Entregue nesta rodada
 
-- autenticação Bearer fail-closed, credenciais separadas de usuário/serviço, escopos por projeto/ferramenta e rate limit local;
+- acesso HTTP aberto na LAN, projeto local fixo e documentação explícita para bloquear a porta 8787 na WAN;
 - máquina de estados completa com CAS por `expected_version`, transições adjacentes, eventos e códigos 409/422;
 - bloqueio de alteração direta de `status` por PATCH;
 - validação/normalização de URL HTTPS, tracking, Unicode, empresa, salário, moeda e coordenadas;
@@ -38,7 +38,7 @@ Esses itens estão especificados no SDD/BDD/TDD, contrato HTTP, segurança e che
 - CRUD de agentes no dashboard, capacidades/campos editáveis fechados, `allowed_domains` validada e eventos de enriquecimento com evidência;
 - descrição, responsabilidades, requisitos, benefícios, informações adicionais e links separados no detalhe expandido, mantendo cartões compactos;
 - papel Hermes `job_enrichment`, contratos ampliados e Browser de coleta somente leitura;
-- testes locais de build, workflow, autenticação, domínio, feedback, persistência, backup e restore.
+- testes locais de build, workflow, acesso sem login, domínio, feedback, persistência, backup e restore.
 - versionamento/publicação/rollback de agentes, proveniência por campo, conflitos revisáveis e teste de carga local de 10 fontes/500 resultados/20 workers;
 - onboarding descoberto pelo manifesto, com perguntas seguras para secrets, Glassdoor, Telegram e primeiro start.
 
@@ -86,7 +86,7 @@ Com uma pessoa, a estimativa total passa a 18 a 27 semanas. As janelas não são
 
 ## Condições para o teste do usuário
 
-O usuário deve testar o mesmo artefato de produção, com agendamentos inicialmente desabilitados, quando houver: instalação real no Docker Hermes, token de usuário com `agents.manage`, credencial de serviço com o menor conjunto de capacidades, agente configurado com `allowed_domains`, perfil Grillme confirmado, ao menos uma fonte permitida, Geoapify configurado, capability Telegram já vinculada e Browser Harness disponível. O teste deve incluir cartão compacto/detalhe, dois links e proveniência. A candidatura automática permanece desabilitada até o cenário E2E de isolamento, dúvida/resposta/retomada e vínculo da URL ao `AUTORIZO` passar sem envio indevido.
+O usuário deve testar o mesmo artefato, com agendamentos inicialmente desabilitados, quando houver: instalação real no Docker Hermes, porta 8787 acessível apenas na LAN e bloqueada na WAN, agente configurado com `allowed_domains`, perfil Grillme confirmado, ao menos uma fonte permitida, Geoapify configurado, capability Telegram já vinculada e Browser Harness disponível. O teste deve incluir acesso sem login a partir de outro dispositivo, cartão compacto/detalhe, dois links e proveniência. A candidatura automática permanece desabilitada até o cenário E2E de isolamento, dúvida/resposta/retomada e vínculo da URL ao `AUTORIZO` passar sem envio indevido.
 
 ## Critério de produção
 

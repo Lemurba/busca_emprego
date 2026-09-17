@@ -7,6 +7,9 @@
     "mode": "production",
     "selectableEnvironment": false,
     "singleApplication": true,
+    "authentication": "none",
+    "networkScope": "private-lan",
+    "listenAddress": "0.0.0.0",
     "port": 8787
   },
   "telegramIntegration": {
@@ -24,7 +27,6 @@
   },
   "phases": [
     "preflight",
-    "api-credentials",
     "gateways",
     "sources",
     "telegram-capability-check",
@@ -52,7 +54,7 @@
     "healthPath": "/api/health",
     "readyPath": "/api/ready",
     "bootstrapPath": "/api/bootstrap",
-    "requireTlsOutsideLocalhost": true,
-    "requireAuthenticatedBootstrap": true
+    "allowPrivateLanHttp": true,
+    "requireBootstrapWithoutLogin": true
   }
 }

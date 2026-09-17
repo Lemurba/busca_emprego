@@ -16,11 +16,9 @@ Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigura
 
 O Hermes usa os padrões `/opt/hermes/plugins/busca-emprego`, `/var/lib/hermes/busca-emprego/radar.sqlite` e porta interna `8787`. Só pergunta o que não puder descobrir automaticamente. Texto recomendado:
 
-> Vou instalar a única versão de produção do Busca Emprego usando os padrões do Hermes. Não vou pedir credenciais neste chat e usarei o Telegram que já está vinculado ao Hermes.
+> Vou instalar a única versão de produção do Busca Emprego usando os padrões do Hermes. O dashboard e a API ficarão abertos na rede doméstica, sem login ou token. Usarei o Telegram que já está vinculado ao Hermes.
 
 > Qual identificador do operador responsável por esta instalação? Ele será usado em `RADAR_OPERATOR_ID` e na auditoria.
-
-> Vou criar ou selecionar duas credenciais da API no cofre: uma de usuário e uma de serviço. Abra a entrada segura do Hermes; não cole os tokens aqui.
 
 > Quais fontes deseja ativar agora? Para cada uma, vou confirmar domínio, estratégia de autenticação, termos e operações permitidas.
 
@@ -54,18 +52,9 @@ O padrão recomendado é `browser_profile`; token/cookie manual não deve ser so
 
 Depois do login, o Hermes valida o perfil com uma navegação somente leitura, registra o `browser_profile_id`, confirma o domínio permitido e testa uma consulta sem candidatura. Sessão de Glassdoor não é reutilizada pelo executor de candidaturas. CAPTCHA ou bloqueio encerra o teste e mantém a fonte desabilitada.
 
-## 4. Credenciais da API e gateways
+## 4. Gateways internos
 
-O Hermes deve gerar dois tokens aleatórios diferentes, com pelo menos 32 caracteres, e montar `RADAR_AUTH_CREDENTIALS` dentro do secret store:
-
-```json
-[
-  {"id":"usuario-principal","kind":"user","token":"VALOR_NO_COFRE","projects":["busca-emprego"],"tools":["*"]},
-  {"id":"hermes-runtime","kind":"service","token":"OUTRO_VALOR_NO_COFRE","projects":["busca-emprego"],"tools":["jobs.write","applications.read","applications.write"]}
-]
-```
-
-O texto acima descreve o formato; `VALOR_NO_COFRE` nunca deve aparecer em arquivo ou log. O token do runtime também é disponibilizado aos adapters por uma referência como `hermes://busca-emprego/runtime-service-token`.
+O Radar não possui login, chave da API, `RADAR_AUTH_CREDENTIALS` ou escopos HTTP. O Hermes fornece internamente a capability necessária para seus próprios gateways; esse vínculo não é uma credencial que o usuário precise digitar no dashboard.
 
 Configuração mínima do plugin:
 
@@ -105,15 +94,14 @@ PORT=8787 \
 ops/hermes/radar-process.sh
 ```
 
-`RADAR_AUTH_CREDENTIALS` deve ser injetada pelo cofre no processo, não escrita nesse comando. Em operação contínua, o Hermes registra `ops/hermes/radar-process.sh` no supervisor já usado pelo container, conforme `ops/hermes/supervisord-radar.conf.example`.
+Em operação contínua, o Hermes registra `ops/hermes/radar-process.sh` no supervisor já usado pelo container, conforme `ops/hermes/supervisord-radar.conf.example`. O processo escuta em `0.0.0.0:8787`, portanto o roteador/firewall deve permitir a porta somente na rede doméstica e bloqueá-la na WAN.
 
 Ordem de verificação:
 
 1. `GET /api/health` retorna sucesso.
 2. `GET /api/ready` confirma SQLite, ambiente e operador.
-3. `GET /api/bootstrap` sem token é recusado.
-4. `GET /api/bootstrap` com a credencial de usuário funciona.
-5. O endpoint externo TLS passa em `scripts/ops/verify-environment.mjs`.
+3. `GET /api/bootstrap` funciona sem token ou login a partir de outro dispositivo da LAN.
+4. `scripts/ops/verify-environment.mjs` confirma que a URL é HTTPS ou HTTP em endereço privado da LAN.
 
 Falha em qualquer item faz o Hermes parar o processo ou mantê-lo fora do tráfego; agentes e cron continuam desabilitados.
 
@@ -145,4 +133,4 @@ O executor de candidatura usa o Browser Harness separado e chama `v1/application
 - Nova configuração de agente: criar draft, testar, publicar; nunca editar snapshot publicado no banco.
 - Falha de release: seguir `docs/operations-runbook.md`, incluindo backup, restore testado e rollback do release.
 
-O onboarding está concluído apenas quando health, readiness, autenticação, uma fonte, um agente publicado, proveniência/conflito e a capability Telegram vinculada tiverem evidências de teste. Se o Telegram do Hermes estiver indisponível, a busca continua, mas qualquer candidatura com dúvida permanece em `needs_review`.
+O onboarding está concluído apenas quando health, readiness, acesso sem login pela LAN, autenticação das fontes que precisarem, um agente publicado, proveniência/conflito e a capability Telegram vinculada tiverem evidências de teste. Se o Telegram do Hermes estiver indisponível, a busca continua, mas qualquer candidatura com dúvida permanece em `needs_review`.

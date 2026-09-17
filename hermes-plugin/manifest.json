@@ -2,7 +2,7 @@
   "$schema": "./schemas/manifest.schema.json",
   "id": "busca-emprego",
   "name": "Busca Emprego",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Orquestra agentes de busca, enriquecimento, avaliação, currículo e preparação manual de candidatura.",
   "entrypoint": "dist/src/index.js",
   "configSchema": "schemas/config.schema.json",
@@ -21,6 +21,8 @@
     "note": "Adapters concretos usam os gateways HTTPS do Hermes e Browser Harness. Telegram usa a capability já vinculada ao Hermes, sem configuração de bot ou destinatário; credenciais de fontes são resolvidas somente por referências do secret store."
   },
   "security": {
+    "httpAuthentication": false,
+    "networkScope": "private-lan",
     "secrets": "host-only",
     "automaticApplicationRequiresTelegram": false,
     "humanAuthorizationRequired": true,

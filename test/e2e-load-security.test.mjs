@@ -6,7 +6,6 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-e2e-"));
-const token = "e2e-token-with-at-least-thirty-two-characters";
 const port = await new Promise((resolve, reject) => {
   const probe = createServer();
   probe.once("error", reject);
@@ -14,7 +13,7 @@ const port = await new Promise((resolve, reject) => {
 });
 const child = spawn(process.execPath, ["dist/src/server.js"], {
   cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"],
-  env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "e2e.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_AUTH_RATE_LIMIT_MAX: "5000", RADAR_AUTH_CREDENTIALS: JSON.stringify([{ id: "e2e-admin", kind: "user", token, projects: ["busca-emprego"], tools: ["*"] }]) }
+  env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "e2e.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true" }
 });
 let stderr = "";
 child.stderr.on("data", (chunk) => stderr += chunk);
@@ -28,13 +27,13 @@ async function waitReady() {
   throw new Error(`server did not become ready: ${stderr}`);
 }
 
-const headers = { authorization: `Bearer ${token}`, "x-project-id": "busca-emprego", "x-forwarded-proto": "https", "content-type": "application/json" };
+const headers = { "x-forwarded-proto": "https", "content-type": "application/json" };
 const request = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
 
 try {
   await waitReady();
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 426, "proxy TLS gate must fail closed");
-  assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 401);
+  assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 200, "LAN API must not require login or token");
 
   const sourceResponse = await request("/api/sources", { method: "POST", body: JSON.stringify({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor", terms_confirmation: "APROVO OS TERMOS DA FONTE" }) });
   const sourceBody = await sourceResponse.json();
@@ -67,7 +66,7 @@ try {
   assert.equal(new Set(bootstrap.jobs.map((job) => job.source)).size, 10);
   assert.equal((await request(`/api/agents/${agent.id}/rollback`, { method: "POST", body: JSON.stringify({ version_id: agent.published_version_id }) })).status, 200);
 
-  console.log("E2E HTTP, TLS/auth security, publication/rollback, and 10-source 500-result/20-worker load checks passed.");
+  console.log("E2E open-LAN access, optional TLS gate, publication/rollback, and 10-source 500-result/20-worker load checks passed.");
 } finally {
   child.kill("SIGTERM");
   await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); });

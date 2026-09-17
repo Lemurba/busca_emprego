@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
-import { BearerAuthenticator, loadAuthConfig } from "./auth.js";
 import { isWorkflowError } from "./workflow.js";
 
 const port = Number(process.env.PORT ?? 8787);
@@ -12,9 +11,10 @@ const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const distPublic = join(projectRoot, "public");
 const sourcePublic = join(projectRoot, "../public");
 const publicDir = existsSync(join(distPublic, "index.html")) ? distPublic : sourcePublic;
-const authenticator = new BearerAuthenticator(loadAuthConfig());
 const environment = process.env.RADAR_ENVIRONMENT ?? "development";
 const operatorId = process.env.RADAR_OPERATOR_ID ?? "unassigned";
+const projectId = "busca-emprego";
+const actor = "lan-user";
 if (["staging", "production"].includes(environment) && operatorId === "unassigned") throw new Error("RADAR_OPERATOR_ID is required in staging/production");
 
 if (process.env.RADAR_SEED_DEMO === "true") seedDemo();
@@ -63,16 +63,6 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
       const readiness = databaseReadiness();
       return sendJson(res, readiness.ok ? 200 : 503, { ...readiness, service: "radar-dashboard", environment, operator_configured: operatorId !== "unassigned" });
     }
-    const projectId = String(req.headers["x-project-id"] ?? "busca-emprego");
-    const tool = apiTool(req.method ?? "GET", pathname);
-    const decision = authenticator.authorize({
-      authorization: req.headers.authorization,
-      projectId,
-      tool,
-      rateLimitKey: req.socket.remoteAddress ?? "unknown"
-    });
-    if (!decision.ok) return sendJson(res, decision.status, { error: decision.code, retry_after_seconds: decision.retryAfterSeconds });
-    const actor = decision.principal.id;
     if (req.method === "GET" && pathname === "/api/bootstrap") return sendJson(res, 200, getBootstrap(projectId));
 
     if (req.method === "GET" && pathname === "/api/agents") return sendJson(res, 200, listAgentConfigs(projectId));
@@ -200,22 +190,6 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
       : 400;
     return sendJson(res, status, { error: message });
   }
-}
-
-function apiTool(method: string, pathname: string) {
-  if (pathname === "/api/bootstrap" || (method === "GET" && pathname.startsWith("/api/jobs/")) || pathname === "/api/base-resumes") return "dashboard.read";
-  if (pathname.startsWith("/api/agents")) return method === "GET" ? "dashboard.read" : "agents.manage";
-  if (pathname.startsWith("/api/sources")) return method === "GET" ? "dashboard.read" : "sources.manage";
-  if (pathname.includes("/provenance")) return "dashboard.read";
-  if (pathname.startsWith("/api/field-conflicts")) return "jobs.write";
-  if (pathname === "/api/authorized-applications") return "applications.read";
-  if (pathname.startsWith("/api/human-questions") || pathname.endsWith("/questions")) return "applications.write";
-  if (pathname.includes("/feedback") || pathname === "/api/preferences" || pathname.startsWith("/api/preference-rules/")) return method === "GET" ? "dashboard.read" : "feedback.write";
-  if (pathname.includes("/transitions")) return "workflow.write";
-  if (pathname === "/api/agent-events" || pathname === "/api/jobs") return "jobs.write";
-  if (pathname.startsWith("/api/resumes") || pathname.startsWith("/api/base-resumes")) return "resumes.write";
-  if (pathname.startsWith("/api/applications")) return "applications.write";
-  return method === "GET" ? "dashboard.read" : "dashboard.write";
 }
 
 const server = createServer(async (req, res) => {

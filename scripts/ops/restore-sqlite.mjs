@@ -31,8 +31,8 @@ const healthUrl = option("--health-url", process.env.RADAR_HEALTH_URL ?? `http:/
 async function serviceIsRunning() {
   try {
     await fetch(healthUrl, { signal: AbortSignal.timeout(1_500) });
-    // Qualquer resposta HTTP comprova que existe um listener; 401/403 também
-    // devem bloquear a troca do arquivo sob um processo autenticado.
+    // Qualquer resposta HTTP comprova que existe um listener e deve bloquear
+    // a troca do arquivo enquanto o processo está ativo.
     return true;
   } catch {
     return false;

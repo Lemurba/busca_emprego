@@ -1,6 +1,6 @@
 # Plugin Busca Emprego para Hermes
 
-Runtime portátil descrito em [`../docs/production-sdd-bdd-tdd.md`](../docs/production-sdd-bdd-tdd.md). A versão 0.3.2 possui uma única configuração de instalação e inclui adapters HTTPS concretos para Hermes, Browser Harness e Telegram. O plugin herda a capability Telegram já vinculada ao Hermes; não configura bot, token, chat ID ou destinatário.
+Runtime portátil descrito em [`../docs/production-sdd-bdd-tdd.md`](../docs/production-sdd-bdd-tdd.md). A versão 0.4.0 possui uma única instalação aberta na rede doméstica, sem login ou chave da API, e inclui adapters concretos para Hermes, Browser Harness e Telegram. O plugin herda a capability Telegram já vinculada ao Hermes; não configura bot, token, chat ID ou destinatário.
 
 O Hermes deve começar por [`ONBOARDING.md`](ONBOARDING.md). O manifesto aponta também para `onboarding.json`, que fixa a instalação única de produção, reduz as perguntas, define os quatro modos de autenticação de fontes e os testes obrigatórios. Segredos são coletados exclusivamente pela entrada segura do host, nunca pela conversa.
 

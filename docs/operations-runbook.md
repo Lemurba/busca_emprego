@@ -10,7 +10,7 @@ Para uma instalação nova, o Hermes deve executar primeiro o fluxo interativo d
 - Node.js 24 ou superior já disponível no container Hermes.
 - Código em `/opt/hermes/plugins/busca-emprego` e volume persistente em `/var/lib/hermes/busca-emprego` (ajuste os caminhos ao ambiente).
 - A porta 8787 fica somente na rede interna. Não publicar diretamente na internet.
-- A API exige Bearer token próprio, com credenciais de usuário e serviço injetadas pelo secret store do Hermes. O proxy do Hermes continua recomendado para TLS e controle de exposição.
+- Dashboard e API não exigem login ou token. A porta 8787 deve ser permitida somente para a sub-rede doméstica e bloqueada na WAN; proxy TLS é opcional dentro da LAN.
 - O supervisor já utilizado pelo Hermes deve iniciar ambos os processos. O exemplo em `ops/hermes/supervisord-radar.conf.example` só deve ser incluído se o container já usar Supervisor.
 
 O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node recebe os sinais do supervisor. Se Hermes usar s6, tini ou outro init, traduza os mesmos valores para esse gerenciador; não execute o Node desacoplado em background no entrypoint.
@@ -27,8 +27,6 @@ O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node rece
 | `GEOAPIFY_API_KEY` | ainda não consumido | secret store do Hermes | não configurar até o backend Geoapify existir; nunca incluir no Git |
 | chave pública de tiles Geoapify | ainda não consumida | configuração do frontend | restringir por origem/domínio e quota; não reutilizar a chave server-side |
 | capability Telegram | gate externo | vínculo existente do Hermes | descoberta automaticamente; não configurar bot token, chat ID ou destinatário no plugin |
-| `RADAR_AUTH_CREDENTIALS` | sim | secret store do Hermes | JSON com tokens de pelo menos 32 caracteres, projetos e ferramentas; nunca gravar em arquivo versionado |
-| `RADAR_AUTH_RATE_LIMIT_MAX` / `RADAR_AUTH_RATE_LIMIT_WINDOW_MS` | recomendado | configuração | limites por processo; múltiplas réplicas exigem limitador compartilhado |
 
 Arquivos `.env` não são artefatos de deploy e já são ignorados pelo Git. Use injeção do secret store do Hermes.
 
@@ -55,8 +53,8 @@ Use somente `ops/hermes/radar.env.example`, `supervisord-radar.conf.example` e `
    node scripts/ops/health-check.mjs
    ```
 
-6. Fazer smoke test autenticado pelo caminho real do Hermes: abrir dashboard, carregar `/api/bootstrap` e criar uma vaga sintética removível.
-7. Pelo endpoint TLS publicado, executar `RADAR_PUBLIC_URL=https://... RADAR_VERIFY_TOKEN=... node scripts/ops/verify-environment.mjs --environment production`. O verificador exige health, readiness, operador, HSTS, bloqueio sem autenticação e bootstrap autenticado.
+6. Em outro dispositivo da LAN, abrir `http://IP-DO-HERMES:8787`, carregar o dashboard e criar uma vaga sintética removível sem login.
+7. Executar `RADAR_PUBLIC_URL=http://IP-PRIVADO:8787 node scripts/ops/verify-environment.mjs --environment production`. O verificador aceita HTTP somente em endereço privado/localhost e confirma health, readiness e bootstrap sem credencial.
 8. Verificar `telegram.question` pelo vínculo existente do Hermes. O teste não pede nem recebe bot token, chat ID ou destinatário.
 9. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não ativar agendamentos ou candidatura automática com falhas, skips ou gates sem aprovação registrada.
 
@@ -131,7 +129,7 @@ Não fazer downgrade de código sobre schema incompatível. Cada futura migraç�
 
 - `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume, mas ainda não mede filas/dependências.
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
-- A API autentica e confere escopos por projeto/ferramenta; o rate limit ainda é local ao processo e SQLite continua em instância única.
+- A API não autentica usuários nem aplica escopos HTTP; qualquer dispositivo com acesso à porta pode executar todas as rotas. SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
 - Não há migração versionada/rollback de schema, alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
 - Dados demonstrativos e anonimização legada são opt-in (`RADAR_SEED_DEMO=true` e `RADAR_RUN_LEGACY_ANONYMIZATION=true`) e devem permanecer desabilitados em produção.

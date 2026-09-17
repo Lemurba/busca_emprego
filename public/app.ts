@@ -332,21 +332,11 @@ function render() {
   bindViewEvents();
 }
 
-async function fetchJson<T>(url: string, options: RequestInit = {}, retriedAuth = false): Promise<T> {
+async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body) headers.set("content-type", "application/json");
-  const token = sessionStorage.getItem("radar-api-token");
-  if (token) headers.set("authorization", `Bearer ${token}`);
-  headers.set("x-project-id", "busca-emprego");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
-  if (response.status === 401 && !retriedAuth) {
-    const entered = window.prompt("Informe o token de acesso do Radar de Vagas:")?.trim();
-    if (entered) {
-      sessionStorage.setItem("radar-api-token", entered);
-      return fetchJson<T>(url, options, true);
-    }
-  }
   if (!response.ok) throw new Error((body as { error?: string }).error || "Não foi possível concluir a operação");
   return body as T;
 }

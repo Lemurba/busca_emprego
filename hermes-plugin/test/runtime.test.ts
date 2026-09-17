@@ -19,13 +19,17 @@ test("manifesto aponta para onboarding seguro e legível pelo Hermes", () => {
   assert.equal(onboarding.installation.mode, "production");
   assert.equal(onboarding.installation.selectableEnvironment, false);
   assert.equal(onboarding.installation.singleApplication, true);
+  assert.equal(onboarding.installation.authentication, "none");
+  assert.equal(onboarding.installation.networkScope, "private-lan");
+  assert.equal(onboarding.installation.listenAddress, "0.0.0.0");
   assert.equal(onboarding.prompts.environment, undefined);
   assert.equal(onboarding.telegramIntegration.source, "hermes-linked-capability");
   assert.equal(onboarding.telegramIntegration.requestBotToken, false);
   assert.equal(onboarding.telegramIntegration.requestRecipient, false);
+  assert.equal(onboarding.readiness.allowPrivateLanHttp, true);
   assert.deepEqual(Object.keys(onboarding.sourceAuthFlows).sort(), ["basic", "bearer", "browser_profile", "none"]);
   assert.equal(onboarding.sourceAuthFlows.browser_profile.requiresBrowserProfile, true);
-  assert.equal(onboarding.readiness.requireAuthenticatedBootstrap, true);
+  assert.equal(onboarding.readiness.requireBootstrapWithoutLogin, true);
 });
 
 test("retry usa 1s, 5s e 15s e para após a quarta tentativa", async () => {

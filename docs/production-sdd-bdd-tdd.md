@@ -48,7 +48,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [~] **Deduplicação:** o ID deriva de fonte, URLs, título e empresa. Não há identidade canônica entre fontes nem histórico de ocorrências por rodada. Alterar a URL pode gerar outro cartão.
 - [~] **Kanban:** existe matriz central de transições, CAS por versão, eventos persistidos e bloqueio de `status` por PATCH. A UI ainda precisa migrar todos os controles/drag para comandos adjacentes e exibir conflitos/precondições.
 - [~] **Mapa:** é um mapa real, mas não geocodifica cidades automaticamente, não guarda precisão/provedor, não tem cache de geocodificação e só plota vagas com coordenadas já informadas.
-- [~] **Segurança:** a API exige Bearer token, separa credenciais de usuário/serviço e confere projeto/ferramenta. Faltam sessão web mais amigável, secret store real, rate limit compartilhado e validação E2E de isolamento.
+- [~] **Segurança doméstica:** dashboard/API são intencionalmente abertos na LAN, sem login ou chave. O bind é `0.0.0.0:8787`; a instalação depende de firewall/roteador bloqueando WAN. Capabilities dos agentes, allowlists, secrets de fontes e `AUTORIZO` permanecem separados.
 - [~] **Execução de candidatura:** o adapter separado do Browser Harness exige o envelope `AUTORIZO`, isola a sessão e só aceita envio com evidência; Telegram correlaciona dúvidas. Falta o E2E contra serviços reais.
 - [~] **Detalhe e proveniência da vaga:** cartões compactos e detalhe expandido mostram dados estruturados, links separados, evidência por campo e conflitos revisáveis; falta aceite visual/funcional na instalação real.
 - [~] **Feedback de rejeição:** o backend exige modo, categoria, detalhe e justificativa, preserva rejeição parcial, cria regra total e sinais persistidos. Faltam UI completa, filtro de supressão na ingestão, exceções/restauração e sugestões acionáveis.
@@ -67,7 +67,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [ ] Exigir modo total/parcial e motivo em todo descarte; gravar feedback, criar regras para supressão total e atualizar preferências com feedback parcial.
 - [ ] Exibir vagas filtradas e regras ativas, permitir restaurar uma vaga e editar/pausar/remover regras.
 - [ ] Completar geocodificação, cache, atribuição, filtros e limites do mapa.
-- [x] Adicionar autenticação/autorização, escopo por usuário/projeto, referências ao secret store e trilha de auditoria.
+- [x] Remover autenticação HTTP para uso doméstico, fixar o projeto local, manter referências ao secret store das fontes e trilha de auditoria com ator `lan-user`.
 - [~] Adicionar migrações seguras, backup/restauração e política de retenção/exclusão: backup/restore estão testados; migrações e retenção continuam pendentes.
 - [~] Criar testes unitários, integração e aceitação para todos os critérios obrigatórios abaixo: suítes locais E2E/carga/segurança/restore passam; falta repetição no ambiente real.
 - [ ] Fazer piloto com fontes permitidas, verificar termos e cotas do mapa, validar UX e aprovar monitoramento, backup e rollback.
@@ -355,7 +355,7 @@ Exemplo JSON válido para rejeição total: {"mode":"total","reason_code":"role"
 
 Exemplo JSON válido para rejeição parcial: {"mode":"partial","reason_code":"work_model","detail_key":"work_model","explanation":"Não gostei da exigência de comparecer ao escritório duas vezes por semana.","confirmation":"REJEITAR PARCIALMENTE"}.
 
-Campo obrigatório ausente, reason_code/detail_key incompatível ou justificativa fora de 10–500 caracteres retorna HTTP 422 e não modifica vaga, pontuação, regra ou histórico. O endpoint exige autenticação e escopo do projeto.
+Campo obrigatório ausente, reason_code/detail_key incompatível ou justificativa fora de 10–500 caracteres retorna HTTP 422 e não modifica vaga, pontuação, regra ou histórico. O endpoint é aberto aos clientes da LAN, como as demais rotas.
 
 | Modo | Estado da vaga | Efeito imediato | Efeito em vagas futuras |
 |---|---|---|---|
@@ -398,7 +398,7 @@ Estados desejados: found → validation → strong_match → review → selected
 | qualquer ativo | discarded | usuário solicita rejeição total, fornece categoria, detalhe e justificativa de 10–500 caracteres |
 | pré-aplicação | expired | fonte confirma encerramento ou regra configurada; guardar motivo/data |
 
-Workflow valida grafo e precondições em transação. PATCH /api/jobs/{id} não aceita status. Criar POST /api/jobs/{id}/transitions com command, expected_version, evidências e campos exigidos. UI oferece apenas comandos válidos; drag é desabilitado ou só permite próximo destino legal. API responde 409 para transição ilegal/conflito, 422 para precondição/campo ausente, 401 sem autenticação e 403 sem escopo. Concorrência não pode sobrescrever silenciosamente estado mais recente.
+Workflow valida grafo e precondições em transação. PATCH /api/jobs/{id} não aceita status. Criar POST /api/jobs/{id}/transitions com command, expected_version, evidências e campos exigidos. UI oferece apenas comandos válidos; drag é desabilitado ou só permite próximo destino legal. API responde 409 para transição ilegal/conflito e 422 para precondição/campo ausente. Concorrência não pode sobrescrever silenciosamente estado mais recente.
 
 Bloqueios obrigatórios: resume/resume_approved nunca vai direto a applied, interview_scheduled, interview_completed ou completed; entrevista agendada só depois de applied; conclusão precisa entrevista feita ou comando excepcional com resultado e motivo. Reabertura exige comando reopen, motivo e novo ciclo; histórico anterior permanece.
 
@@ -419,14 +419,14 @@ Não depender dos tiles públicos OSM como backend sem SLA; respeitar [política
 
 ### 3.11 Segurança e operação mínima
 
-- Exigir autenticação no dashboard/API e credencial de serviço separada para Hermes. Autorizar por projeto, agente e ferramenta; rede interna não é autenticação.
-- Aplicar os escopos `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup` no servidor, por configuração/versionamento do agente. Interface e prompt não são fronteiras de segurança.
+- Dashboard/API não exigem autenticação ou credencial do usuário. Qualquer dispositivo que alcance a porta possui controle total; firewall/roteador deve limitar 8787 à LAN e bloquear WAN, UPnP e port forwarding.
+- Aplicar as capabilities `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup` por configuração/versionamento do agente. Elas limitam o agente, não diferenciam usuários da LAN.
 - Executar leitura e candidatura em perfis/contexts de navegador separados. Não compartilhar cookie jar, local storage, downloads, credenciais, histórico ou páginas entre Source Scout e Application Assistant.
-- Conferir escopo no servidor em cada comando; rate limit de usuário/serviço, limite de request e validação de schema.
+- Conferir capability e allowlist do agente em cada operação; manter limite de request e validação de schema.
 - Secrets fora de SQLite/código. Nunca registrar tokens, CV, prompt completo ou respostas sensíveis em log/métrica.
 - Tratar descrições/PDF/páginas como entrada não confiável e impedir que instruções externas alterem papel ou revelem dados.
 - AUTORIZO fica associado a job_id, resume_id, versão, `application_url` canônica/hash, ator e horário; precisa ser revogável.
-- `AUTORIZO` é uma autorização de negócio de uso único para a candidatura vinculada, não um tool scope. O executor ainda precisa de credencial de serviço própria e só recebe o domínio/URL de candidatura aprovado. Um link aberto manualmente ou por `browser.read` não cria autorização.
+- `AUTORIZO` é uma autorização de negócio de uso único para a candidatura vinculada, não autenticação HTTP. O executor só recebe o domínio/URL de candidatura aprovado. Um link aberto manualmente ou por `browser.read` não cria autorização.
 - Auditar alterações de prompt, perfil, autorização e estado, sem reter conteúdo pessoal desnecessário.
 - Definir retenção/exclusão de fontes, CVs, logs e auditoria; exclusão de projeto remove conteúdo associado segundo política.
 - Preparar health check, backup automatizado, teste de restore, migrações e rollback, alertas de fila/fonte/mapa e runbook.
@@ -676,7 +676,7 @@ Feature: mapa e validação
 | Unitário: regra e restauração | limites de similaridade, regra pausada, restaurar item/todos | item fora da regra não é suprimido; restaurar um não desativa a regra |
 | Unitário: escalonamento Telegram | capability vinculada ausente, resposta de identidade errada, texto ambíguo, timeout, falha após a tentativa inicial e 3 retentativas, resposta correta, PULAR opcional/obrigatório | sem Telegram funcional/resposta clara não há retomada; PULAR obrigatório é recusado; apenas pergunta/candidatura vinculadas são liberadas |
 | Integração: migração | banco novo e banco legado | migração repetida idempotente; relações antigas preservadas |
-| Integração: API | autenticação, escopo, schema, concorrência, rate limit | sem token=401, sem escopo=403, payload inválido=422, conflito=409 |
+| Integração: API LAN | acesso sem login, schema, concorrência e limites funcionais dos agentes | bootstrap sem token=200, payload inválido=422, conflito=409 e domínio/capability do agente negado=403 |
 | Integração: rodada | 3 fontes, uma falha, retry, lote repetido e duas rodadas | partial correto; contagens reconciliam; sem perda/duplicação |
 | Integração: mapa | cache hit/miss, timeout, quota, coordenada inválida | cache evita consulta repetida; falha não quebra Kanban; atribuição presente |
 | E2E: dashboard | primeira configuração Grillme, criar agente, testar prompt, publicar/rollback, ver ocorrências e regras | perfil só grava após confirmação; regras/filtros e versões persistem após reload |
@@ -691,7 +691,7 @@ Feature: mapa e validação
 3. Nenhuma transição proibida é aceita via UI, API ou agente.
 4. Prompt version e snapshot do perfil são recuperáveis para cada execução.
 5. Teste de carga com 10 fontes, 500 resultados e limite de 20 workers não excede o limite, não duplica itens e termina em até 15 minutos no ambiente de referência, excluindo indisponibilidade/limite da fonte.
-6. API autenticada e teste de restauração de backup aprovado.
+6. API aberta somente na LAN, WAN bloqueada e teste de restauração de backup aprovado.
 7. Quota, atribuição, chaves, domínio, termos e falha do mapa verificados em produção.
 8. Capability e identidade Telegram são herdadas do vínculo do Hermes, sem configuração no plugin; perguntas e respostas são testadas na conta autorizada e falha de entrega bloqueia o envio.
 9. Rejeição total sem motivo/categoria retorna 422; regra total suprime 100% das vagas que atendem ao critério e não suprime vagas fora dele.
@@ -702,7 +702,7 @@ Feature: mapa e validação
 
 ## 6. Sequência recomendada de implementação
 
-1. Segurança/autenticação e migrações compatíveis com banco atual.
+1. Segurança de rede doméstica e migrações compatíveis com banco atual.
 2. Máquina de estados e comandos server-side; remover status editável por PATCH.
 3. Canonical jobs, job_sources, sightings, eventos de feedback, regras de preferência, fila de supressão e backfill seguro.
 4. Runtime Hermes: agentes, fila limitada, JSON contracts, isolamento, `allowed_domains`, quatro capacidades de descoberta e falhas parciais.
@@ -721,4 +721,4 @@ Se o serviço ficar indisponível, mapa pode falhar sem bloquear lista/Kanban. P
 
 ## 8. Definição de pronto
 
-O projeto só pode ser chamado de pronto para produção quando todos os itens pendentes da seção 2 estiverem concluídos, todos os gates da seção 5 passarem e a implantação tiver autenticação, retenção, backup restaurável, chaves configuradas e operador responsável. Isso inclui agentes configuráveis no dashboard, enforcement dos quatro escopos e `allowed_domains`, proveniência por campo, dois links sem fallback indevido e prova de isolamento entre navegador de leitura e executor de candidatura. Até então, classificar como **protótipo integrado, não pronto para produção**.
+O projeto só pode ser chamado de pronto para uso doméstico quando todos os itens pendentes da seção 2 estiverem concluídos, todos os gates da seção 5 passarem e a implantação tiver isolamento de LAN, retenção, backup restaurável, secrets de fontes configurados e operador responsável. Isso inclui agentes configuráveis no dashboard, enforcement das quatro capabilities e `allowed_domains`, proveniência por campo, dois links sem fallback indevido e prova de isolamento entre navegador de leitura e executor de candidatura. Até então, classificar como **protótipo integrado, não pronto para uso doméstico contínuo**.

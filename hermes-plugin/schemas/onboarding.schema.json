@@ -12,11 +12,14 @@
     "installation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "selectableEnvironment", "singleApplication", "port"],
+      "required": ["mode", "selectableEnvironment", "singleApplication", "authentication", "networkScope", "listenAddress", "port"],
       "properties": {
         "mode": { "const": "production" },
         "selectableEnvironment": { "const": false },
         "singleApplication": { "const": true },
+        "authentication": { "const": "none" },
+        "networkScope": { "const": "private-lan" },
+        "listenAddress": { "const": "0.0.0.0" },
         "port": { "const": 8787 }
       }
     },
@@ -43,7 +46,7 @@
         "neverAskInChat": { "const": true }
       }
     },
-    "phases": { "type": "array", "minItems": 9, "uniqueItems": true, "items": { "type": "string" } },
+    "phases": { "type": "array", "minItems": 8, "uniqueItems": true, "items": { "type": "string" } },
     "sourceAuthFlows": {
       "type": "object",
       "additionalProperties": false,
@@ -56,12 +59,12 @@
       }
     },
     "prompts": { "type": "object", "required": ["start", "operator", "source", "terms", "secret", "glassdoor", "schedule"], "additionalProperties": { "type": "string", "minLength": 1 } },
-    "readiness": { "type": "object", "required": ["healthPath", "readyPath", "bootstrapPath", "requireTlsOutsideLocalhost", "requireAuthenticatedBootstrap"], "additionalProperties": false, "properties": {
+    "readiness": { "type": "object", "required": ["healthPath", "readyPath", "bootstrapPath", "allowPrivateLanHttp", "requireBootstrapWithoutLogin"], "additionalProperties": false, "properties": {
       "healthPath": { "const": "/api/health" },
       "readyPath": { "const": "/api/ready" },
       "bootstrapPath": { "const": "/api/bootstrap" },
-      "requireTlsOutsideLocalhost": { "const": true },
-      "requireAuthenticatedBootstrap": { "const": true }
+      "allowPrivateLanHttp": { "const": true },
+      "requireBootstrapWithoutLogin": { "const": true }
     } }
   },
   "$defs": {

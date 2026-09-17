@@ -1,6 +1,6 @@
 {
   "name": "radar-vagas-hermes-dashboard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --outfile=dist/public/app.js",
-    "test": "npm run build && node test/workflow.test.mjs && node test/workflow-core.test.mjs && node test/auth.test.mjs && node test/domain.test.mjs && node test/production-foundation.test.mjs && node test/config-provenance.test.mjs && node test/e2e-load-security.test.mjs && node test/ops.test.mjs",
+    "test": "npm run build && node test/workflow.test.mjs && node test/workflow-core.test.mjs && node test/domain.test.mjs && node test/production-foundation.test.mjs && node test/config-provenance.test.mjs && node test/e2e-load-security.test.mjs && node test/ops.test.mjs",
     "test:e2e": "npm run build && node test/e2e-load-security.test.mjs",
     "start": "node dist/src/server.js",
     "dev": "tsx src/server.ts"

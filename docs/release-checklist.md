@@ -18,14 +18,14 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 
 ## Segurança e secrets
 
-- [ ] API autenticada, autorizada por projeto/agente/ferramenta e testada com 401/403
-- [ ] Usuário administrador possui `agents.manage`; agentes de serviço não recebem esse escopo
+- [ ] Porta 8787 acessível pela LAN confiável e bloqueada na WAN, sem port forwarding ou UPnP
+- [ ] Dashboard e API abrem sem login/token em outro dispositivo doméstico; risco de controle total pela LAN foi aceito
 - [ ] `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup` são negados por padrão e conferidos em cada operação
 - [ ] `source_ids` e `allowed_domains` permanecem distintos; `browser_enabled` com allowlist vazia é rejeitado
 - [ ] URLs de criação, enriquecimento, salário e evidência fora da allowlist, inclusive após redirect, são rejeitadas
 - [ ] Nenhum secret, CV, prompt integral ou dado pessoal nos logs/build/artefatos
 - [ ] Credenciais injetadas pelo secret store do Hermes, com rotação e responsáveis definidos
-- [ ] Dashboard não exposto diretamente; TLS/proxy/origem permitida validados
+- [ ] Dashboard não exposto à internet; HTTP privado ou TLS/proxy doméstico validado
 - [ ] Permissões do volume e banco restritas ao usuário do processo
 
 ## Geoapify
