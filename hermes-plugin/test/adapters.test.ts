@@ -28,7 +28,7 @@ test("adapters concretos usam gateway autenticado, isolam operações e exigem e
   assert.ok(address && typeof address === "object");
   const base = `http://127.0.0.1:${address.port}/`;
   const config = {
-    hermesBaseUrl: base, browserHarnessBaseUrl: base, telegramGatewayBaseUrl: base,
+    hermesBaseUrl: base, browserHarnessBaseUrl: base,
     serviceTokenSecretRef: "runtime/service-token", allowInsecureLocalhost: true, requestTimeoutMs: 2000,
   };
   const secrets = { async resolve(ref: string) { assert.equal(ref, "runtime/service-token"); return "service-token-with-safe-length"; } };
@@ -50,11 +50,13 @@ test("adapters concretos usam gateway autenticado, isolam operações e exigem e
   assert.equal((await telegram.send({ humanQuestionId: "q1", title: "Cargo", company: "Empresa", step: "campo", question: "Pergunta?", uncertaintyReason: "ausente", protectedTaskUrl: "https://jobs.example.com/task" })).messageId, "tg-1");
   assert.ok(received.every((item) => item.auth === `Bearer ${"service-token-with-safe-length"}`));
   assert.ok(received.some((item) => item.path === "/v1/applications/execute"));
-  assert.ok(received.some((item) => item.path === "/v1/telegram/questions" && item.body.recipientId === "chat-1"));
+  const telegramRequest = received.find((item) => item.path === "/v1/telegram/questions");
+  assert.ok(telegramRequest);
+  assert.equal(telegramRequest.body.recipientId, undefined, "Hermes escolhe o Telegram já vinculado; o plugin não configura destinatário");
 });
 
 test("endpoints externos sem TLS são recusados", async () => {
-  const config = { hermesBaseUrl: "http://hermes.example", browserHarnessBaseUrl: "http://browser.example", telegramGatewayBaseUrl: "http://telegram.example", serviceTokenSecretRef: "x" };
+  const config = { hermesBaseUrl: "http://hermes.example", browserHarnessBaseUrl: "http://browser.example", serviceTokenSecretRef: "x" };
   const runtime = new HermesHttpRuntimeAdapter(config, { async resolve() { return "service-token-with-safe-length"; } });
   await assert.rejects(runtime.invokeAgent({ invocationId: "i", runId: "r", role: "source_scout", promptVersionId: "v", input: {}, timeoutMs: 1000 }, new AbortController().signal), /TLS_REQUIRED/);
 });

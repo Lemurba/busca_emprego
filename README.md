@@ -4,7 +4,7 @@ Dashboard local para descoberta e acompanhamento de vagas, preparação de curr�
 
 ## Executar no ambiente Hermes
 
-O processo roda no ambiente existente do Hermes e não cria outro container. Requer Node.js 24 ou superior e npm.
+O processo roda no ambiente existente do Hermes e não cria outro container. Existe uma única instalação com configuração de produção; o usuário não escolhe ambiente ou variante. Requer Node.js 24 ou superior e npm.
 
 ```bash
 npm ci
@@ -14,7 +14,7 @@ RADAR_DB_PATH=/caminho/persistente/radar.sqlite \
 PORT=8787 npm start
 ```
 
-`RADAR_AUTH_CREDENTIALS` é obrigatória e deve ser injetada no processo pelo secret store do Hermes. Não a coloque no comando, em `.env` ou no repositório. O fluxo completo de perguntas, Glassdoor, Telegram, gateways e primeiro start está no [`onboarding do Hermes`](hermes-plugin/ONBOARDING.md); o contrato legível pelo host está em [`hermes-plugin/onboarding.json`](hermes-plugin/onboarding.json).
+`RADAR_AUTH_CREDENTIALS` é obrigatória e deve ser injetada no processo pelo secret store do Hermes. Não a coloque no comando, em `.env` ou no repositório. O Telegram é reutilizado automaticamente da conta/capability já vinculada ao Hermes; não há configuração de bot ou destinatário. O fluxo completo de fontes, Glassdoor e primeiro start está no [`onboarding do Hermes`](hermes-plugin/ONBOARDING.md); o contrato legível pelo host está em [`hermes-plugin/onboarding.json`](hermes-plugin/onboarding.json).
 
 O servidor escuta em `0.0.0.0:8787`; agentes no mesmo container podem usar `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. A API exige Bearer token e escopo por projeto/ferramenta; injete credenciais pelo armazenamento seguro do Hermes e mantenha a porta em rede interna ou atrás de proxy TLS. Não a exponha diretamente à internet.
 
@@ -75,4 +75,4 @@ Salários precisam de fonte e data verificáveis. LinkedIn, Glassdoor e outras f
 
 ## Operação
 
-O projeto inclui CI, staging isolado, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar um Docker separado. `npm test` executa também E2E HTTP, segurança, carga de 10 fontes/500 resultados/20 workers e restore. Consulte o [`runbook de staging/produção`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A promoção continua bloqueada até conectar endpoints, perfis e secrets reais do Hermes e executar os mesmos testes no staging/produção.
+O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` executa também E2E HTTP, segurança, carga de 10 fontes/500 resultados/20 workers e restore. Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A ativação continua bloqueada até conectar endpoints, perfis e secrets reais do Hermes e executar os testes no mesmo artefato de produção.

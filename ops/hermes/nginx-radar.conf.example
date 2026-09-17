@@ -1,7 +1,7 @@
 # Include inside the existing Hermes TLS virtual host. Certificates remain
 # managed by the platform proxy; the Node process is never internet-facing.
-location /plugins/busca-emprego-staging/ {
-    proxy_pass http://127.0.0.1:18787/;
+location /plugins/busca-emprego/ {
+    proxy_pass http://127.0.0.1:8787/;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;

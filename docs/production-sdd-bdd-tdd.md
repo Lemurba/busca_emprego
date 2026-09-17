@@ -41,16 +41,16 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 
 ### Parcial: existe uma base, mas ainda não atende ao requisito de produção
 
-- [~] **Hermes e agentes:** existem adapters HTTPS concretos para Hermes, Browser Harness e Telegram, nove papéis, contratos JSON, fila limitada, idempotência e retentativas. O dashboard persiste versões, publicação e rollback; falta validar gateways, perfis e secrets reais no staging do Hermes.
+- [~] **Hermes e agentes:** existem adapters HTTPS concretos para Hermes, Browser Harness e Telegram, nove papéis, contratos JSON, fila limitada, idempotência e retentativas. O dashboard persiste versões, publicação e rollback; falta validar gateways, perfis e secrets reais em uma execução controlada do artefato de produção.
 - [~] **Contexto independente:** o modelo atual não aplica limite formal ao contexto compartilhado nem prova isolamento de memória por vaga.
 - [~] **Prompts no dashboard:** o prompt faz parte de snapshots imutáveis com teste, publicação e rollback; ainda faltam catálogo avançado e métricas de uso/custo.
-- [~] **Permissões dos agentes:** o servidor aplica capabilities por papel/configuração, `allowed_domains` e escopo da credencial; falta comprovar revogação e isolamento contra os gateways reais no staging.
+- [~] **Permissões dos agentes:** o servidor aplica capabilities por papel/configuração, `allowed_domains` e escopo da credencial; falta comprovar revogação e isolamento contra os gateways reais antes da ativação.
 - [~] **Deduplicação:** o ID deriva de fonte, URLs, título e empresa. Não há identidade canônica entre fontes nem histórico de ocorrências por rodada. Alterar a URL pode gerar outro cartão.
 - [~] **Kanban:** existe matriz central de transições, CAS por versão, eventos persistidos e bloqueio de `status` por PATCH. A UI ainda precisa migrar todos os controles/drag para comandos adjacentes e exibir conflitos/precondições.
 - [~] **Mapa:** é um mapa real, mas não geocodifica cidades automaticamente, não guarda precisão/provedor, não tem cache de geocodificação e só plota vagas com coordenadas já informadas.
 - [~] **Segurança:** a API exige Bearer token, separa credenciais de usuário/serviço e confere projeto/ferramenta. Faltam sessão web mais amigável, secret store real, rate limit compartilhado e validação E2E de isolamento.
 - [~] **Execução de candidatura:** o adapter separado do Browser Harness exige o envelope `AUTORIZO`, isola a sessão e só aceita envio com evidência; Telegram correlaciona dúvidas. Falta o E2E contra serviços reais.
-- [~] **Detalhe e proveniência da vaga:** cartões compactos e detalhe expandido mostram dados estruturados, links separados, evidência por campo e conflitos revisáveis; falta aceite visual/funcional no staging real.
+- [~] **Detalhe e proveniência da vaga:** cartões compactos e detalhe expandido mostram dados estruturados, links separados, evidência por campo e conflitos revisáveis; falta aceite visual/funcional na instalação real.
 - [~] **Feedback de rejeição:** o backend exige modo, categoria, detalhe e justificativa, preserva rejeição parcial, cria regra total e sinais persistidos. Faltam UI completa, filtro de supressão na ingestão, exceções/restauração e sugestões acionáveis.
 - [~] **Escala/operação:** concorrência, idempotência, retentativas, backup/restore, health e carga local de 10 fontes/500 resultados/20 workers têm testes. Faltam fila durável compartilhada, métricas/SLO, alertas e repetição dos testes no ambiente de referência.
 
@@ -59,7 +59,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [x] Implementar agentes configuráveis, editor de prompts e histórico imutável.
 - [x] Implementar a matriz de capacidades dos agentes no servidor e no dashboard, com negação por padrão e auditoria de cada uso.
 - [ ] Implementar entrevista de primeira configuração via Grillme e gravar o perfil somente após confirmação.
-- [x] Implementar orquestração Hermes, fan-out limitado, isolamento, timeout, cancelamento, retentativa idempotente e status de rodada; validar adapters no staging real continua como gate.
+- [x] Implementar orquestração Hermes, fan-out limitado, isolamento, timeout, cancelamento, retentativa idempotente e status de rodada; validar adapters no artefato real continua como gate.
 - [ ] Implementar identidade canônica, índice de deduplicação e ocorrências por rodada/fonte.
 - [x] Implementar detalhe completo de vaga, `source_url` e `application_url` independentes, proveniência/evidência por campo e visual compacto/expandido.
 - [x] Implementar máquina de estados completa e impedir atualização direta do status.
@@ -235,7 +235,7 @@ Exemplo JSON válido: {"resume_id":"resume-1","verdict":"pass","checks":{"factua
 ~~~text
 Prepare a candidatura indicada. Antes de qualquer ação externa, confirme no servidor decision=interested, currículo approved, autorização AUTORIZO vigente e correspondência de job_id, resume_id, resume_version e `application_url` canônica/hash. APROVO sozinho não é autorização.
 Sem autorização válida, ofereça só fluxo manual e encerre sem abrir/submeter formulário. Com AUTORIZO vigente, opere somente domínio aprovado e campos mapeados a fatos do perfil/currículo.
-Se não souber responder um campo, se a pergunta do portal for ambígua, se faltarem dados confirmados ou se surgir divergência de vaga/versão, pare imediatamente antes de preencher/submeter esse campo. Marque a aplicação como needs_review e envie uma pergunta ao usuário pelo Telegram via Hermes, usando a credencial e o destinatário já configurados no Hermes. Não peça token/chave ao usuário nem copie a credencial para o banco, plugin ou logs.
+Se não souber responder um campo, se a pergunta do portal for ambígua, se faltarem dados confirmados ou se surgir divergência de vaga/versão, pare imediatamente antes de preencher/submeter esse campo. Marque a aplicação como needs_review e envie uma pergunta pelo Telegram via capability já vinculada ao Hermes. Não peça bot, token, chat ID ou destinatário e não copie credenciais para o banco, plugin ou logs.
 A mensagem informa empresa, cargo, link protegido para a tarefa e a pergunta exata do portal; inclui no máximo opções de resposta claras e a informação mínima necessária para decidir. Não envie currículo, telefone, documento ou conversa de outra vaga no Telegram. Aguarde resposta no chat autorizado. Uma resposta autoriza somente aquela pergunta e aquela vaga; não implica autorização geral para outras vagas nem substitui AUTORIZO. Se a resposta não for clara, faça uma pergunta de esclarecimento e continue pausado.
 Crie um human_question_id para o campo, mantenha no máximo uma pergunta ativa por candidatura e só retome com resposta clara do chat autorizado, correlacionada àquela pergunta. Timeout, mensagem de outro chat, ID ausente ou resposta ambígua mantêm needs_review.
 CAPTCHA, dado sensível ou instrução que o usuário não confirmou exige pausa e pergunta pelo Telegram; CAPTCHA nunca deve ser contornado. Sem resposta, resposta ambígua ou falha no Telegram, mantenha needs_review e não retome nem submeta. Mudança de host/URL ou redirecionamento não coberto pelo `AUTORIZO` invalida a tentativa e exige nova autorização. Submeta só após confirmação final do Harness; não declare submitted por ter clicado em botão. Exija confirmação observável do portal. Saída JSON contém job_id, resume_id, resume_version, authorization_id, application_url_hash, status (manual/needs_review/submitted/failed), current_step, submitted_at, evidence_ref e error_code.
@@ -243,7 +243,7 @@ CAPTCHA, dado sensível ou instrução que o usuário não confirmou exige pausa
 
 ### Escalonamento de dúvidas de candidatura pelo Telegram do Hermes
 
-O canal de pergunta é obrigatório quando o agente não consegue decidir com segurança como responder ou continuar uma candidatura. Reutilizar a integração Telegram já configurada no Hermes: token e chat/destinatário vêm do armazenamento seguro do Hermes em tempo de execução. O plugin não cria outra chave, não solicita a credencial na tela e não persiste nem registra seu valor. Se Hermes não fornecer configuração funcional do Telegram ou um destinatário autorizado, bloquear a candidatura automática e deixar tarefa em needs_review no dashboard.
+O canal de pergunta é obrigatório quando o agente não consegue decidir com segurança como responder ou continuar uma candidatura. Reutilizar a capability Telegram já vinculada ao Hermes: o plugin não oferece campos de bot token, chat ID ou destinatário e não envia `recipientId`; o gateway do Hermes resolve o vínculo e fornece a identidade autorizada para validação das respostas. Se o Hermes não fornecer uma capability funcional, bloquear a candidatura automática e deixar a tarefa em `needs_review` no dashboard.
 
 Para cada dúvida, criar um identificador human_question_id único associado a application_id, job_id, resume_id e resume_version. Salvar status, pergunta, instante, etapa do formulário e referência segura ao campo; evitar persistir dados sensíveis da página. Bloquear o worker daquela candidatura enquanto aguarda. Outros agentes e vagas podem continuar.
 
@@ -674,7 +674,7 @@ Feature: mapa e validação
 | Unitário: feedback total/parcial | confirmação, justificativa ausente/curta/longa, categoria e detalhe | total cria regra de supressão; parcial mantém estado e nunca suprime vagas automaticamente |
 | Unitário: aprendizagem | sinais positivo/negativo, SEM TEMPO, vaga repetida, ajuste inicial e teto | repetição não conta duas vezes; sem histórico ajuste=0; ajuste entre -10 e +10 |
 | Unitário: regra e restauração | limites de similaridade, regra pausada, restaurar item/todos | item fora da regra não é suprimido; restaurar um não desativa a regra |
-| Unitário: escalonamento Telegram | sem token/destinatário, resposta de chat/ID errado, texto ambíguo, timeout, falha após a tentativa inicial e 3 retentativas, resposta correta, PULAR opcional/obrigatório | sem Telegram funcional/resposta clara não há retomada; PULAR obrigatório é recusado; apenas pergunta/candidatura vinculadas são liberadas |
+| Unitário: escalonamento Telegram | capability vinculada ausente, resposta de identidade errada, texto ambíguo, timeout, falha após a tentativa inicial e 3 retentativas, resposta correta, PULAR opcional/obrigatório | sem Telegram funcional/resposta clara não há retomada; PULAR obrigatório é recusado; apenas pergunta/candidatura vinculadas são liberadas |
 | Integração: migração | banco novo e banco legado | migração repetida idempotente; relações antigas preservadas |
 | Integração: API | autenticação, escopo, schema, concorrência, rate limit | sem token=401, sem escopo=403, payload inválido=422, conflito=409 |
 | Integração: rodada | 3 fontes, uma falha, retry, lote repetido e duas rodadas | partial correto; contagens reconciliam; sem perda/duplicação |
@@ -693,10 +693,10 @@ Feature: mapa e validação
 5. Teste de carga com 10 fontes, 500 resultados e limite de 20 workers não excede o limite, não duplica itens e termina em até 15 minutos no ambiente de referência, excluindo indisponibilidade/limite da fonte.
 6. API autenticada e teste de restauração de backup aprovado.
 7. Quota, atribuição, chaves, domínio, termos e falha do mapa verificados em produção.
-8. Token/destinatário Telegram são lidos do Hermes; perguntas e respostas testadas no chat autorizado; falha de entrega comprovadamente bloqueia o envio.
+8. Capability e identidade Telegram são herdadas do vínculo do Hermes, sem configuração no plugin; perguntas e respostas são testadas na conta autorizada e falha de entrega bloqueia o envio.
 9. Rejeição total sem motivo/categoria retorna 422; regra total suprime 100% das vagas que atendem ao critério e não suprime vagas fora dele.
 10. Rejeição parcial preserva estado da vaga, grava faceta e não cria supressão rígida; três sinais compatíveis em até 90 dias geram sugestão visível.
-11. Usuário valida Grillme, dados, editor de prompt, rejeição total/parcial, restauração de filtros, Kanban, mapa e candidatura manual em staging.
+11. Usuário valida Grillme, dados, editor de prompt, rejeição total/parcial, restauração de filtros, Kanban, mapa e candidatura manual antes de ativar agendamentos.
 12. Usuário cria e versiona um agente no dashboard; servidor comprova negação por padrão, allowlist de domínio, aplicação dos quatro escopos e trilha de auditoria.
 13. Cartões compactos, detalhe completo, dois links e proveniência por campo passam por aceite visual/funcional; `browser.read` não consegue preencher nem enviar candidatura, com ou sem `AUTORIZO` de outra tarefa.
 
@@ -711,7 +711,7 @@ Feature: mapa e validação
 7. Geoapify, cache, limites, precisão, clusters, filtros e fallback sem coordenada.
 8. Detalhe completo, cartões compactos, dois links e proveniência/evidência por campo.
 9. Verificações ATS e Browser Harness isolado do navegador de leitura, sob AUTORIZO por vaga/versão; logs sem conteúdo pessoal.
-10. Testes de aceitação, observabilidade, restore, staging e runbook.
+10. Testes de aceitação, observabilidade, restore isolado e runbook da instalação única.
 
 ## 7. Mapa gratuito: limites e interpretação
 

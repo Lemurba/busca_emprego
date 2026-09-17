@@ -16,6 +16,13 @@ test("manifesto aponta para onboarding seguro e legível pelo Hermes", () => {
   assert.equal(manifest.onboarding.guide, "ONBOARDING.md");
   assert.equal(onboarding.secretPolicy.collection, "host-secure-input");
   assert.equal(onboarding.secretPolicy.neverAskInChat, true);
+  assert.equal(onboarding.installation.mode, "production");
+  assert.equal(onboarding.installation.selectableEnvironment, false);
+  assert.equal(onboarding.installation.singleApplication, true);
+  assert.equal(onboarding.prompts.environment, undefined);
+  assert.equal(onboarding.telegramIntegration.source, "hermes-linked-capability");
+  assert.equal(onboarding.telegramIntegration.requestBotToken, false);
+  assert.equal(onboarding.telegramIntegration.requestRecipient, false);
   assert.deepEqual(Object.keys(onboarding.sourceAuthFlows).sort(), ["basic", "bearer", "browser_profile", "none"]);
   assert.equal(onboarding.sourceAuthFlows.browser_profile.requiresBrowserProfile, true);
   assert.equal(onboarding.readiness.requireAuthenticatedBootstrap, true);

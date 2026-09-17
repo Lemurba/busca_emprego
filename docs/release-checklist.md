@@ -38,7 +38,7 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 
 ## Telegram e candidaturas
 
-- [ ] Token e destinatário vêm do Hermes e não do banco/plugin/log
+- [ ] Capability e identidade Telegram são herdadas do vínculo do Hermes; nenhum bot token, chat ID ou destinatário é configurado no plugin
 - [ ] Chat/usuário autorizado validado no ambiente real
 - [ ] Pergunta vinculada a uma única vaga/campo e resposta ambígua não libera execução
 - [ ] Falha/timeout mantém `needs_review` e impede submissão
@@ -59,7 +59,7 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 ## Dados, backup e rollback
 
 - [ ] Backup pré-deploy criado, manifesto SHA-256 conferido e cópia off-host criptografada
-- [ ] Restore executado com sucesso em staging a partir desse formato de backup
+- [ ] Restore executado com sucesso em caminho isolado a partir desse formato de backup
 - [ ] Retenção/exclusão LGPD, frequência de backup, RPO e RTO aprovados
 - [ ] Release anterior e instrução de rollback acessíveis ao operador
 - [ ] Migrações do release declaram compatibilidade e rollback/forward fix
@@ -68,7 +68,7 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 ## Aceite funcional e produção
 
 - [ ] Gates 1–11 da seção 5 do SDD têm evidência anexada
-- [ ] Usuário aprovou Grillme, prompts, rejeições, restauração, Kanban, mapa e fluxo manual em staging
+- [ ] Usuário aprovou Grillme, prompts, rejeições, restauração, Kanban, mapa e fluxo manual antes de ativar os agendamentos
 - [ ] Fontes permitidas e seus termos/cotas foram aprovados
 - [ ] Alertas de API, banco, disco, fila, fontes, mapa e Telegram entregam ao plantão
 - [ ] Smoke test pós-deploy passou sem dados sintéticos residuais

@@ -2,7 +2,7 @@
 
 O módulo `src/auth.ts` fornece autenticação Bearer para usuários e para o serviço Hermes, autorização por projeto e ferramenta e rate limiting local. `src/server.ts` aplica essa verificação a todas as rotas `/api`, exceto o health check. A porta ainda deve permanecer em rede interna ou atrás de proxy TLS.
 
-Em staging/produção, defina `RADAR_TRUST_PROXY_TLS=true`; qualquer rota funcional sem `X-Forwarded-Proto: https` retorna 426. O proxy deve remover o cabeçalho recebido do cliente e defini-lo sozinho. `RADAR_OPERATOR_ID` é obrigatório e `/api/ready` comprova banco íntegro e operador configurado. Respostas incluem CSP, `frame-ancestors 'none'`, `nosniff`, política de permissões e referrer restritivo; HSTS é aplicado pelo proxy TLS.
+Na instalação única de produção, defina `RADAR_TRUST_PROXY_TLS=true`; qualquer rota funcional sem `X-Forwarded-Proto: https` retorna 426. O proxy deve remover o cabeçalho recebido do cliente e defini-lo sozinho. `RADAR_OPERATOR_ID` é obrigatório e `/api/ready` comprova banco íntegro e operador configurado. Respostas incluem CSP, `frame-ancestors 'none'`, `nosniff`, política de permissões e referrer restritivo; HSTS é aplicado pelo proxy TLS.
 
 Fontes guardam somente referências (`secret_ref`) ou perfis (`browser_profile_id`) administrados pelo Hermes. Adapters externos recusam HTTP fora de localhost de teste, credenciais embutidas em URL, destino local/privado e redirecionamento fora da allowlist. O Browser Harness de candidatura é uma interface separada e exige envelope de autorização com hash da URL, vaga, currículo e versão; um resultado `submitted` sem evidência é inválido.
 

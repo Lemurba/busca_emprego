@@ -1,6 +1,6 @@
 # Onboarding do Busca Emprego no Hermes
 
-Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigurar o plugin. O contrato legível por máquina está em `onboarding.json`; este guia explica as decisões, perguntas e verificações. O fluxo é **fail closed**: se uma resposta, credencial, autorização ou teste estiver ausente, o Hermes não habilita a fonte, o agente ou o agendamento correspondente.
+Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigurar o plugin. Existe **uma única aplicação**, instalada com configuração de produção; o usuário não escolhe entre staging e production. O mesmo artefato pode ser testado isoladamente antes do start, sem criar outra variante do aplicativo. O contrato legível por máquina está em `onboarding.json`. O fluxo é **fail closed**: se uma credencial, autorização ou teste estiver ausente, o Hermes não habilita a fonte, o agente ou o agendamento correspondente.
 
 ## 1. Regras que o Hermes deve obedecer
 
@@ -10,26 +10,21 @@ Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigura
 4. Só habilitar uma fonte após o usuário confirmar os termos, o domínio e as operações permitidas.
 5. Manter leitura/enriquecimento separados da sessão de candidatura. CAPTCHA, MFA ou dúvida interrompem o fluxo; nunca são contornados.
 6. `APROVO` aprova uma versão de currículo. Somente `AUTORIZO` permite uma candidatura automática para a vaga, currículo, versão e URL exatos.
+7. Usar exclusivamente a integração Telegram já vinculada ao Hermes. Não pedir bot token, chat ID, destinatário ou criação de outro bot.
 
 ## 2. Conversa inicial obrigatória
 
-O Hermes deve perguntar uma coisa por vez e resumir a configuração antes de gravá-la. Texto recomendado:
+O Hermes usa os padrões `/opt/hermes/plugins/busca-emprego`, `/var/lib/hermes/busca-emprego/radar.sqlite` e porta interna `8787`. Só pergunta o que não puder descobrir automaticamente. Texto recomendado:
 
-> Vou configurar o Busca Emprego sem receber segredos neste chat. Primeiro: você quer usar **staging** (recomendado para o primeiro teste) ou **production**?
-
-Depois:
+> Vou instalar a única versão de produção do Busca Emprego usando os padrões do Hermes. Não vou pedir credenciais neste chat e usarei o Telegram que já está vinculado ao Hermes.
 
 > Qual identificador do operador responsável por esta instalação? Ele será usado em `RADAR_OPERATOR_ID` e na auditoria.
-
-> Posso usar os caminhos padrão do ambiente escolhido para release, SQLite e backups, e a porta interna 18787 em staging/8787 em production?
 
 > Vou criar ou selecionar duas credenciais da API no cofre: uma de usuário e uma de serviço. Abra a entrada segura do Hermes; não cole os tokens aqui.
 
 > Quais fontes deseja ativar agora? Para cada uma, vou confirmar domínio, estratégia de autenticação, termos e operações permitidas.
 
-> Deseja conectar o Telegram para dúvidas durante uma candidatura? Vou testar a capability e o destinatário autorizados sem expor bot token ou chat ID ao plugin.
-
-Ao final, o Hermes mostra um resumo sem valores secretos e pede confirmação para construir e iniciar. O agendamento permanece desligado até o smoke test manual passar.
+O Hermes não faz pergunta de configuração do Telegram. Ele apenas verifica silenciosamente se a capability `telegram.question` já vinculada responde. Ao final, mostra um resumo sem valores secretos e pede confirmação para construir e iniciar. O agendamento permanece desligado até o smoke test manual passar.
 
 ## 3. Coleta de credenciais
 
@@ -38,7 +33,7 @@ Ao final, o Hermes mostra um resumo sem valores secretos e pede confirmação pa
 | Estratégia | Pergunta do Hermes | O que fica no plugin |
 | --- | --- | --- |
 | `none` | “Esta fonte é pública e não exige login?” | nenhuma credencial |
-| `bearer` | “Abra o cofre e informe o token desta fonte.” | `secret_ref`, por exemplo `hermes://busca-emprego/staging/fontes/exemplo-token` |
+| `bearer` | “Abra o cofre e informe o token desta fonte.” | `secret_ref`, por exemplo `hermes://busca-emprego/fontes/exemplo-token` |
 | `basic` | “Abra o cofre e informe usuário/senha desta fonte.” | uma referência ao conjunto seguro, nunca usuário/senha |
 | `browser_profile` | “Deseja criar ou selecionar um perfil isolado e autenticar-se na janela segura?” | `browser_profile_id` |
 
@@ -70,14 +65,14 @@ O Hermes deve gerar dois tokens aleatórios diferentes, com pelo menos 32 caract
 ]
 ```
 
-O texto acima descreve o formato; `VALOR_NO_COFRE` nunca deve aparecer em arquivo ou log. O token do runtime também é disponibilizado aos adapters por uma referência como `hermes://busca-emprego/staging/runtime-service-token`.
+O texto acima descreve o formato; `VALOR_NO_COFRE` nunca deve aparecer em arquivo ou log. O token do runtime também é disponibilizado aos adapters por uma referência como `hermes://busca-emprego/runtime-service-token`.
 
 Configuração mínima do plugin:
 
 ```json
 {
   "projectId": "busca-emprego",
-  "apiBaseUrl": "http://127.0.0.1:18787",
+  "apiBaseUrl": "http://127.0.0.1:8787",
   "maxConcurrency": 20,
   "maxPerDomain": 1,
   "batchSize": 25,
@@ -86,32 +81,31 @@ Configuração mínima do plugin:
   "integration": {
     "hermesBaseUrl": "https://hermes-gateway.internal",
     "browserHarnessBaseUrl": "https://browser-harness.internal",
-    "telegramGatewayBaseUrl": "https://telegram-gateway.internal",
-    "serviceTokenSecretRef": "hermes://busca-emprego/staging/runtime-service-token",
+    "serviceTokenSecretRef": "hermes://busca-emprego/runtime-service-token",
     "requestTimeoutMs": 120000,
     "allowInsecureLocalhost": false
   }
 }
 ```
 
-Os gateways precisam expor `v1/plugin-agents/invoke`, `v1/read`, `v1/applications/execute` e `v1/telegram/questions`. HTTPS é obrigatório, exceto localhost quando `allowInsecureLocalhost=true` for escolhido explicitamente para desenvolvimento.
+O gateway do Hermes expõe `v1/plugin-agents/invoke` e `v1/telegram/questions`; o último usa a conta/capability Telegram já vinculada. O Browser Harness expõe `v1/read` e `v1/applications/execute`. HTTPS é obrigatório, exceto localhost quando `allowInsecureLocalhost=true` for escolhido explicitamente para desenvolvimento.
 
 ## 5. Construir e iniciar
 
 No container Hermes existente, sem criar outro container:
 
 ```sh
-cd /opt/hermes/plugins/busca-emprego-staging
+cd /opt/hermes/plugins/busca-emprego
 npm ci
 npm test
 RADAR_OPERATOR_ID=operador-responsavel \
-RADAR_APP_DIR=/opt/hermes/plugins/busca-emprego-staging \
-RADAR_DB_PATH=/var/lib/hermes/busca-emprego-staging/radar.sqlite \
-PORT=18787 \
+RADAR_APP_DIR=/opt/hermes/plugins/busca-emprego \
+RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
+PORT=8787 \
 ops/hermes/radar-process.sh
 ```
 
-`RADAR_AUTH_CREDENTIALS` deve ser injetada pelo cofre no processo, não escrita nesse comando. Em operação contínua, o Hermes deve registrar `ops/hermes/radar-process.sh` no supervisor já usado pelo container; há exemplos em `ops/hermes/supervisord-radar*.conf.example`.
+`RADAR_AUTH_CREDENTIALS` deve ser injetada pelo cofre no processo, não escrita nesse comando. Em operação contínua, o Hermes registra `ops/hermes/radar-process.sh` no supervisor já usado pelo container, conforme `ops/hermes/supervisord-radar.conf.example`.
 
 Ordem de verificação:
 
@@ -139,7 +133,7 @@ Depois, faça uma execução manual com uma fonte. Confirme que a vaga contém `
 
 ## 7. Telegram e candidatura
 
-O Hermes seleciona uma capability Telegram já autorizada ou solicita bot/destinatário pela entrada segura do host. Envia uma mensagem de teste e verifica o remetente autorizado. Uma resposta do Telegram resolve apenas o `human_question_id` correspondente; ela não concede `AUTORIZO`.
+O Hermes fornece ao plugin a capability Telegram e a identidade vinculada à conta atual. O plugin não possui configuração de bot ou destinatário e não inclui `recipientId` na requisição: `v1/telegram/questions` entrega pelo vínculo já mantido pelo Hermes. O setup executa apenas um teste de capability. Uma resposta resolve somente o `human_question_id` correspondente e não concede `AUTORIZO`.
 
 O executor de candidatura usa o Browser Harness separado e chama `v1/applications/execute` somente com o envelope vigente de autorização. Mudança de URL, currículo ou versão invalida a autorização. Sem evidência observável do portal, o resultado não pode ser `submitted`.
 
@@ -151,4 +145,4 @@ O executor de candidatura usa o Browser Harness separado e chama `v1/application
 - Nova configuração de agente: criar draft, testar, publicar; nunca editar snapshot publicado no banco.
 - Falha de release: seguir `docs/operations-runbook.md`, incluindo backup, restore testado e rollback do release.
 
-O onboarding está concluído apenas quando health, readiness, autenticação, uma fonte, um agente publicado, proveniência/conflito e Telegram (se escolhido) tiverem evidências de teste. Produção continua bloqueada até todos os gates do checklist de release serem aprovados pelo operador.
+O onboarding está concluído apenas quando health, readiness, autenticação, uma fonte, um agente publicado, proveniência/conflito e a capability Telegram vinculada tiverem evidências de teste. Se o Telegram do Hermes estiver indisponível, a busca continua, mas qualquer candidatura com dúvida permanece em `needs_review`.

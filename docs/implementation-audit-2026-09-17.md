@@ -6,7 +6,7 @@
 
 ## Resultado executivo
 
-O repositório inicial era um protótipo funcional. Nesta rodada foram implementados e testados os fundamentos de autenticação, validação de domínio, workflow, feedback de rejeição, preferências, escalonamento de dúvidas, plugin Hermes por adapters, CI e operação SQLite. A integração real com o runtime Hermes, Telegram, Browser Harness, Geoapify, fontes e staging ainda depende do ambiente externo.
+O repositório inicial era um protótipo funcional. Nesta rodada foram implementados e testados os fundamentos de autenticação, validação de domínio, workflow, feedback de rejeição, preferências, escalonamento de dúvidas, plugin Hermes por adapters, CI e operação SQLite. A integração real com o runtime Hermes, Telegram, Browser Harness, Geoapify e fontes ainda depende do ambiente externo. O aplicativo possui uma única configuração de produção; a validação usa o mesmo artefato antes da ativação.
 
 Uma instalação não pode ser classificada como pronta para produção enquanto todos os gates do SDD não tiverem evidência no ambiente real.
 
@@ -62,7 +62,7 @@ Esses itens estão especificados no SDD/BDD/TDD, contrato HTTP, segurança e che
 - semântica/preview de regras de supressão mais complexas, principalmente texto livre `other`;
 - critério semântico determinístico de resposta Telegram ambígua;
 - ambiente de referência do teste de carga (CPU, RAM, latência e fixtures);
-- destino de staging/produção, TLS/domínio, operador e canal de incidentes;
+- destino da instalação única, TLS/domínio, operador e canal de incidentes;
 - orçamento/modelos dos agentes e limites de custo.
 - regra exata de correspondência de `allowed_domains`: host exato versus subdomínios, wildcard, portas, IDN/punycode e redirecionamentos encadeados;
 - política para portais em que a publicação e o formulário oficial usam domínios diferentes ou destinos dinâmicos de ATS;
@@ -78,16 +78,16 @@ Estimativa para equipe de duas pessoas, com QA/DevOps parcial e dependências ex
 
 | Marco | Janela estimada a partir de 17/09/2026 |
 |---|---|
-| MVP manual seguro em staging, sem candidatura automática | 22/10/2026 a 05/11/2026 |
-| Staging completo para o usuário executar todos os cenários do SDD | 03/12/2026 a 07/01/2027 |
+| MVP manual seguro no artefato de produção, sem candidatura automática | 22/10/2026 a 05/11/2026 |
+| Validação completa para o usuário executar todos os cenários do SDD | 03/12/2026 a 07/01/2027 |
 | Produção após piloto, correções e aprovação dos gates | 17/12/2026 a 28/01/2027 |
 
-Com uma pessoa, a estimativa total passa a 18 a 27 semanas. As janelas não são promessa de calendário: começam a contar quando contratos do Hermes, fontes, credenciais, staging e responsável operacional estiverem disponíveis. Bloqueio externo pausa a previsão.
+Com uma pessoa, a estimativa total passa a 18 a 27 semanas. As janelas não são promessa de calendário: começam a contar quando contratos do Hermes, fontes, credenciais e responsável operacional estiverem disponíveis. Bloqueio externo pausa a previsão.
 
 ## Condições para o teste do usuário
 
-O usuário deve testar em staging quando houver: instalação real no Docker Hermes, token de usuário com `agents.manage`, credencial de serviço com o menor conjunto de capacidades, agente configurado com `allowed_domains`, perfil Grillme confirmado, ao menos uma fonte permitida, Geoapify configurado, Telegram autorizado e Browser Harness disponível. O teste deve incluir cartão compacto/detalhe, dois links e proveniência. A candidatura automática deve permanecer desabilitada até o cenário E2E de isolamento, dúvida/resposta/retomada e vínculo da URL ao `AUTORIZO` passar sem envio indevido.
+O usuário deve testar o mesmo artefato de produção, com agendamentos inicialmente desabilitados, quando houver: instalação real no Docker Hermes, token de usuário com `agents.manage`, credencial de serviço com o menor conjunto de capacidades, agente configurado com `allowed_domains`, perfil Grillme confirmado, ao menos uma fonte permitida, Geoapify configurado, capability Telegram já vinculada e Browser Harness disponível. O teste deve incluir cartão compacto/detalhe, dois links e proveniência. A candidatura automática permanece desabilitada até o cenário E2E de isolamento, dúvida/resposta/retomada e vínculo da URL ao `AUTORIZO` passar sem envio indevido.
 
 ## Critério de produção
 
-Produção exige todos os gates da seção 5 do SDD, restauração comprovada, evidência de isolamento por projeto e navegador, enforcement de capacidades/allowlist, proveniência por campo, logs sanitizados, rollback ensaiado, quota/atribuição do mapa verificadas e validação humana em staging. Até isso ocorrer, o rótulo correto é **pré-produção, não pronto para produção**.
+A ativação exige todos os gates da seção 5 do SDD, restauração comprovada, evidência de isolamento por projeto e navegador, enforcement de capacidades/allowlist, proveniência por campo, logs sanitizados, rollback ensaiado, quota/atribuição do mapa verificadas e validação humana no mesmo artefato. Até isso ocorrer, o rótulo correto é **instalado, mas ainda não ativado para automação**.

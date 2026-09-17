@@ -1407,7 +1407,7 @@ export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   const job = getJob(jobId);
-  const eventId = idFor(`enrichment|${agentId}|${jobId}|${Date.now()}`);
+  const eventId = idFor(`enrichment|${agentId}|${jobId}|${Date.now()}|${Math.random()}`);
   db.prepare("INSERT INTO job_enrichment_events (id,job_id,agent_id,source_url,fields_changed,evidence_excerpt,created_at) VALUES (?,?,?,?,?,?,?)")
     .run(eventId, jobId, agentId, sourceUrl, JSON.stringify(entries.map(([key]) => key)), evidenceExcerpt.slice(0, 500), now());
   audit("job", jobId, "enriched_by_agent", { agent_id: agentId, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });

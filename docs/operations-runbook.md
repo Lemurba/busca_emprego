@@ -1,6 +1,6 @@
-# Runbook de staging e produção no Docker Hermes
+# Runbook da instalação única no Docker Hermes
 
-Este runbook opera o Radar como **processo adicional no container Hermes existente**. O projeto não fornece nem requer uma imagem Docker própria. A implantação continua bloqueada até que os gates externos e funcionais de `production-sdd-bdd-tdd.md` sejam aprovados.
+Este runbook opera uma única instalação de produção do Radar como **processo adicional no container Hermes existente**. Não há seleção de staging/production, segunda variante do aplicativo ou Docker próprio. A validação acontece sobre o mesmo artefato antes de colocá-lo em tráfego.
 
 Para uma instalação nova, o Hermes deve executar primeiro o fluxo interativo de [`hermes-plugin/ONBOARDING.md`](../hermes-plugin/ONBOARDING.md), definido por [`hermes-plugin/onboarding.json`](../hermes-plugin/onboarding.json). Este runbook assume que o diálogo seguro de credenciais, os perfis de navegador e o operador responsável já foram confirmados.
 
@@ -26,20 +26,19 @@ O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node rece
 | `RADAR_HEALTH_URL` | recomendado | configuração do monitor | URL interna de `/api/health` |
 | `GEOAPIFY_API_KEY` | ainda não consumido | secret store do Hermes | não configurar até o backend Geoapify existir; nunca incluir no Git |
 | chave pública de tiles Geoapify | ainda não consumida | configuração do frontend | restringir por origem/domínio e quota; não reutilizar a chave server-side |
-| token/destinatário Telegram | gate externo | secret store do Hermes | o plugin deve receber handles/capacidade em runtime; nunca copiar os valores para `.env`, SQLite ou logs |
+| capability Telegram | gate externo | vínculo existente do Hermes | descoberta automaticamente; não configurar bot token, chat ID ou destinatário no plugin |
 | `RADAR_AUTH_CREDENTIALS` | sim | secret store do Hermes | JSON com tokens de pelo menos 32 caracteres, projetos e ferramentas; nunca gravar em arquivo versionado |
 | `RADAR_AUTH_RATE_LIMIT_MAX` / `RADAR_AUTH_RATE_LIMIT_WINDOW_MS` | recomendado | configuração | limites por processo; múltiplas réplicas exigem limitador compartilhado |
 
 Arquivos `.env` não são artefatos de deploy e já são ignorados pelo Git. Use injeção do secret store do Hermes.
 
-## 3. Deploy em staging
+## 3. Instalação ou atualização
 
-Use `ops/hermes/staging.env.example`, `supervisord-radar-staging.conf.example` e `nginx-radar-staging.conf.example`. Staging usa release, banco, backup, porta e credenciais próprios; não reutilize perfil autenticado, destinatário Telegram ou token de produção. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela janela e é obrigatório em staging/produção.
+Use somente `ops/hermes/radar.env.example`, `supervisord-radar.conf.example` e `nginx-radar.conf.example`. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela instalação e é obrigatório.
 
 1. Criar release imutável a partir de commit identificado; registrar o SHA.
 2. Dentro do release, executar `npm ci`, `npm test` e `node test/ops.test.mjs`.
-3. Parar somente o processo Radar em staging.
-4. Executar backup do banco atual:
+3. Se já existir uma instalação, executar backup do banco atual:
 
    ```bash
    RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
@@ -47,8 +46,8 @@ Use `ops/hermes/staging.env.example`, `supervisord-radar-staging.conf.example` e
    node scripts/ops/backup-sqlite.mjs
    ```
 
-5. Trocar o symlink/diretório de release, preservando o volume de dados, e iniciar pelo supervisor.
-6. Executar o health check profundo:
+4. Parar somente o processo Radar, trocar o symlink/diretório de release preservando o volume de dados e iniciar pelo supervisor.
+5. Executar o health check profundo:
 
    ```bash
    RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
@@ -56,9 +55,10 @@ Use `ops/hermes/staging.env.example`, `supervisord-radar-staging.conf.example` e
    node scripts/ops/health-check.mjs
    ```
 
-7. Fazer smoke test autenticado pelo caminho real do Hermes: abrir dashboard, carregar `/api/bootstrap`, criar uma vaga sintética e conferir que ela não aparece em produção.
-8. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não promover com falhas, skips ou gates “não aplicáveis” sem aprovação registrada.
-9. Pelo endpoint TLS publicado, executar `RADAR_PUBLIC_URL=https://... RADAR_VERIFY_TOKEN=... node scripts/ops/verify-environment.mjs --environment staging`. O verificador exige health, readiness, operador, HSTS, bloqueio sem autenticação e bootstrap autenticado.
+6. Fazer smoke test autenticado pelo caminho real do Hermes: abrir dashboard, carregar `/api/bootstrap` e criar uma vaga sintética removível.
+7. Pelo endpoint TLS publicado, executar `RADAR_PUBLIC_URL=https://... RADAR_VERIFY_TOKEN=... node scripts/ops/verify-environment.mjs --environment production`. O verificador exige health, readiness, operador, HSTS, bloqueio sem autenticação e bootstrap autenticado.
+8. Verificar `telegram.question` pelo vínculo existente do Hermes. O teste não pede nem recebe bot token, chat ID ou destinatário.
+9. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não ativar agendamentos ou candidatura automática com falhas, skips ou gates sem aprovação registrada.
 
 ### Publicação e rollback de agentes
 
@@ -68,9 +68,9 @@ Editar um agente cria uma versão `draft`; a versão publicada continua governan
 
 Cadastre fontes em `/api/sources`. `auth_strategy` aceita `none`, `bearer`, `basic` ou `browser_profile`. Para `bearer/basic`, `secret_ref` é um identificador do secret store; para sessões como Glassdoor, use `browser_profile_id`. A API recusa fonte habilitada sem confirmação literal dos termos e recusa valores que aparentem ser segredo embutido. Rotação ocorre no Hermes sem regravar o segredo neste banco.
 
-## 4. Promoção para produção
+## 4. Ativação
 
-Antes da janela, confirmar operador, canal de incidente, release anterior, backup íntegro e espaço livre. Parar o processo Radar; não é necessário parar todo o Hermes quando o supervisor permite controle individual. Repetir os passos 4–6 de staging. Após iniciar:
+Antes de habilitar os agentes, confirmar operador, canal de incidente, release anterior, backup íntegro e espaço livre. Não é necessário parar todo o Hermes quando o supervisor permite controle individual. Após iniciar:
 
 - verificar API, SQLite e volume com `health-check.mjs`;
 - verificar logs sem CV, tokens, URLs privadas ou conteúdo de prompts;
