@@ -8,8 +8,9 @@ Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e 
 - Envie `Content-Type: application/json` em toda requisição com corpo.
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
-- O limite do corpo JSON é 2 MB.
+- O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
 - A API não possui autenticação própria. Use-a pela rede interna do Hermes ou atrás do controle de acesso já configurado nele.
+- Uma migração local única (`anonymize_public_vacancy_data_v1`) substitui os dados existentes das vagas por marcadores genéricos, limpa links, salários, descrições, coordenadas, notas e payloads de auditoria. Mantém IDs e relações com currículos/candidaturas. O banco demonstrativo não deve ser usado como cópia de arquivo dos dados anteriores.
 
 ## Regras de preenchimento
 
@@ -18,7 +19,8 @@ Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e 
 3. Não invente salário, prazo ou estado de abertura. Se não houver confirmação, use `opening_status: "unknown"`, deixe `deadline_at` como `null` e registre a incerteza na descrição.
 4. Uma candidatura só deve receber `status: "submitted"` quando o envio tiver sido confirmado. Envie `submitted_at` se souber o horário; se omitir, a API grava o horário atual.
 5. `decision: "not_interested"` e `decision: "no_time"` registram decisões diferentes. `lifecycle: "lost"` é calculado pelo servidor quando a vaga fecha ou vence sem candidatura enviada.
-6. Valores aceitos estão listados abaixo. O servidor não valida todos os tipos de campo antes de gravar; os agentes devem seguir os tipos e enums deste contrato.
+6. A ingestão de vagas não pode registrar interesse, aprovar currículos ou autorizar candidaturas. Essas ações exigem as rotas de confirmação humana descritas abaixo.
+7. Valores aceitos estão listados abaixo. O servidor não valida todos os tipos de campo antes de gravar; os agentes devem seguir os tipos e enums deste contrato.
 
 ## Endpoints
 
@@ -42,6 +44,7 @@ Resposta `200` contém:
 | --- | --- | --- |
 | `jobs` | `Job[]` + campos calculados | Vagas ordenadas por match; consulte os campos de vaga abaixo |
 | `resumes` | `Resume[]` | Currículos ATS |
+| `baseResumes` | metadados de PDF | Biblioteca local; os bytes do PDF não são incluídos |
 | `applications` | `Application[]` | Registros de candidatura |
 | `companies` | `Company[]` | Contagem de vagas, salário mínimo médio registrado, locais e fontes por empresa |
 | `agentRuns` | `AgentRun[]` | Até 20 execuções mais recentes |
@@ -76,6 +79,8 @@ Campos de entrada:
 | `company` | `string` | Sim | Empresa |
 | `location` | `string` | Não | `"Não informado"` |
 | `country` | `string` | Não | `"Brasil"` |
+| `latitude` | `number \| null` | Não | `null`; latitude WGS84 opcional usada pelo mapa |
+| `longitude` | `number \| null` | Não | `null`; longitude WGS84 opcional usada pelo mapa |
 | `work_model` | `string` | Não | `"Não informado"`; por exemplo `Remoto`, `Híbrido`, `Presencial` |
 | `seniority` | `string` | Não | `"Não informado"` |
 | `salary_min` | `number \| null` | Não | `null`; valor mensal mínimo conhecido |
@@ -92,16 +97,16 @@ Campos de entrada:
 | `opening_checked_at` | `string \| null` | Não | `null`; data ISO 8601 em que a abertura foi conferida |
 | `deadline_at` | `string \| null` | Não | `null`; prazo ISO 8601 informado pela fonte |
 | `closed_at` | `string \| null` | Não | `null`; data ISO 8601 em que o fechamento foi confirmado |
-| `decision` | `string` | Não | `pending`; valores: `pending`, `interested`, `not_interested`, `no_time`, `expired`, `applied` |
-| `decision_at` | `string \| null` | Não | `null`; data ISO 8601 da decisão |
+| `decision` | `string` | Não | Campos recebidos são ignorados. A decisão só muda em `POST /api/jobs/{id}/decision` |
+| `decision_at` | `string \| null` | Não | Preenchido pelo servidor na rota de decisão |
 | `description` | `string` | Não | `""`; descrição, requisitos ou observações |
 | `match_score` | `integer` | Não | `0`; aderência estimada de 0 a 100 |
-| `status` | `string` | Não | `found`; use um dos status de quadro listados abaixo |
+| `status` | `string` | Não | O valor recebido é ignorado na ingestão; vaga nova começa em `found`. O status de vaga existente é preservado |
 | `posted_at` | `string \| null` | Não | `null`; data ISO 8601 de publicação |
 
-O servidor preenche `created_at` e `updated_at`; não os envie.
+O servidor preenche `created_at` e `updated_at`; não os envie. A ingestão também preserva a decisão/status de uma vaga existente para que agentes não avancem o fluxo controlado pelo usuário.
 
-Status de quadro aceitos: `found`, `validation`, `strong_match`, `review`, `selected`, `resume`, `resume_approved`, `ready_to_apply`, `applying`, `applied`, `discarded`, `expired`.
+Status de quadro possíveis: `found`, `validation`, `strong_match`, `review`, `selected`, `resume`, `resume_approved`, `ready_to_apply`, `applying`, `applied`, `discarded`, `expired`. A ingestão inicia em `found`; decisões, currículo e candidatura avançam as etapas protegidas.
 
 Exemplo de criação:
 
@@ -109,7 +114,9 @@ Exemplo de criação:
 {
   "title": "Analista de EHS",
   "company": "Empresa Exemplo",
-  "location": "São Paulo, SP",
+  "location": "Cidade, UF",
+  "latitude": -23.55,
+  "longitude": -46.63,
   "work_model": "Híbrido",
   "seniority": "Pleno",
   "salary_min": 6500,
@@ -126,7 +133,6 @@ Exemplo de criação:
   "opening_checked_at": "2026-09-16T12:00:00.000Z",
   "deadline_at": "2026-10-01T23:59:00.000Z",
   "match_score": 86,
-  "status": "review",
   "description": "Requisitos e observações relevantes da vaga."
 }
 ```
@@ -135,16 +141,20 @@ Resposta: `201` com o objeto `Job` salvo.
 
 ### `PATCH /api/jobs/{id}`
 
-Atualiza apenas os campos editáveis da vaga. Todos os campos de entrada da tabela `POST /api/jobs` podem ser enviados, exceto `created_at` e `updated_at`. Campos desconhecidos são ignorados. Resposta `200` com o objeto atualizado ou `null` se não existir.
+Atualiza os campos descritivos editáveis da vaga. Não aceita alterações de `decision` ou avanço para etapas protegidas. Para uma movimentação de descoberta, `status` só pode ser `found`, `validation`, `strong_match` ou `review`. Campos desconhecidos são ignorados. Resposta `200` com o objeto atualizado ou `null` se não existir.
 
-Exemplo para registrar uma decisão:
+### `POST /api/jobs/{id}/decision`
+
+Esta rota registra a decisão explícita do usuário. O corpo requer a frase exata conforme a decisão:
 
 ```json
 {
-  "decision": "no_time",
-  "decision_at": "2026-09-16T15:30:00.000Z"
+  "decision": "interested",
+  "confirmation": "TENHO INTERESSE"
 }
 ```
+
+Valores aceitos: `interested` + `TENHO INTERESSE`, `not_interested` + `SEM INTERESSE`, ou `no_time` + `SEM TEMPO`. Resposta `200` com a vaga atualizada. A decisão não pode ser alterada enquanto o envio estiver em andamento ou depois de enviada a candidatura.
 
 ### `POST /api/resumes`
 
@@ -154,18 +164,41 @@ Cria um currículo vinculado a uma vaga existente.
 | --- | --- | --- | --- |
 | `job_id` | `string` | Sim | ID de uma vaga existente |
 | `title` | `string` | Sim | Nome da versão, por exemplo `Currículo ATS — Analista de EHS` |
+| `base_resume_id` | `string \| null` | Não | PDF-base existente da biblioteca, se usado |
 | `id` | `string` | Não | Gerado pelo servidor |
-| `version` | `integer` | Não | `1` |
-| `status` | `string` | Não | `draft`; valores: `draft`, `review`, `approved` |
+| `version` | `integer` | Não | `1`; controlado pelo servidor nas edições subsequentes |
+| `status` | `string` | Não | Sempre criado como `draft`; não permite aprovar pelo payload |
 | `content` | `string` | Não | `""`; texto do currículo |
 | `keywords` | `string[]` | Não | `[]`; palavras-chave da vaga |
 | `changes` | `string[]` | Não | `[]`; alterações/sugestões feitas |
 
-Resposta: `201` com o objeto `Resume`, incluindo `created_at` e `updated_at`.
+É necessário que a vaga esteja marcada como `interested`. O servidor força `status: "draft"` mesmo que o payload peça aprovação. Resposta: `201` com o objeto `Resume`, incluindo `base_resume_id`, `created_at` e `updated_at`.
 
 ### `PATCH /api/resumes/{id}`
 
-Atualiza somente `title`, `status`, `content`, `keywords` e `changes`. `keywords` e `changes` devem ser arrays de strings. Resposta `200` com o currículo atualizado ou `null` se não existir.
+Atualiza somente `base_resume_id`, `title`, `status`, `content`, `keywords` e `changes`. `keywords` e `changes` devem ser arrays de strings. `status: "approved"` não é aceito nesta rota. Antes de editar um currículo aprovado, primeiro mude-o para `review`; isso cria outra versão e invalida qualquer autorização automática vinculada à versão anterior. Resposta `200` com o currículo atualizado ou `null` se não existir.
+
+### `POST /api/resumes/{id}/approve`
+
+Registra que o usuário revisou a versão salva do currículo. Corpo:
+
+```json
+{ "confirmation": "APROVO" }
+```
+
+A vaga precisa continuar marcada como de interesse. A resposta `200` contém o currículo aprovado. A aprovação não inicia candidatura e não concede autorização automática.
+
+### Biblioteca de PDFs-base
+
+| Método e rota | Uso |
+| --- | --- |
+| `GET /api/base-resumes` | Lista metadados; não inclui os bytes dos arquivos |
+| `POST /api/base-resumes` | Envia um PDF-base |
+| `GET /api/base-resumes/{id}/file` | Baixa o PDF com `Content-Disposition: attachment` |
+| `POST /api/base-resumes/{id}/select` | Seleciona a base padrão para novas adaptações |
+| `DELETE /api/base-resumes/{id}` | Remove o PDF e limpa vínculos de base dos currículos |
+
+O envio é JSON com `title`, `file_name` e `file_data` (bytes codificados em Base64), limite de 5 MB e cabeçalho `%PDF-` obrigatório. O primeiro PDF vira a base selecionada; a seleção pode ser alterada. O conteúdo binário fica somente no SQLite local. Não inclua PDF ou dados pessoais em `POST /api/agent-events`.
 
 ### `POST /api/applications`
 
@@ -175,20 +208,39 @@ Cria um registro de candidatura.
 | --- | --- | --- | --- |
 | `job_id` | `string` | Sim | ID da vaga existente |
 | `id` | `string` | Não | Gerado pelo servidor |
-| `resume_id` | `string \| null` | Não | `null`; ID de currículo, se existir |
-| `status` | `string` | Não | `queued`; valores: `queued`, `in_progress`, `needs_review`, `submitted`, `accepted`, `rejected`, `failed` |
-| `automation_mode` | `string` | Não | `assisted`; valores: `manual`, `assisted`, `authorized_auto` |
-| `current_step` | `string` | Não | `"Aguardando revisão"` |
-| `submitted_at` | `string \| null` | Não | Se o status for `submitted`, `accepted` ou `rejected` e a data for omitida, o servidor registra o horário atual |
+| `resume_id` | `string` | Sim | ID do currículo aprovado para esta vaga |
+| `status` | `string` | Não | Sempre inicia como `queued`; estado recebido é ignorado |
+| `automation_mode` | `string` | Não | `manual` seleciona fluxo manual; todos os outros valores iniciam como `assisted`. `authorized_auto` exige rota própria |
+| `current_step` | `string` | Não | `"Aguardando decisão de candidatura"` |
+| `submitted_at` | `string \| null` | Não | Ignorado ao criar; use a rota de atualização depois de confirmar o envio |
 | `notes` | `string` | Não | `""` |
 
-O status `submitted` deve ser usado após confirmar que a candidatura foi enviada. Essa chamada apenas grava o registro; não navega no portal nem envia candidatura. Resposta: `201` com `Application`.
+Exige vaga de interesse e currículo aprovado vinculado à vaga. O servidor aceita somente uma candidatura por vaga. A chamada cria o registro; não navega no portal nem envia candidatura. Resposta: `201` com `Application`.
 
 ### `PATCH /api/applications/{id}`
 
-Atualiza `resume_id`, `status`, `automation_mode`, `current_step`, `submitted_at` e `notes`. Ao mudar o status para `submitted` sem enviar `submitted_at`, o servidor preenche a data atual. Marcar `submitted`, `accepted` ou `rejected` também atualiza a vaga para `status: "applied"` e `decision: "applied"`.
+Atualiza `resume_id`, `status`, `current_step`, `submitted_at` e `notes`. Não permite mudar diretamente `automation_mode`. Marcar `submitted` só é permitido após selecionar o modo manual ou autorizar explicitamente o modo automático; a vaga também precisa continuar como de interesse. Se `submitted_at` for omitido, o servidor usa o horário atual. Marcar `submitted`, `accepted` ou `rejected` atualiza a vaga para `status: "applied"` e `decision: "applied"`.
+
+`in_progress` exige uma autorização automática vigente e só pode ser iniciado uma vez. Um envio automático só pode virar `submitted` enquanto está em andamento. `failed` só pode ser registrado para um envio automático autorizado; `accepted` e `rejected` exigem uma candidatura previamente enviada. A seleção manual pode confirmar um envio depois que o usuário o realizou no portal.
 
 Resposta `200` com `Application` atualizado ou `null` se não existir.
+
+### Escolha e autorização do modo de candidatura
+
+| Método e rota | Comportamento |
+| --- | --- |
+| `POST /api/applications/{id}/select-manual` | Escolhe o modo manual em uma candidatura aguardando início; remove uma autorização automática pendente |
+| `POST /api/applications/{id}/authorize-auto` | Registra autorização automática para uma vaga e versão de currículo |
+| `POST /api/applications/{id}/revoke-auto` | Revoga a autorização antes do início do envio |
+| `GET /api/authorized-applications` | Lista somente candidaturas em fila com autorização ainda válida |
+
+Para autorizar, envie `resume_id` e a confirmação exata `AUTORIZO`:
+
+```json
+{ "resume_id": "id-do-curriculo", "confirmation": "AUTORIZO" }
+```
+
+A vaga deve estar marcada como de interesse, o currículo associado deve estar aprovado, e a autorização fica vinculada ao ID e à versão do currículo. Uma autorização já concedida não pode ser repetida; revogue-a primeiro para voltar ao fluxo manual ou reiniciar a escolha. O executor Hermes/Browser Harness deve consultar `GET /api/authorized-applications`; alterar para `in_progress` só é permitido para um item válido da fila. O endpoint da fila entrega metadados da vaga e o conteúdo do currículo ATS, mas não executa o portal nem baixa o PDF-base automaticamente.
 
 ### `POST /api/agent-events`
 

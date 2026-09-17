@@ -115,7 +115,7 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
 .donut-legend strong { display: block; margin-bottom: 2px; color: var(--ink); font-size: 13px; }
 .map-panel { min-height: 340px; }
 .map-wrap { display: grid; grid-template-columns: minmax(250px, 1fr) 170px; align-items: center; gap: 12px; margin-top: 10px; }
-.map-svg { width: 100%; height: 250px; }
+.map-canvas { width: 100%; height: 250px; overflow: hidden; border-radius: 12px; background: #eaf1f7; color: var(--muted); }
 .map-shape { fill: #eaf6f4; stroke: #b4e4dc; stroke-width: 2; }
 .map-dot { stroke: #fff; stroke-width: 3; }
 .map-caption { margin: 2px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
@@ -183,6 +183,7 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
 .deadline-inline.lost { color: var(--red); }
 
 .resume-grid, .company-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.base-resume-form { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(240px, 1.2fr) auto; align-items: end; gap: 12px; margin: 14px 0 18px; }
 .resume-card, .company-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
 .resume-top, .company-top { display: flex; justify-content: space-between; gap: 12px; }
 .resume-card h3, .company-card h3 { font-size: 14px; line-height: 1.3; }
@@ -277,7 +278,7 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
   .metric-note { font-size: 10px; }
   .panel { padding: 16px; }
   .map-wrap { grid-template-columns: 1fr; }
-  .map-svg { height: 200px; }
+  .map-canvas { height: 200px; }
   .location-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .donut-layout { gap: 14px; }
   .donut { width: 125px; height: 125px; flex-basis: 125px; }
@@ -289,6 +290,7 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
   .section-head h2 { font-size: 16px; }
   .section-head .secondary-button { min-height: 32px; padding: 0 9px; font-size: 10px; }
   .form-grid, .detail-grid { grid-template-columns: 1fr; }
+  .base-resume-form { grid-template-columns: 1fr; }
   .form-field.full { grid-column: auto; }
   .modal { padding: 18px; }
   .modal-actions { justify-content: stretch; }
@@ -296,3 +298,34 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
   .mobile-move { display: block; }
   .toast-root { right: 12px; bottom: 12px; }
 }
+
+body[data-theme="dark"] {
+  --ink: #e7ecf6;
+  --muted: #9ba9c0;
+  --soft: #0c1220;
+  --line: #273149;
+  --navy: #10182a;
+  --navy-2: #182747;
+  --white: #131c2d;
+  color-scheme: dark;
+}
+body[data-theme="dark"] .topbar { background: rgba(12, 18, 32, .9); }
+body[data-theme="dark"] .secondary-button,
+body[data-theme="dark"] .icon-button,
+body[data-theme="dark"] .table-wrap,
+body[data-theme="dark"] .resume-card,
+body[data-theme="dark"] .company-card,
+body[data-theme="dark"] .modal { color: var(--ink); border-color: var(--line); background: #131c2d; }
+body[data-theme="dark"] .secondary-button:hover,
+body[data-theme="dark"] .data-table tbody tr:hover { background: #1a2740; }
+body[data-theme="dark"] .input,
+body[data-theme="dark"] .select,
+body[data-theme="dark"] .textarea { color: var(--ink); border-color: var(--line); background: #101827; }
+body[data-theme="dark"] .board-column { background: #151f32; }
+body[data-theme="dark"] .job-card,
+body[data-theme="dark"] .detail-box { color: var(--ink); border-color: var(--line); background: #131c2d; }
+body[data-theme="dark"] .data-table td,
+body[data-theme="dark"] .resume-foot,
+body[data-theme="dark"] .form-field label { border-color: var(--line); }
+body[data-theme="dark"] .modal-close { color: var(--muted); background: #202b41; }
+body[data-theme="dark"] .map-canvas { background: #1a2740; }

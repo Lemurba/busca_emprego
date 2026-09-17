@@ -17,6 +17,8 @@ export interface Job {
   title: string;
   company: string;
   location: string;
+  latitude: number | null;
+  longitude: number | null;
   country: string;
   work_model: string;
   seniority: string;
@@ -47,6 +49,7 @@ export interface Job {
 export interface Resume {
   id: string;
   job_id: string;
+  base_resume_id: string | null;
   version: number;
   title: string;
   status: "draft" | "review" | "approved";
@@ -57,12 +60,25 @@ export interface Resume {
   updated_at: string;
 }
 
+export interface BaseResume {
+  id: string;
+  title: string;
+  file_name: string;
+  mime_type: "application/pdf";
+  is_base: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Application {
   id: string;
   job_id: string;
   resume_id: string | null;
   status: "queued" | "in_progress" | "needs_review" | "submitted" | "accepted" | "rejected" | "failed";
   automation_mode: "manual" | "assisted" | "authorized_auto";
+  auto_authorized_at: string | null;
+  authorized_resume_id: string | null;
+  authorized_resume_version: number | null;
   current_step: string;
   submitted_at: string | null;
   notes: string;

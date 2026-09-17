@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createApplication, createResume, getBootstrap, getJob, recordAgentRun, seedDemo, updateApplication, updateJob, updateResume, upsertJob } from "./db.js";
+import { approveResume, authorizeAutoApplication, createApplication, createBaseResume, createResume, deleteBaseResume, getBaseResumeFile, getBootstrap, getJob, listAuthorizedApplications, listBaseResumes, recordAgentRun, recordJobDecision, revokeAutoApplication, seedDemo, selectBaseResume, selectManualApplication, updateApplication, updateJob, updateResume, upsertJob } from "./db.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -31,8 +31,14 @@ function sendJson(res: import("node:http").ServerResponse, status: number, body:
 function readBody(req: import("node:http").IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolveBody, reject) => {
     let data = "";
-    req.on("data", (chunk) => { data += chunk; if (data.length > 2_000_000) reject(new Error("payload too large")); });
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      if (tooLarge) return;
+      data += chunk;
+      if (data.length > 8_000_000) { tooLarge = true; reject(new Error("payload too large; PDF limit is 5 MB")); }
+    });
     req.on("end", () => {
+      if (tooLarge) return;
       try { resolveBody(data ? JSON.parse(data) as Record<string, unknown> : {}); } catch { reject(new Error("invalid json")); }
     });
     req.on("error", reject);
@@ -50,13 +56,45 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
     if (req.method === "GET" && pathname === "/api/bootstrap") return sendJson(res, 200, getBootstrap());
 
     if (req.method === "POST" && pathname === "/api/jobs") return sendJson(res, 201, upsertJob(await readBody(req) as never));
+    if (req.method === "POST" && pathname.startsWith("/api/jobs/") && pathname.endsWith("/decision")) {
+      const body = await readBody(req);
+      return sendJson(res, 200, recordJobDecision(idFromPath(pathname, "/api/jobs/"), String(body.decision ?? ""), String(body.confirmation ?? "")));
+    }
     if (req.method === "PATCH" && pathname.startsWith("/api/jobs/")) return sendJson(res, 200, updateJob(idFromPath(pathname, "/api/jobs/"), await readBody(req)));
     if (req.method === "GET" && pathname.startsWith("/api/jobs/")) return sendJson(res, 200, getJob(idFromPath(pathname, "/api/jobs/")));
 
     if (req.method === "POST" && pathname === "/api/resumes") return sendJson(res, 201, createResume(await readBody(req) as never));
+    if (req.method === "POST" && pathname.startsWith("/api/resumes/") && pathname.endsWith("/approve")) {
+      const body = await readBody(req);
+      return sendJson(res, 200, approveResume(idFromPath(pathname, "/api/resumes/"), String(body.confirmation ?? "")));
+    }
     if (req.method === "PATCH" && pathname.startsWith("/api/resumes/")) return sendJson(res, 200, updateResume(idFromPath(pathname, "/api/resumes/"), await readBody(req) as never));
 
+    if (req.method === "GET" && pathname === "/api/base-resumes") return sendJson(res, 200, listBaseResumes());
+    if (req.method === "POST" && pathname === "/api/base-resumes") return sendJson(res, 201, createBaseResume(await readBody(req) as never));
+    if (req.method === "GET" && pathname.startsWith("/api/base-resumes/") && pathname.endsWith("/file")) {
+      const file = getBaseResumeFile(idFromPath(pathname, "/api/base-resumes/"));
+      if (!file) return sendJson(res, 404, { error: "resume not found" });
+      const filename = encodeURIComponent(file.file_name).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16).toUpperCase());
+      res.writeHead(200, { "content-type": "application/pdf", "content-disposition": `attachment; filename*=UTF-8''${filename}`, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(file.data);
+      return;
+    }
+    if (req.method === "POST" && pathname.startsWith("/api/base-resumes/") && pathname.endsWith("/select")) return sendJson(res, 200, selectBaseResume(idFromPath(pathname, "/api/base-resumes/")));
+    if (req.method === "DELETE" && pathname.startsWith("/api/base-resumes/")) return sendJson(res, 200, { deleted: deleteBaseResume(idFromPath(pathname, "/api/base-resumes/")) });
+
     if (req.method === "POST" && pathname === "/api/applications") return sendJson(res, 201, createApplication(await readBody(req) as never));
+    if (req.method === "GET" && pathname === "/api/authorized-applications") return sendJson(res, 200, listAuthorizedApplications());
+    if (req.method === "POST" && pathname.startsWith("/api/applications/") && pathname.endsWith("/select-manual")) {
+      return sendJson(res, 200, selectManualApplication(idFromPath(pathname, "/api/applications/")));
+    }
+    if (req.method === "POST" && pathname.startsWith("/api/applications/") && pathname.endsWith("/authorize-auto")) {
+      const body = await readBody(req);
+      return sendJson(res, 200, authorizeAutoApplication(idFromPath(pathname, "/api/applications/"), String(body.resume_id ?? ""), String(body.confirmation ?? "")));
+    }
+    if (req.method === "POST" && pathname.startsWith("/api/applications/") && pathname.endsWith("/revoke-auto")) {
+      return sendJson(res, 200, revokeAutoApplication(idFromPath(pathname, "/api/applications/")));
+    }
     if (req.method === "PATCH" && pathname.startsWith("/api/applications/")) return sendJson(res, 200, updateApplication(idFromPath(pathname, "/api/applications/"), await readBody(req) as never));
 
     if (req.method === "POST" && pathname === "/api/agent-events") {

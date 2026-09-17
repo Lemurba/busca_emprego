@@ -7,6 +7,7 @@
     <meta name="description" content="Dashboard leve para descobrir, avaliar e acompanhar vagas." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <title>Radar de Vagas</title>
   </head>
   <body>
@@ -28,7 +29,7 @@
         </nav>
         <div class="sidebar-bottom">
           <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span><span>Configurações</span></button>
-          <div class="profile-mini"><span class="avatar">LM</span><span><strong>Leandro</strong><small>Perfil ativo</small></span></div>
+          <div class="profile-mini"><span class="avatar">RL</span><span><strong>Perfil local</strong><small>Dados privados</small></span></div>
         </div>
       </aside>
 
@@ -38,6 +39,7 @@
           <div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="page-title">Visão geral</strong></div>
           <div class="topbar-actions">
             <span class="sync-status"><i></i><span id="sync-label">SQLite local</span></span>
+            <button class="icon-button" id="theme-toggle" title="Alternar tema" aria-label="Alternar tema" aria-pressed="false">◐</button>
             <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
             <button class="primary-button compact" id="top-add-job" data-action="add-job"><span>＋</span> Nova vaga</button>
           </div>
@@ -48,6 +50,7 @@
 
     <div id="modal-root" class="modal-root" hidden></div>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

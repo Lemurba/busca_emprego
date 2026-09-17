@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --outfile=dist/public/app.js",
+    "test": "npm run build && node test/workflow.test.mjs",
     "start": "node dist/src/server.js",
     "dev": "tsx src/server.ts"
   },

@@ -1,54 +1,50 @@
 # Radar de Vagas + Hermes Agent
 
-Dashboard leve para descoberta e acompanhamento de vagas, currículos ATS e candidaturas. A interface usa HTML5, CSS e TypeScript; o backend usa SQLite nativo do Node.js 24.
+Dashboard local para descoberta e acompanhamento de vagas, preparação de currículos ATS e registro de candidaturas. A interface usa HTML, CSS e TypeScript; o backend usa SQLite nativo do Node.js 24.
 
-## Execução dentro do container existente do Hermes
+## Executar no ambiente Hermes
 
-Este projeto roda como um processo Node.js dentro do container/ambiente do Hermes. Ele não cria nem inicia outro container. O ambiente deve fornecer Node.js 24 ou superior e npm.
-
-Coloque ou monte este repositório em um diretório persistente acessível dentro do container do Hermes e execute nele:
+O processo roda no ambiente existente do Hermes e não cria outro container. Requer Node.js 24 ou superior e npm.
 
 ```bash
 npm ci
-npm run build
-```
-
-Inicie o processo pelo supervisor ou gerenciador de processos já usado pelo seu Hermes:
-
-```bash
+npm test
 RADAR_DB_PATH=/caminho/persistente/radar.sqlite PORT=8787 npm start
 ```
 
-O servidor escuta na porta `8787` em `0.0.0.0`. Sub-agentes no mesmo container podem chamar `http://127.0.0.1:8787`. Para acessar a interface fora do container, exponha a porta através do mecanismo de rede/reverse proxy que já pertence ao Hermes; não crie um container dedicado para o dashboard. Mantenha o arquivo SQLite em armazenamento persistente para preservar os dados após recriações do container.
+O servidor escuta em `0.0.0.0:8787`; agentes no mesmo container podem usar `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. A API não tem autenticação própria: mantenha-a na rede interna do Hermes ou atrás do controle de acesso já configurado. Não a exponha diretamente à internet.
 
-Para desenvolvimento, use `npm run dev`. O processo cria automaticamente o diretório do banco se ele não existir. No primeiro início, registros demonstrativos fictícios são inseridos apenas quando o banco ainda não contém vagas.
+Na primeira inicialização, se o banco não tiver vagas, três registros demonstrativos genéricos são criados. Em qualquer banco SQLite existente, a migração `anonymize_public_vacancy_data_v1` remove uma vez dados identificáveis das vagas, links, salários, descrições, coordenadas, notas de candidatura, auditoria e logs de agentes. Ela mantém IDs e relações com currículos e candidaturas; os dados da vaga passam a marcadores genéricos. Faça cópia do banco antes de atualizar caso precise manter os detalhes anteriores.
 
-## API para agentes
+## Fluxo controlado pelo usuário
 
-O contrato FaaS/HTTP completo, com cada endpoint, campos, enums, regras de datas, respostas e exemplos para os sub-agentes, está em [`docs/agent-api.md`](docs/agent-api.md).
+1. O agente registra a vaga. O registro fica como `found` e `pending`.
+2. O usuário marca interesse com a ação explícita **Tenho interesse**.
+3. O usuário ou agente prepara o currículo ATS, usando um PDF-base opcional da biblioteca local.
+4. O usuário revisa e aprova a versão salva digitando `APROVO`.
+5. O usuário escolhe o envio manual ou digita `AUTORIZO` para permitir automação naquela vaga e naquela versão do currículo.
 
-Resumo dos endpoints:
+Aprovar um currículo não autoriza envio automático. A fila `GET /api/authorized-applications` só inclui autorizações atuais, para currículo ainda aprovado e na mesma versão autorizada. Alterar o currículo ou retirar o interesse invalida a autorização. Um executor Browser Harness do Hermes precisa consultar essa rota para realizar qualquer ação no portal; este repositório fornece o contrato e a fila, mas não executa candidaturas por conta própria. O app só registra uma candidatura enviada quando recebe a confirmação correspondente.
+
+## Currículos-base e mapa
+
+PDFs de até 5 MB são guardados no SQLite local e podem ser selecionados, baixados e vinculados a currículos ATS. Os PDFs não são enviados para a API de eventos dos agentes; use o identificador do currículo-base e a rota `/api/base-resumes/{id}/file` quando a integração precisar lê-lo.
+
+O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcadores exigem latitude e longitude fornecidas com cada vaga; a aplicação não geocodifica automaticamente endereços. O mapa-base requer conexão com a internet.
+
+## API Hermes
+
+O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs/agent-api.md). Principais rotas:
 
 | Método | Endpoint | Uso |
 | --- | --- | --- |
-| `GET` | `/api/health` | Verificar se o processo está ativo |
-| `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, empresas, execuções e métricas |
-| `GET` | `/api/jobs/{id}` | Consultar uma vaga |
-| `POST` | `/api/jobs` | Registrar ou atualizar uma vaga descoberta |
-| `PATCH` | `/api/jobs/{id}` | Alterar dados, etapa ou decisão da vaga |
-| `POST` | `/api/resumes` | Criar currículo vinculado a uma vaga |
-| `PATCH` | `/api/resumes/{id}` | Atualizar currículo, palavras-chave ou sugestões |
-| `POST` | `/api/applications` | Criar registro de candidatura |
-| `PATCH` | `/api/applications/{id}` | Atualizar status, etapa, data ou notas |
-| `POST` | `/api/agent-events` | Enviar `job.discovered`, `job.updated` ou `agent.status` |
+| `GET` | `/api/health` | Verificar se o processo responde |
+| `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, métricas e metadados dos PDFs |
+| `POST` | `/api/agent-events` | Registrar vaga descoberta/atualizada ou estado do agente |
+| `POST` | `/api/jobs/{id}/decision` | Registrar decisão explícita do usuário |
+| `POST` | `/api/resumes` | Criar currículo em rascunho para vaga de interesse |
+| `POST` | `/api/resumes/{id}/approve` | Registrar aprovação humana da versão salva |
+| `GET` / `POST` | `/api/base-resumes` | Consultar a biblioteca ou enviar um PDF-base |
+| `GET` | `/api/authorized-applications` | Entregar ao executor apenas candidaturas explicitamente autorizadas |
 
-Todas as requisições com corpo usam JSON e `Content-Type: application/json`. A API limita o corpo a 2 MB. Ela não implementa autenticação própria: mantenha o endpoint na rede interna do container ou atrás do controle de acesso/reverse proxy do Hermes; não o exponha diretamente à internet.
-
-## Ciclo de vida das vagas
-
-- Uma candidatura só conta como enviada quando `applications.status` recebe `submitted` (ou o resultado `accepted`/`rejected`) e tem `submitted_at` registrado.
-- A resposta de `/api/bootstrap` inclui `application_date`, `application_age_days` e `lifecycle` calculados para cada vaga.
-- Vagas encerradas ou com prazo vencido, sem candidatura enviada, aparecem com `lifecycle: "lost"` e status `expired`.
-- `decision: "not_interested"` registra falta de interesse; `decision: "no_time"` registra que faltou tempo. Ambas são diferentes de `lost`.
-
-O painel não faz scraping do LinkedIn ou Glassdoor. Use alertas, links/textos fornecidos e integrações permitidas; registre a URL, fonte e data dos dados salariais.
+Salários precisam de fonte e data verificáveis. Não faça scraping do LinkedIn ou Glassdoor; use integrações permitidas, APIs oficiais, alertas e links ou dados fornecidos.
