@@ -21,11 +21,10 @@
     "questionReminderMs": { "type": "integer", "minimum": 60000, "default": 1800000 },
     "integration": {
       "type": "object", "additionalProperties": false,
-      "required": ["hermesBaseUrl", "browserHarnessBaseUrl", "telegramGatewayBaseUrl", "serviceTokenSecretRef"],
+      "required": ["hermesBaseUrl", "browserHarnessBaseUrl", "serviceTokenSecretRef"],
       "properties": {
         "hermesBaseUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
         "browserHarnessBaseUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
-        "telegramGatewayBaseUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
         "serviceTokenSecretRef": { "type": "string", "minLength": 1, "maxLength": 120 },
         "requestTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 900000 },
         "allowInsecureLocalhost": { "type": "boolean", "default": false }

@@ -3,6 +3,19 @@
   "version": 1,
   "locale": "pt-BR",
   "guide": "ONBOARDING.md",
+  "installation": {
+    "mode": "production",
+    "selectableEnvironment": false,
+    "singleApplication": true,
+    "port": 8787
+  },
+  "telegramIntegration": {
+    "source": "hermes-linked-capability",
+    "configurationRequired": false,
+    "requestBotToken": false,
+    "requestRecipient": false,
+    "endpoint": "v1/telegram/questions"
+  },
   "secretPolicy": {
     "collection": "host-secure-input",
     "persistValuesInPlugin": false,
@@ -11,11 +24,10 @@
   },
   "phases": [
     "preflight",
-    "environment",
     "api-credentials",
     "gateways",
     "sources",
-    "telegram",
+    "telegram-capability-check",
     "build-and-start",
     "initial-agent",
     "smoke-test",
@@ -28,13 +40,12 @@
     "browser_profile": { "securePrompt": true, "requiresSecretRef": false, "requiresBrowserProfile": true }
   },
   "prompts": {
-    "environment": "Você quer configurar staging (recomendado) ou production?",
+    "start": "Vou instalar a única versão de produção do Busca Emprego com os padrões do Hermes.",
     "operator": "Qual identificador do operador responsável por esta instalação?",
     "source": "Qual fonte deseja adicionar e qual domínio está autorizado?",
     "terms": "Você confirma que revisou e aceita os termos desta fonte para as operações selecionadas?",
     "secret": "Não envie a credencial neste chat. Abra a entrada segura do cofre do Hermes; eu guardarei somente a referência.",
     "glassdoor": "Para o Glassdoor, deseja criar/selecionar um perfil isolado do Browser Harness e autenticar-se na janela segura? Não informe senha no chat.",
-    "telegram": "Qual capability/destinatário autorizado do Telegram devo usar para perguntas humanas?",
     "schedule": "O teste manual terminou sem erro. Deseja habilitar o agendamento deste agente agora?"
   },
   "readiness": {

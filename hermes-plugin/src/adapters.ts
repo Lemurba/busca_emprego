@@ -88,11 +88,12 @@ export class BrowserHarnessHttpAdapter extends HttpAdapterBase implements Readon
 }
 
 export class HermesTelegramHttpCapability extends HttpAdapterBase implements HermesTelegramCapability {
+  /** Hermes supplies the linked recipient identity while wiring the capability; it is not user configuration. */
   constructor(config: IntegrationConfig, secrets: SecretResolver, readonly authorizedRecipientId: string | undefined) { super(config, secrets); }
   async send(message: TelegramQuestionMessage): Promise<{ messageId: string }> {
     if (!this.authorizedRecipientId) throw new Error("TELEGRAM_RECIPIENT_UNAVAILABLE");
-    const url = endpoint(this.config.telegramGatewayBaseUrl, "v1/telegram/questions", this.config.allowInsecureLocalhost);
-    const result = await postJson<{ messageId: string }>(url, { recipientId: this.authorizedRecipientId, ...message }, await this.token(), new AbortController().signal, this.timeout());
+    const url = endpoint(this.config.hermesBaseUrl, "v1/telegram/questions", this.config.allowInsecureLocalhost);
+    const result = await postJson<{ messageId: string }>(url, message, await this.token(), new AbortController().signal, this.timeout());
     if (!result.messageId) throw new Error("TELEGRAM_DELIVERY_INVALID");
     return result;
   }

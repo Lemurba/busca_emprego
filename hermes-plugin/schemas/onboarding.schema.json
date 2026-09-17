@@ -3,12 +3,35 @@
   "$id": "https://busca-emprego.local/schemas/onboarding.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "locale", "guide", "secretPolicy", "phases", "sourceAuthFlows", "prompts", "readiness"],
+  "required": ["version", "locale", "guide", "installation", "telegramIntegration", "secretPolicy", "phases", "sourceAuthFlows", "prompts", "readiness"],
   "properties": {
     "$schema": { "type": "string" },
     "version": { "const": 1 },
     "locale": { "const": "pt-BR" },
     "guide": { "const": "ONBOARDING.md" },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "selectableEnvironment", "singleApplication", "port"],
+      "properties": {
+        "mode": { "const": "production" },
+        "selectableEnvironment": { "const": false },
+        "singleApplication": { "const": true },
+        "port": { "const": 8787 }
+      }
+    },
+    "telegramIntegration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "configurationRequired", "requestBotToken", "requestRecipient", "endpoint"],
+      "properties": {
+        "source": { "const": "hermes-linked-capability" },
+        "configurationRequired": { "const": false },
+        "requestBotToken": { "const": false },
+        "requestRecipient": { "const": false },
+        "endpoint": { "const": "v1/telegram/questions" }
+      }
+    },
     "secretPolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -20,7 +43,7 @@
         "neverAskInChat": { "const": true }
       }
     },
-    "phases": { "type": "array", "minItems": 10, "uniqueItems": true, "items": { "type": "string" } },
+    "phases": { "type": "array", "minItems": 9, "uniqueItems": true, "items": { "type": "string" } },
     "sourceAuthFlows": {
       "type": "object",
       "additionalProperties": false,
@@ -32,7 +55,7 @@
         "browser_profile": { "$ref": "#/$defs/authFlow" }
       }
     },
-    "prompts": { "type": "object", "required": ["environment", "operator", "source", "terms", "secret", "glassdoor", "telegram", "schedule"], "additionalProperties": { "type": "string", "minLength": 1 } },
+    "prompts": { "type": "object", "required": ["start", "operator", "source", "terms", "secret", "glassdoor", "schedule"], "additionalProperties": { "type": "string", "minLength": 1 } },
     "readiness": { "type": "object", "required": ["healthPath", "readyPath", "bootstrapPath", "requireTlsOutsideLocalhost", "requireAuthenticatedBootstrap"], "additionalProperties": false, "properties": {
       "healthPath": { "const": "/api/health" },
       "readyPath": { "const": "/api/ready" },

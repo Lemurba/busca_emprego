@@ -34,7 +34,6 @@ export interface PluginConfig {
 export interface IntegrationConfig {
   hermesBaseUrl: string;
   browserHarnessBaseUrl: string;
-  telegramGatewayBaseUrl: string;
   serviceTokenSecretRef: string;
   requestTimeoutMs?: number;
   allowInsecureLocalhost?: boolean;
