@@ -18,6 +18,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 6. O mapa exibe apenas coordenadas verificadas, com filtros, agrupamento e precisão. Coordenadas não podem ser inventadas.
 7. Candidaturas permanecem sob controle humano: APROVO aprova uma versão de currículo; não autoriza envio automático. AUTORIZO é separado, associado à vaga e à versão exata, e revogável.
 8. Se o agente tiver dúvida sobre como responder ou continuar uma candidatura, ele pausa e pergunta ao usuário pelo Telegram usando a credencial que já está configurada no Hermes. Não adivinha, não avança e não submete enquanto não receber instrução clara.
+9. Toda rejeição exige escolher rejeição total ou parcial e registrar motivo. Total cria supressão de vagas semelhantes conforme o motivo; parcial marca o detalhe apontado, conserva a vaga no fluxo e dá um sinal negativo limitado para o aprendizado de preferências.
 
 ## 2. Checklist do repositório
 
@@ -43,6 +44,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [~] **Mapa:** é um mapa real, mas não geocodifica cidades automaticamente, não guarda precisão/provedor, não tem cache de geocodificação e só plota vagas com coordenadas já informadas.
 - [~] **Segurança:** a API não autentica usuários/agentes; o README recomenda rede interna confiável, o que não basta para serviço de produção.
 - [~] **Execução de candidatura:** o repositório define fila e autorização; não executa Browser Harness, não comprova envio nem pergunta dúvidas pelo Telegram via Hermes.
+- [~] **Feedback de rejeição:** registra decisão not_interested com confirmação SEM INTERESSE, mas não exige justificativa, não diferencia rejeição total/parcial e não aprende regras para filtrar novas vagas.
 - [~] **Escala/operação:** faltam limites configuráveis de concorrência, fila durável e retentativas idempotentes, métricas/SLO, backup/restore testado e alertas.
 
 ### Pendente antes de produção
@@ -53,6 +55,8 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [ ] Implementar identidade canônica, índice de deduplicação e ocorrências por rodada/fonte.
 - [ ] Implementar máquina de estados completa e impedir atualização direta do status.
 - [ ] Implementar escalonamento obrigatório de dúvidas de candidatura pelo Telegram do Hermes e retomada segura após resposta.
+- [ ] Exigir modo total/parcial e motivo em todo descarte; gravar feedback, criar regras para supressão total e atualizar preferências com feedback parcial.
+- [ ] Exibir vagas filtradas e regras ativas, permitir restaurar uma vaga e editar/pausar/remover regras.
 - [ ] Completar geocodificação, cache, atribuição, filtros e limites do mapa.
 - [ ] Adicionar autenticação/autorização, escopo por usuário/projeto, gestão de secrets e trilha de auditoria.
 - [ ] Adicionar migrações seguras, backup/restauração e política de retenção/exclusão.
@@ -70,6 +74,8 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 | Source Scout | Consulta uma fonte aprovada conforme suas regras; devolve vagas estruturadas, URL e evidências | Uma instância por fonte habilitada |
 | Normalizer & Deduper | Normaliza campos, encontra identidade canônica, grava ocorrência e sinaliza colisões | Decisão determinística; IA não funde fuzzy |
 | Match Evaluator | Calcula aderência com critérios, pesos e evidências visíveis | Não inventa requisito ausente |
+| Preference Learner | Registra rejeições/interesses, atualiza sinais por atributo e cria regras explicáveis de supressão total | Só usa feedback explícito; não altera prompt ou perfil silenciosamente |
+| Preference Filter | Aplica regras ativas depois de normalizar/deduplicar e antes de criar cartão ativo/notificar | Serviço determinístico; não oculta sem regra |
 | Resume Writer e ATS Reviewer | Produzem currículo por vaga e verificam fidelidade ao currículo-base e legibilidade ATS | Só após interesse explícito |
 | Application Assistant | Prepara aplicação manual ou entrega ao Browser Harness autorizado | Sem envio automático sem AUTORIZO vigente |
 | Dashboard/API | Configuração, mapa, Kanban, revisão, auditoria e comandos autorizados | Fonte de verdade persistida |
@@ -77,9 +83,11 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 
 ### 3.2 Quantidade e criação de agentes
 
-Há **7 tipos lógicos**: coordenador, coletor de fonte, normalizador/deduplicador, avaliador de aderência, redator ATS, revisor ATS e assistente de candidatura. O coletor é instanciado para cada fonte habilitada. Redator, revisor e assistente só são despachados quando o cartão alcança a fase correspondente. Não se cria um agente permanente por vaga.
+Há **8 tipos lógicos**: coordenador, coletor de fonte, normalizador/deduplicador, avaliador de aderência, aprendiz de preferências, redator ATS, revisor ATS e assistente de candidatura. O aprendiz de preferências é acionado por decisão/feedback, não em toda vaga. O coletor é instanciado para cada fonte habilitada. Redator, revisor e assistente só são despachados quando o cartão alcança a fase correspondente. Não se cria um agente permanente por vaga.
 
 Para uma rodada com N fontes ativas: **1 coordenador + N coletores + 1 normalizador/deduplicador + 1 avaliador**, total inicial **N + 3 instâncias**. Writer, reviewer e assistant são chamados sob demanda por vaga. O limite padrão é 20 instâncias de trabalho simultâneas no projeto e no máximo 1 coleta por domínio de fonte. O administrador poderá ajustar limites, sem exceder termos/orçamento do provedor. Resultados são processados em lotes de até 25 listagens.
+
+Preference Learner é acionado somente por evento de feedback e conta dentro do mesmo limite global de 20 trabalhos.
 
 Cada configuração tem agent_id, project_id, nome, role_type, enabled, fontes, ferramentas permitidas, concurrency, timeout, limite de repetição e prompt_version_id. Um agente customizado pode usar um papel e schema existentes ou declarar um schema JSON validado. Texto do prompt não pode conceder ferramentas/capacidades de candidatura automática.
 
@@ -95,9 +103,15 @@ Cron/Hermes
        -> encontrado: insere job_sighting; atualiza last_seen; conserva cartão/estado
        -> novo: cria canonical job e primeira ocorrência
        -> fuzzy incerto: mantém cartões separados e cria possible_duplicate
-  -> avaliador calcula score e evidências
-  -> dashboard mostra cartão, ocorrências e fontes
-  -> usuário decide interesse
+  -> avaliador calcula score_base, família de cargo e evidências
+  -> filtro de preferências consulta regras ativas
+       -> regra encontrada: registra supressão e contagem; não cria cartão ativo nem notificação
+       -> sem regra: calcula ajuste personalizado e exibe cartão no dashboard
+  -> dashboard mostra cartão, ocorrências, fontes e motivos do score/ajuste
+  -> usuário decide interesse OU rejeição total/parcial com motivo obrigatório
+       -> total: salva regra de supressão e filtra vagas futuras compatíveis
+       -> parcial: mantém cartão; registra detalhe e ajusta preferência gradualmente
+  -> preference learner atualiza sinais por atributo, sem reutilizar contexto de CV
   -> currículo ATS -> revisão humana APROVO
   -> escolha manual OU AUTORIZO explícito para vaga + versão
   -> Browser Harness consulta autorizações vigentes
@@ -119,7 +133,7 @@ O contexto compartilhado entre vagas é somente o perfil ativo do projeto, JSON 
 
 Cada tarefa recebe também a instrução do papel e dados mínimos da vaga atual. Coletor não recebe currículo-base. Redator recebe somente o currículo-base selecionado e a vaga atual. Revisor recebe a saída e evidências necessárias à comparação. Conversa, anexos e decisões de outra vaga não são contexto de entrada por padrão.
 
-Feedback é evento separado com motivo e escopo. Somente agregador de preferências propõe alteração no perfil, explica a evidência e pede confirmação do usuário; perfil não muda ocultamente.
+Feedback é evento separado e estruturado. Rejeição total é confirmação explícita do usuário para suprimir futuras vagas compatíveis com o motivo. Rejeição parcial é feedback negativo somente sobre o detalhe indicado: a vaga permanece ativa e feedbacks semelhantes reduzem gradualmente a ordenação das vagas futuras, sem exclusão automática. O usuário pode inspecionar, editar, pausar e reverter regras e sinais. O perfil factual (por exemplo, residência ou senioridade) não muda automaticamente; regras de preferência ficam separadas dele.
 
 ### 3.5 Edição e segurança de prompts
 
@@ -167,8 +181,8 @@ Exemplo JSON válido: {"items":[{"input_ref":"item-1","action":"sighting","canon
 ~~~text
 Avalie só critérios conhecidos da vaga e perfil. Nota de cada critério: 0 a 100, com evidência ou reason_code. Pesos: cargo/família 25, competências 25, senioridade 15, localização/modalidade 15, remuneração 10, preferências explícitas 10.
 score = soma(nota * peso) / soma dos pesos comparáveis. Guardar score com 2 casas decimais e exibir com 1. Critério sem dados é excluded, não zero. coverage_percent é a soma dos pesos avaliáveis; guardar com 2 casas. Se coverage_percent <60, result=insufficient_data, nunca strong_match.
-Bandas são avaliadas sobre score não arredondado: [80,100] strong_match; [65,80) review; [0,65) low_match. Score organiza revisão, não decide candidatura. Cada critério precisa evidência da vaga e do perfil. Liste até três pontos fortes e três incompatibilidades. Sempre retornar exatamente os seis critérios ponderados, cada um marked scored ou excluded.
-Exemplo JSON válido: {"canonical_job_id":"job-1","score":81.5,"coverage_percent":100,"band":"strong_match","criteria":[{"key":"role_family","weight":25,"score":80,"status":"scored","evidence_refs":["job:title","profile:target_roles"],"reason_code":null},{"key":"skills","weight":25,"score":90,"status":"scored","evidence_refs":["job:requirements","profile:skills"],"reason_code":null},{"key":"seniority","weight":15,"score":80,"status":"scored","evidence_refs":["job:seniority","profile:seniority"],"reason_code":null},{"key":"location_work_model","weight":15,"score":80,"status":"scored","evidence_refs":["job:location","profile:locations"],"reason_code":null},{"key":"compensation","weight":10,"score":70,"status":"scored","evidence_refs":["job:salary","profile:salary_range"],"reason_code":null},{"key":"explicit_preferences","weight":10,"score":80,"status":"scored","evidence_refs":["job:requirements","profile:preferences"],"reason_code":null}],"strengths":[],"gaps":[]} .
+Bandas são avaliadas sobre score_base não arredondado: [80,100] strong_match; [65,80) review; [0,65) low_match. O ajuste de comportamento não muda a banda. Score organiza revisão, não decide candidatura. Cada critério precisa evidência da vaga e do perfil. Liste até três pontos fortes e três incompatibilidades. Sempre retorne exatamente os seis critérios ponderados, cada um com status scored ou excluded. Neste exemplo/schema, score é score_base. O serviço de preferências acrescenta preference_adjustment e score_final depois.
+Exemplo JSON válido: {"canonical_job_id":"job-1","score_base":81.5,"coverage_percent":100,"band":"strong_match","criteria":[{"key":"role_family","weight":25,"score":80,"status":"scored","evidence_refs":["job:title","profile:target_roles"],"reason_code":null},{"key":"skills","weight":25,"score":90,"status":"scored","evidence_refs":["job:requirements","profile:skills"],"reason_code":null},{"key":"seniority","weight":15,"score":80,"status":"scored","evidence_refs":["job:seniority","profile:seniority"],"reason_code":null},{"key":"location_work_model","weight":15,"score":80,"status":"scored","evidence_refs":["job:location","profile:locations"],"reason_code":null},{"key":"compensation","weight":10,"score":70,"status":"scored","evidence_refs":["job:salary","profile:salary_range"],"reason_code":null},{"key":"explicit_preferences","weight":10,"score":80,"status":"scored","evidence_refs":["job:requirements","profile:preferences"],"reason_code":null}],"strengths":[],"gaps":[]} .
 ~~~
 
 #### Prompt 5 — Resume Writer
@@ -214,13 +228,24 @@ Entrega: até 3 tentativas, após 1 s, 5 s e 15 s; após falha, registrar delive
 ### Dashboard, design, arquivos e notificações
 
 - Oferecer modo escuro e claro, preferência salva por usuário, estado indicado por texto/ícone além de cor, foco de teclado visível e operação básica por teclado.
-- Layout responsivo com navegação entre Resumo, Mapa, Kanban, Agentes/Prompts, Currículos, Rodadas e Configurações. Resumo prioriza contadores com período definido, atividade recente e ações pendentes.
+- Layout responsivo com navegação entre Resumo, Mapa, Kanban, Agentes/Prompts, Preferências e filtros, Currículos, Rodadas e Configurações. Resumo prioriza contadores com período definido, atividade recente e ações pendentes.
 - Cartão mostra score/cobertura, evidências, salário/moeda, modalidade/local, abertura verificada, fontes, primeira/última ocorrência, estado e próxima ação. Dado desconhecido aparece como “Não informado”, nunca como zero.
 - PDF: validar MIME e assinatura, limite 5 MB, checksum, listar/selecionar/baixar/excluir conforme escopo. Falha de extração ou PDF de imagem sem texto vira needs_review; não criar ATS com texto inexistente. Referências localizam página/trecho usado.
 - Notificações gerais via Hermes/Telegram são opcionais, desligadas até configuração explícita. Podem informar CV pronto, prompt aprovado, entrevista registrada ou falha de rodada com link protegido. Não incluir CV, telefone, documento ou conteúdo integral da vaga. Perguntas de candidatura seguem a regra obrigatória de escalonamento desta especificação.
 - Falha de Telegram não bloqueia rodada de busca, mas sempre bloqueia a candidatura que aguarda resposta.
+- Resumo de preferências mostra regras ativas/pausadas, motivo, total suprimido, feedback parcial e sinais positivos/negativos; permite pausar, editar, remover e restaurar.
+- Mostrar taxa de interesse sobre vagas exibidas em janelas de 30 dias e comparação com a janela anterior somente quando houver pelo menos 20 decisões em cada janela. Mostrar volume da amostra; não declarar melhora estatística se a amostra for menor.
 
-**Valores fechados dos contratos JSON:** status de rodada: running/completed/partial/failed; ação do normalizador: new/sighting/possible_duplicate/reject; banda do score: strong_match/review/low_match/insufficient_data; factualidade do redator: pass/needs_review; parecer/checks do revisor: pass/fail; status do executor: manual/needs_review/submitted/failed. Valores fora destas listas são rejeitados pelo validador.
+#### Prompt 8 — Preference Learner
+
+~~~text
+Atualize preferências somente a partir do evento explícito recebido: vaga, modo total/parcial, categoria, faceta indicada, justificativa, decisão de interesse e regra ativa. Não leia currículo, conversa de outra vaga ou dados sem relação com o feedback. Não altere fatos do perfil, score_base, prompts ou permissões.
+Para rejeição parcial, registre sinal negativo apenas para a faceta/valor apontado; preserve a vaga ativa e não crie regra de supressão. Para rejeição total, devolver confirmação de regra baseada na categoria e dimensões da vaga; a aplicação da regra é feita pelo serviço determinístico porque o usuário confirmou modo total. Interesse/seleção registra sinal positivo somente para facetas comparáveis. SEM TEMPO, expiração, resposta do empregador e repetição de sighting não são sinais negativos.
+Uma vaga canônica só conta uma vez por ciclo. Para categoria other, não inferir regra ampla a partir do texto: no modo total, aplicar somente a regra obrigatória de vaga semelhante; qualquer filtro adicional precisa ser mostrado para confirmação no dashboard.
+Exemplo JSON válido: {"feedback_id":"fb-1","mode":"partial","facets":[{"key":"work_model","value":"onsite","signal":"negative","evidence_ref":"feedback:detail_key"}],"rule":{"type":"soft_signal","match_json":{},"action":"none","explanation":"Feedback parcial sobre trabalho presencial"},"confidence":0.8}.
+~~~
+
+**Valores fechados dos contratos JSON:** status de rodada: running/completed/partial/failed; ação do normalizador: new/sighting/possible_duplicate/reject; banda do score: strong_match/review/low_match/insufficient_data; factualidade do redator: pass/needs_review; parecer/checks do revisor: pass/fail; status do executor: manual/needs_review/submitted/failed; modo de rejeição: total/partial; signal de preferência: positive/negative; tipo da regra: similar_role/company/soft_signal/none; ação da regra: suppress/suggest/none. Valores fora destas listas são rejeitados pelo validador.
 
 ### 3.7 Dados e deduplicação
 
@@ -237,6 +262,10 @@ Adicionar migrações preservando os dados atuais e validando chaves estrangeira
 | job_sightings | id, canonical_job_id, run_id, source_id, source_job_id, seen_at, payload_hash, snapshot_ref |
 | possible_duplicates | left_job_id, right_job_id, similarity, reasons, status, reviewed_by, reviewed_at |
 | workflow_events | job_id, from_status, to_status, actor, command, evidence_ref, created_at, version |
+| job_feedback_events | id, project_id, job_id, cycle, mode, reason_code, detail_key, explanation, actor, created_at |
+| preference_rules | id, project_id, source_feedback_ids, match_json, action, state (active/paused), reason, created_at, updated_at, suppressed_count |
+| preference_values | project_id, facet_key, normalized_value, positive_count, negative_count, updated_at |
+| suppressed_opportunities | id, project_id, run_id, source_id, source_job_id, canonical_key, minimal_payload_summary, rule_id, suppressed_at, restored_at, restore_reason |
 | human_questions | id, application_id, job_id, resume_id, resume_version, field_ref, question, status (pending/delivered/answered/delivery_failed/cancelled), asked_at, answered_at, answer_actor, sanitized_delivery_error |
 | geocodes | normalized_query, latitude, longitude, precision, confidence, provider, place_id, fetched_at, expires_at |
 
@@ -268,6 +297,41 @@ Adicionar migrações preservando os dados atuais e validando chaves estrangeira
 | Score | 0–100; média ponderada só de critérios comparáveis | coverage <60% vira insufficient_data, nunca strong_match |
 
 Dashboard mostra score, cobertura, critérios e evidências. Score <65 permanece acessível em filtro de baixa aderência; não apaga nem autoriza candidatura.
+
+#### Rejeição total, rejeição parcial e aprendizado pelo uso
+
+Toda rejeição é registrada pelo dashboard/Hermes usando POST /api/jobs/{id}/feedback. Antes de confirmar, o usuário escolhe modo total ou parcial, categoria e justificativa escrita de 10 a 500 caracteres. Categorias: função/cargo, empresa, senioridade, competência/requisito, salário, localidade, modalidade, contrato, jornada/benefícios, responsabilidade específica ou outro. Na rejeição parcial, também é obrigatório apontar o detalhe/campo específico que incomodou.
+
+Regras e aprendizado pertencem ao projeto do usuário e se aplicam a todas as fontes habilitadas nesse projeto; não são compartilhados com outro usuário/projeto.
+
+reason_code aceitos: role, company, seniority, skill, salary, location, work_model, contract, schedule_benefits, responsibility, other. detail_key aceita title, role_family, company, seniority, required_skill, salary, location, work_model, contract, schedule, benefits, responsibilities ou other; é obrigatório no modo partial e deve corresponder à razão descrita.
+
+Mapeamento padrão de categoria para detalhe: role → title/role_family; company → company; seniority → seniority; skill → required_skill; salary → salary; location → location; work_model → work_model; contract → contract; schedule_benefits → schedule/benefits; responsibility → responsibilities; other → other. Outra combinação só é válida se o usuário indicar explicitamente esse detalhe no texto.
+
+Exemplo JSON válido para rejeição total: {"mode":"total","reason_code":"role","detail_key":"role_family","explanation":"Não quero continuar recebendo vagas desta família de cargo.","confirmation":"SEM INTERESSE"}.
+
+Exemplo JSON válido para rejeição parcial: {"mode":"partial","reason_code":"work_model","detail_key":"work_model","explanation":"Não gostei da exigência de comparecer ao escritório duas vezes por semana.","confirmation":"REJEITAR PARCIALMENTE"}.
+
+Campo obrigatório ausente, reason_code/detail_key incompatível ou justificativa fora de 10–500 caracteres retorna HTTP 422 e não modifica vaga, pontuação, regra ou histórico. O endpoint exige autenticação e escopo do projeto.
+
+| Modo | Estado da vaga | Efeito imediato | Efeito em vagas futuras |
+|---|---|---|---|
+| Total | Marca decision=not_interested e status=discarded | Sai do Kanban ativo; salva justificativa e regra explicável | Suprime vagas semelhantes antes de exibi-las no Kanban ou notificar o usuário |
+| Parcial | Preserva decision e status atuais | Mantém cartão ativo, com badge “feedback parcial” e detalhe registrado | Usa o detalhe como sinal negativo gradual para ordenar futuras vagas; não as esconde |
+
+Confirmações da ação: SEM INTERESSE para total; REJEITAR PARCIALMENTE para parcial. Uma rejeição parcial não pode marcar a vaga discarded, alterar decisão para not_interested, cancelar currículo ou revogar AUTORIZO. Uma rejeição total mantém a vaga e motivo no histórico.
+
+**Semelhança para rejeição total:** usar família de cargo normalizada com confiança >=0,80, Jaccard de trigramas no título e Jaccard de conjuntos de competências/requisitos normalizados. É semelhante se a família coincide e (título >=0,75 ou requisitos >=0,60). Se família estiver desconhecida, exigir título >=0,90 e requisitos >=0,60; se requisitos estiverem ausentes, usar título >=0,95 como fallback conservador. Rejeição total por categoria empresa também suprime todas as vagas daquela empresa normalizada. Similaridade é separada da deduplicação: a rejeição bloqueia vagas distintas parecidas, a deduplicação consolida a mesma vaga.
+
+Aplicar a supressão depois de normalizar/deduplicar e antes de criar cartão ativo ou notificação. Se a fonte aceitar filtros negativos, passá-los à consulta; caso contrário, examinar o resultado coletado e guardar apenas título, empresa, fonte/link, campos necessários à comparação e regra que suprimiu. Não apresentar o item como vaga nova. A rodada informa contagens suprimidas por regra e a tela “Filtradas pelas minhas preferências” permite inspecionar, restaurar um item, pausar/remover uma regra ou restaurar todos os itens da regra. Restaurar um item abre exceção só para aquele item; a regra segue ativa até ser editada/desativada.
+
+Uma regra total permanece ativa sem prazo de expiração automática; só o usuário pode pausá-la/removê-la. A família de cargo vem da normalização determinística ou de classificação com confiança >=0,80; abaixo disso aplica-se o fallback por título/requisitos descrito acima.
+
+**Rejeição parcial e aprendizado:** o usuário aponta o aspecto e descreve o motivo. O cartão continua elegível para interesse/candidatura, embora o detalhe esteja destacado. A preferência negativa se aplica apenas à faceta indicada; não transforma uma crítica a um horário em rejeição da empresa inteira. Após 3 rejeições parciais de vagas canônicas diferentes com a mesma faceta/valor em 90 dias, o dashboard sugere uma regra reutilizável. A sugestão não oculta novas vagas até o usuário ativá-la.
+
+Interações explícitas também ensinam preferências: TENHO INTERESSE/selecionar vaga conta como sinal positivo apenas nas facetas comparáveis; rejeição parcial conta como sinal negativo da faceta apontada; restaurar um item suprimido é sinal positivo para a exceção daquele item. Guardar no máximo um sinal por combinação de vaga canônica, ciclo e faceta; se o usuário corrigir sua avaliação, o último sinal explícito substitui o anterior nessa combinação. Repetição de sighting não gera sinal adicional. SEM TEMPO, vaga expirada e candidatura recusada pelo empregador não contam como preferência negativa.
+
+Para cada faceta/valor, p é o número de sinais positivos e n o de negativos. Compatibilidade suavizada = 100*(p+1)/(p+n+2); confiança = (p+n)/(p+n+3); sinal aprendido = 50 + confiança*(compatibilidade-50). Calcular a média somente das facetas da vaga com pelo menos um sinal; sem facetas aprendidas, usar média neutra 50. Ajuste de personalização = clamp((média-50)*0,2, -10, +10). Score final = clamp(score_base + ajuste, 0, 100). Sem histórico, ajuste=0. O dashboard mostra score_base, preference_adjustment, score_final e quais feedbacks contribuíram. score_final é usado somente para ordenar vagas visíveis; não altera fatos do perfil, elegibilidade, status do Kanban nem limiar strong_match.
 
 ### 3.9 Kanban: estados, transições e bloqueios
 
@@ -368,6 +432,58 @@ Feature: ocorrências e deduplicação
     Then os dois cartões continuam separados
     And possível duplicata mostra score e motivos para revisão
 
+Feature: aprender com decisões explícitas do usuário
+  Scenario: rejeição total exige justificativa e filtra vagas semelhantes
+    Given uma vaga ativa de Analista de Dados da Empresa X
+    When usuário rejeita totalmente com motivo função/cargo e confirmação SEM INTERESSE
+    Then a API exige justificativa entre 10 e 500 caracteres
+    And a vaga vai para discarded com evento de feedback
+    And futura vaga da mesma família com título Jaccard >=0.75 é suprimida
+    And a regra vale em todas as fontes e continua ativa até o usuário desativá-la
+    And o cartão não aparece no Kanban ativo nem em notificação
+    And o resumo da rodada conta a supressão e informa a regra aplicada
+
+  Scenario: rejeição sem motivo não altera a vaga
+    Given uma vaga ativa
+    When usuário envia rejeição total sem categoria ou justificativa
+    Then API retorna HTTP 422
+    And status, decisão, regras e histórico permanecem iguais
+
+  Scenario: rejeição parcial mantém a vaga e registra o detalhe
+    Given uma vaga ativa com modalidade híbrida
+    When usuário rejeita parcialmente apontando modalidade como detalhe e explica o motivo
+    Then o cartão permanece no mesmo estado e recebe badge de feedback parcial
+    And decision não muda para not_interested
+    And vaga híbrida não é ocultada automaticamente de futuras rodadas
+    And o feedback ajusta de forma limitada a ordenação de vagas comparáveis
+
+  Scenario: feedback parcial repetido sugere uma regra, sem ativá-la sozinho
+    Given três vagas canônicas diferentes foram rejeitadas parcialmente por presencial em 90 dias
+    When uma nova vaga presencial for avaliada
+    Then o painel sugere uma regra reutilizável com essas três evidências
+    And a regra permanece inativa até o usuário ativá-la
+    And a nova vaga continua visível enquanto a regra estiver inativa
+
+  Scenario: feedback parcial não afeta outros detalhes daquela vaga
+    Given usuário registrou crítica somente ao modelo híbrido de uma vaga
+    When o agente recalcula a ordenação e mostra essa mesma vaga
+    Then a vaga continua elegível para interesse e candidatura
+    And só a faceta work_model recebe o sinal negativo
+    And empresa, cargo e salário não recebem sinal negativo
+
+  Scenario: SEM TEMPO não é interpretado como preferência negativa
+    Given usuário escolhe SEM TEMPO para uma vaga
+    When o Preference Learner atualiza os sinais
+    Then nenhum contador positivo ou negativo de preferência muda
+    And nenhuma regra de supressão é criada
+
+  Scenario: usuário restaura uma vaga filtrada
+    Given uma oportunidade foi suprimida por regra ativa R
+    When usuário restaura somente essa oportunidade
+    Then ela reaparece no Kanban com estado found
+    And é criada uma exceção para essa oportunidade
+    And a regra R continua suprimindo outras vagas correspondentes
+
 Feature: Kanban e candidatura
   Scenario: não pular de preparação para concluído
     Given uma vaga em resume
@@ -450,12 +566,15 @@ Feature: mapa e validação
 | Unitário: workflow | toda aresta válida e arestas proibidas | 100% dos saltos ilegais rejeitados no servidor |
 | Unitário: autorização | APROVO isolado, versão, revogação, edição de CV/vaga | somente job/currículo/versão autorizados entram na fila |
 | Unitário: contexto | limite 4.000, papéis e vagas diferentes | excedente rejeitado; contexto de outra vaga ausente |
+| Unitário: feedback total/parcial | confirmação, justificativa ausente/curta/longa, categoria e detalhe | total cria regra de supressão; parcial mantém estado e nunca suprime vagas automaticamente |
+| Unitário: aprendizagem | sinais positivo/negativo, SEM TEMPO, vaga repetida, ajuste inicial e teto | repetição não conta duas vezes; sem histórico ajuste=0; ajuste entre -10 e +10 |
+| Unitário: regra e restauração | limites de similaridade, regra pausada, restaurar item/todos | item fora da regra não é suprimido; restaurar um não desativa a regra |
 | Unitário: escalonamento Telegram | sem token/destinatário, resposta de chat/ID errado, texto ambíguo, timeout, falha nas 3 entregas, resposta correta, PULAR opcional/obrigatório | sem Telegram funcional/resposta clara não há retomada; PULAR obrigatório é recusado; apenas pergunta/candidatura vinculadas são liberadas |
 | Integração: migração | banco novo e banco legado | migração repetida idempotente; relações antigas preservadas |
 | Integração: API | autenticação, escopo, schema, concorrência, rate limit | sem token=401, sem escopo=403, payload inválido=422, conflito=409 |
 | Integração: rodada | 3 fontes, uma falha, retry, lote repetido e duas rodadas | partial correto; contagens reconciliam; sem perda/duplicação |
 | Integração: mapa | cache hit/miss, timeout, quota, coordenada inválida | cache evita consulta repetida; falha não quebra Kanban; atribuição presente |
-| E2E: dashboard | primeira configuração Grillme, criar agente, testar prompt, publicar/rollback e ver ocorrências | perfil só grava após confirmação; mudança persiste após reload e execução mostra versões usadas |
+| E2E: dashboard | primeira configuração Grillme, criar agente, testar prompt, publicar/rollback, ver ocorrências e regras | perfil só grava após confirmação; regras/filtros e versões persistem após reload |
 | E2E: candidatura | interesse → draft → revisão → APROVO → manual/AUTORIZO → dúvida Telegram → retomada/confirmação | sem saltos; dúvida pausa e chega ao chat configurado no Hermes; sem resposta clara não há envio |
 | Segurança | prompt injection, CV de outro projeto, ID adivinhado | sem vazamento; escopo conferido no servidor |
 
@@ -469,18 +588,21 @@ Feature: mapa e validação
 6. API autenticada e teste de restauração de backup aprovado.
 7. Quota, atribuição, chaves, domínio, termos e falha do mapa verificados em produção.
 8. Token/destinatário Telegram são lidos do Hermes; perguntas e respostas testadas no chat autorizado; falha de entrega comprovadamente bloqueia o envio.
-9. Usuário valida Grillme, dados, editor de prompt, Kanban, mapa e candidatura manual em staging.
+9. Rejeição total sem motivo/categoria retorna 422; regra total suprime 100% das vagas que atendem ao critério e não suprime vagas fora dele.
+10. Rejeição parcial preserva estado da vaga, grava faceta e não cria supressão rígida; três sinais compatíveis em até 90 dias geram sugestão visível.
+11. Usuário valida Grillme, dados, editor de prompt, rejeição total/parcial, restauração de filtros, Kanban, mapa e candidatura manual em staging.
 
 ## 6. Sequência recomendada de implementação
 
 1. Segurança/autenticação e migrações compatíveis com banco atual.
 2. Máquina de estados e comandos server-side; remover status editável por PATCH.
-3. Canonical jobs, job_sources, sightings, métricas e backfill seguro.
+3. Canonical jobs, job_sources, sightings, eventos de feedback, regras de preferência, fila de supressão e backfill seguro.
 4. Runtime Hermes: agentes, fila limitada, JSON contracts, isolamento e falhas parciais.
 5. Editor de prompts: permissões, preview fixture, versões, publicação e rollback.
-6. Geoapify, cache, limites, precisão, clusters, filtros e fallback sem coordenada.
-7. Verificações ATS e Browser Harness sob AUTORIZO por vaga/versão; logs sem conteúdo pessoal.
-8. Testes de aceitação, observabilidade, restore, staging e runbook.
+6. Preference Learner, ajuste de ordenação, bloqueio de vagas semelhantes, regras reversíveis e painel de aprendizado.
+7. Geoapify, cache, limites, precisão, clusters, filtros e fallback sem coordenada.
+8. Verificações ATS e Browser Harness sob AUTORIZO por vaga/versão; logs sem conteúdo pessoal.
+9. Testes de aceitação, observabilidade, restore, staging e runbook.
 
 ## 7. Mapa gratuito: limites e interpretação
 
