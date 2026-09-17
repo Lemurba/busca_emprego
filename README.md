@@ -9,10 +9,12 @@ O processo roda no ambiente existente do Hermes e não cria outro container. Req
 ```bash
 npm ci
 npm test
+RADAR_OPERATOR_ID=operador-responsavel \
 RADAR_DB_PATH=/caminho/persistente/radar.sqlite \
-RADAR_AUTH_CREDENTIALS='[{"id":"usuario","kind":"user","token":"use-um-secret-de-32-caracteres-ou-mais","projects":["busca-emprego"],"tools":["*"]},{"id":"hermes","kind":"service","token":"use-outro-secret-de-32-caracteres-ou-mais","projects":["busca-emprego"],"tools":["jobs.write","applications.read","applications.write"]}]' \
 PORT=8787 npm start
 ```
+
+`RADAR_AUTH_CREDENTIALS` é obrigatória e deve ser injetada no processo pelo secret store do Hermes. Não a coloque no comando, em `.env` ou no repositório. O fluxo completo de perguntas, Glassdoor, Telegram, gateways e primeiro start está no [`onboarding do Hermes`](hermes-plugin/ONBOARDING.md); o contrato legível pelo host está em [`hermes-plugin/onboarding.json`](hermes-plugin/onboarding.json).
 
 O servidor escuta em `0.0.0.0:8787`; agentes no mesmo container podem usar `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. A API exige Bearer token e escopo por projeto/ferramenta; injete credenciais pelo armazenamento seguro do Hermes e mantenha a porta em rede interna ou atrás de proxy TLS. Não a exponha diretamente à internet.
 

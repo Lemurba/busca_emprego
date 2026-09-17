@@ -2,10 +2,16 @@
   "$schema": "./schemas/manifest.schema.json",
   "id": "busca-emprego",
   "name": "Busca Emprego",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Orquestra agentes de busca, enriquecimento, avaliação, currículo e preparação manual de candidatura.",
   "entrypoint": "dist/src/index.js",
   "configSchema": "schemas/config.schema.json",
+  "onboarding": {
+    "contract": "onboarding.json",
+    "guide": "ONBOARDING.md",
+    "mode": "interactive",
+    "secrets": "host-secure-input"
+  },
   "roles": [
     "coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator",
     "preference_learner", "resume_writer", "ats_reviewer", "application_assistant"

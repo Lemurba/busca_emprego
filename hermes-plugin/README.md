@@ -1,6 +1,8 @@
 # Plugin Busca Emprego para Hermes
 
-Runtime portátil descrito em `docs/production-sdd-bdd-tdd.md`. A versão 0.3 inclui adapters HTTPS concretos para Hermes, Browser Harness e o gateway Telegram. Tokens e destinatários não entram na configuração, banco ou logs: os adapters recebem apenas referências resolvidas pelo secret store do Hermes.
+Runtime portátil descrito em [`../docs/production-sdd-bdd-tdd.md`](../docs/production-sdd-bdd-tdd.md). A versão 0.3.1 inclui adapters HTTPS concretos para Hermes, Browser Harness e o gateway Telegram. Tokens e destinatários não entram na configuração, banco ou logs: os adapters recebem apenas referências resolvidas pelo secret store do Hermes.
+
+O Hermes deve começar por [`ONBOARDING.md`](ONBOARDING.md). O manifesto aponta também para `onboarding.json`, que define a ordem do setup, as perguntas em português, os quatro modos de autenticação de fontes e os testes obrigatórios. Segredos são coletados exclusivamente pela entrada segura do host, nunca pela conversa.
 
 ## Conteúdo
 
@@ -38,4 +40,4 @@ npm install
 npm test
 ```
 
-O build requer Node.js 24 ou superior. O plugin não modifica `src/server.ts`, `src/db.ts` ou `public/` do projeto principal.
+O build requer Node.js 24 ou superior. O pacote de runtime fica isolado em `hermes-plugin/`, mas integra-se à API e ao dashboard do projeto principal para fontes, versões de agentes, proveniência e conflitos.

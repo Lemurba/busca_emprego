@@ -47,7 +47,7 @@ Administrar configurações pelo dashboard exige `agents.manage` em uma credenci
 6. A ingestão de vagas não pode registrar interesse, aprovar currículos ou autorizar candidaturas. Essas ações exigem as rotas de confirmação humana descritas abaixo.
 7. Valores aceitos estão listados abaixo. O servidor valida URL HTTPS, tracking, salário/moeda, coordenadas e transições; payload inválido não deve ser repetido sem correção.
 8. `source_url` e `application_url` são independentes. Nunca copie um para o outro para preencher ausência; `application_url` desconhecido é `null`/vazio.
-9. Todo enriquecimento exige `evidence_source_url`; `evidence_excerpt` é opcional. A proveniência por campo ainda é um requisito-alvo não implementado.
+9. Todo enriquecimento exige `evidence_source_url`; `evidence_excerpt` é opcional. Cada campo alterado recebe um registro de evidência individual; divergências não sobrescrevem silenciosamente o valor vigente e geram conflito revisável.
 
 ## Endpoints
 
@@ -100,7 +100,7 @@ Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, 
 | `PATCH` | `/api/agents/{id}` | `agents.manage` | Editar, habilitar ou pausar agente |
 | `DELETE` | `/api/agents/{id}` | `agents.manage` | Excluir agente sem histórico; com histórico, deve ser pausado |
 
-Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browser_enabled`, `tool_scopes`, `can_create_jobs`, `can_edit_jobs`, `editable_fields`, `concurrency`, `timeout_seconds` e `prompt`. `source_ids` e `allowed_domains` são listas distintas. A API retorna 422 para capacidade/campo desconhecido, limites inválidos ou Browser habilitado sem allowlist. Versionamento/publicação/rollback continuam pendentes para produção.
+Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browser_enabled`, `tool_scopes`, `can_create_jobs`, `can_edit_jobs`, `editable_fields`, `concurrency`, `timeout_seconds` e `prompt`. `source_ids` e `allowed_domains` são listas distintas. A API retorna 422 para capacidade/campo desconhecido, limites inválidos ou Browser habilitado sem allowlist. Toda edição cria uma versão imutável em rascunho; publicação e rollback são explícitos e cada execução fica presa ao snapshot publicado.
 
 ### `GET /api/jobs/{id}`
 

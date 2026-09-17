@@ -3,7 +3,7 @@
   "$id": "https://busca-emprego.local/schemas/manifest.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "name", "version", "entrypoint", "configSchema", "roles", "integration", "security", "dashboard"],
+  "required": ["id", "name", "version", "entrypoint", "configSchema", "onboarding", "roles", "integration", "security", "dashboard"],
   "properties": {
     "$schema": { "type": "string" },
     "id": { "const": "busca-emprego" },
@@ -12,6 +12,17 @@
     "description": { "type": "string" },
     "entrypoint": { "type": "string" },
     "configSchema": { "type": "string" },
+    "onboarding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "guide", "mode", "secrets"],
+      "properties": {
+        "contract": { "type": "string", "const": "onboarding.json" },
+        "guide": { "type": "string", "const": "ONBOARDING.md" },
+        "mode": { "const": "interactive" },
+        "secrets": { "const": "host-secure-input" }
+      }
+    },
     "roles": { "type": "array", "minItems": 9, "maxItems": 9, "uniqueItems": true, "items": { "type": "string" } },
     "integration": { "type": "object" },
     "security": { "type": "object" },

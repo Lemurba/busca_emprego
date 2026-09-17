@@ -41,35 +41,35 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 
 ### Parcial: existe uma base, mas ainda não atende ao requisito de produção
 
-- [~] **Hermes e agentes:** existe scaffold portátil com nove papéis, contratos JSON, fila limitada, idempotência, retentativas e gate Telegram; o dashboard já cria/edita/pausa configurações com allowlist, mas faltam adapters do runtime Hermes e versionamento/publicação persistidos.
+- [~] **Hermes e agentes:** existem adapters HTTPS concretos para Hermes, Browser Harness e Telegram, nove papéis, contratos JSON, fila limitada, idempotência e retentativas. O dashboard persiste versões, publicação e rollback; falta validar gateways, perfis e secrets reais no staging do Hermes.
 - [~] **Contexto independente:** o modelo atual não aplica limite formal ao contexto compartilhado nem prova isolamento de memória por vaga.
-- [~] **Prompts no dashboard:** não existe catálogo completo, editor, versionamento, validação ou rollback de prompts.
-- [~] **Permissões dos agentes:** existe autorização genérica por ferramenta, mas ainda não há catálogo persistido nem enforcement completo dos quatro escopos `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup` por configuração de agente.
+- [~] **Prompts no dashboard:** o prompt faz parte de snapshots imutáveis com teste, publicação e rollback; ainda faltam catálogo avançado e métricas de uso/custo.
+- [~] **Permissões dos agentes:** o servidor aplica capabilities por papel/configuração, `allowed_domains` e escopo da credencial; falta comprovar revogação e isolamento contra os gateways reais no staging.
 - [~] **Deduplicação:** o ID deriva de fonte, URLs, título e empresa. Não há identidade canônica entre fontes nem histórico de ocorrências por rodada. Alterar a URL pode gerar outro cartão.
 - [~] **Kanban:** existe matriz central de transições, CAS por versão, eventos persistidos e bloqueio de `status` por PATCH. A UI ainda precisa migrar todos os controles/drag para comandos adjacentes e exibir conflitos/precondições.
 - [~] **Mapa:** é um mapa real, mas não geocodifica cidades automaticamente, não guarda precisão/provedor, não tem cache de geocodificação e só plota vagas com coordenadas já informadas.
 - [~] **Segurança:** a API exige Bearer token, separa credenciais de usuário/serviço e confere projeto/ferramenta. Faltam sessão web mais amigável, secret store real, rate limit compartilhado e validação E2E de isolamento.
-- [~] **Execução de candidatura:** o repositório define fila e autorização; não executa Browser Harness, não comprova envio nem pergunta dúvidas pelo Telegram via Hermes.
-- [~] **Detalhe e proveniência da vaga:** cartões compactos e detalhe expandido já mostram descrição, responsabilidades, requisitos, benefícios, informações adicionais, links separados e eventos de enriquecimento; faltam proveniência por campo, resolução de conflitos e evidências versionadas.
+- [~] **Execução de candidatura:** o adapter separado do Browser Harness exige o envelope `AUTORIZO`, isola a sessão e só aceita envio com evidência; Telegram correlaciona dúvidas. Falta o E2E contra serviços reais.
+- [~] **Detalhe e proveniência da vaga:** cartões compactos e detalhe expandido mostram dados estruturados, links separados, evidência por campo e conflitos revisáveis; falta aceite visual/funcional no staging real.
 - [~] **Feedback de rejeição:** o backend exige modo, categoria, detalhe e justificativa, preserva rejeição parcial, cria regra total e sinais persistidos. Faltam UI completa, filtro de supressão na ingestão, exceções/restauração e sugestões acionáveis.
-- [~] **Escala/operação:** o scaffold possui concorrência limitada, idempotência e retentativas; backup/restore e health check têm testes. Faltam fila durável compartilhada, métricas/SLO, alertas e teste de carga no ambiente de referência.
+- [~] **Escala/operação:** concorrência, idempotência, retentativas, backup/restore, health e carga local de 10 fontes/500 resultados/20 workers têm testes. Faltam fila durável compartilhada, métricas/SLO, alertas e repetição dos testes no ambiente de referência.
 
 ### Pendente antes de produção
 
-- [ ] Implementar agentes configuráveis, editor de prompts e histórico imutável.
-- [ ] Implementar a matriz de capacidades dos agentes no servidor e no dashboard, com negação por padrão e auditoria de cada uso.
+- [x] Implementar agentes configuráveis, editor de prompts e histórico imutável.
+- [x] Implementar a matriz de capacidades dos agentes no servidor e no dashboard, com negação por padrão e auditoria de cada uso.
 - [ ] Implementar entrevista de primeira configuração via Grillme e gravar o perfil somente após confirmação.
-- [ ] Implementar orquestração Hermes, fan-out limitado, isolamento, timeout, cancelamento, retentativa idempotente e status de rodada.
+- [x] Implementar orquestração Hermes, fan-out limitado, isolamento, timeout, cancelamento, retentativa idempotente e status de rodada; validar adapters no staging real continua como gate.
 - [ ] Implementar identidade canônica, índice de deduplicação e ocorrências por rodada/fonte.
-- [ ] Implementar detalhe completo de vaga, `source_url` e `application_url` independentes, proveniência/evidência por campo e visual compacto/expandido.
-- [ ] Implementar máquina de estados completa e impedir atualização direta do status.
-- [ ] Implementar escalonamento obrigatório de dúvidas de candidatura pelo Telegram do Hermes e retomada segura após resposta.
+- [x] Implementar detalhe completo de vaga, `source_url` e `application_url` independentes, proveniência/evidência por campo e visual compacto/expandido.
+- [x] Implementar máquina de estados completa e impedir atualização direta do status.
+- [x] Implementar escalonamento obrigatório de dúvidas de candidatura pelo Telegram do Hermes e retomada segura após resposta; validar o gateway real continua como gate.
 - [ ] Exigir modo total/parcial e motivo em todo descarte; gravar feedback, criar regras para supressão total e atualizar preferências com feedback parcial.
 - [ ] Exibir vagas filtradas e regras ativas, permitir restaurar uma vaga e editar/pausar/remover regras.
 - [ ] Completar geocodificação, cache, atribuição, filtros e limites do mapa.
-- [ ] Adicionar autenticação/autorização, escopo por usuário/projeto, gestão de secrets e trilha de auditoria.
-- [ ] Adicionar migrações seguras, backup/restauração e política de retenção/exclusão.
-- [ ] Criar testes unitários, integração e aceitação para todos os critérios obrigatórios abaixo.
+- [x] Adicionar autenticação/autorização, escopo por usuário/projeto, referências ao secret store e trilha de auditoria.
+- [~] Adicionar migrações seguras, backup/restauração e política de retenção/exclusão: backup/restore estão testados; migrações e retenção continuam pendentes.
+- [~] Criar testes unitários, integração e aceitação para todos os critérios obrigatórios abaixo: suítes locais E2E/carga/segurança/restore passam; falta repetição no ambiente real.
 - [ ] Fazer piloto com fontes permitidas, verificar termos e cotas do mapa, validar UX e aprovar monitoramento, backup e rollback.
 
 ## 3. SDD — desenho da solução
@@ -78,7 +78,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 
 | Componente | Responsabilidade | Estado |
 |---|---|---|
-| Plugin Busca Emprego | Regras, integração e instalação Hermes, prompts-base, capacidades e contratos | Novo/pendente |
+| Plugin Busca Emprego | Regras, integração e instalação Hermes, prompts-base, capacidades e contratos | Implementado; validação externa pendente |
 | Hermes Coordinator | Abre rodada, congela perfil/configuração, divide fontes em lotes, limita paralelismo, coleta resultados e fecha a rodada | Orquestra; não decide candidatura |
 | Source Scout | Consulta uma fonte aprovada conforme suas regras; devolve vagas estruturadas, URL e evidências | Uma instância por fonte habilitada |
 | Normalizer & Deduper | Normaliza campos, encontra identidade canônica, grava ocorrência e sinaliza colisões | Decisão determinística; IA não funde fuzzy |

@@ -2,6 +2,8 @@
 
 Este runbook opera o Radar como **processo adicional no container Hermes existente**. O projeto não fornece nem requer uma imagem Docker própria. A implantação continua bloqueada até que os gates externos e funcionais de `production-sdd-bdd-tdd.md` sejam aprovados.
 
+Para uma instalação nova, o Hermes deve executar primeiro o fluxo interativo de [`hermes-plugin/ONBOARDING.md`](../hermes-plugin/ONBOARDING.md), definido por [`hermes-plugin/onboarding.json`](../hermes-plugin/onboarding.json). Este runbook assume que o diálogo seguro de credenciais, os perfis de navegador e o operador responsável já foram confirmados.
+
 ## 1. Premissas e topologia suportada
 
 - Uma única instância do Radar por arquivo SQLite. Dois processos jamais devem abrir o mesmo `RADAR_DB_PATH` por volume compartilhado.
@@ -131,7 +133,7 @@ Não fazer downgrade de código sobre schema incompatível. Cada futura migraç�
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
 - A API autentica e confere escopos por projeto/ferramenta; o rate limit ainda é local ao processo e SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
-- Não há migração versionada/rollback de schema, alertas, retenção automática ou teste de carga dos gates.
+- Não há migração versionada/rollback de schema, alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
 - Dados demonstrativos e anonimização legada são opt-in (`RADAR_SEED_DEMO=true` e `RADAR_RUN_LEGACY_ANONYMIZATION=true`) e devem permanecer desabilitados em produção.
 
 Essas limitações são bloqueadores de produção, não exceções aceitas por este runbook.

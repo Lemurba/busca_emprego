@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Coordinator, MemoryIdempotencyStore, PermanentError, ROLE_TYPES, TelegramQuestionGate, effectiveCapabilities, validateAgentConfiguration, withRetry } from "../src/index.js";
 import type { AgentConfiguration, AgentInvocation, HermesRuntimeAdapter, PluginConfig } from "../src/index.js";
 
@@ -7,6 +8,18 @@ const config: PluginConfig = {
   projectId: "p1", apiBaseUrl: "http://127.0.0.1:8787", maxConcurrency: 2, maxPerDomain: 1,
   batchSize: 25, timeoutMs: 1000, retry: { delaysMs: [1000, 5000, 15000], jitterRatio: 0 },
 };
+
+test("manifesto aponta para onboarding seguro e legível pelo Hermes", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../../manifest.json", import.meta.url), "utf8"));
+  const onboarding = JSON.parse(readFileSync(new URL("../../onboarding.json", import.meta.url), "utf8"));
+  assert.equal(manifest.onboarding.contract, "onboarding.json");
+  assert.equal(manifest.onboarding.guide, "ONBOARDING.md");
+  assert.equal(onboarding.secretPolicy.collection, "host-secure-input");
+  assert.equal(onboarding.secretPolicy.neverAskInChat, true);
+  assert.deepEqual(Object.keys(onboarding.sourceAuthFlows).sort(), ["basic", "bearer", "browser_profile", "none"]);
+  assert.equal(onboarding.sourceAuthFlows.browser_profile.requiresBrowserProfile, true);
+  assert.equal(onboarding.readiness.requireAuthenticatedBootstrap, true);
+});
 
 test("retry usa 1s, 5s e 15s e para após a quarta tentativa", async () => {
   const waits: number[] = [];

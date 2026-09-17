@@ -12,7 +12,7 @@ Uma instalação não pode ser classificada como pronta para produção enquanto
 
 ## Requisitos novos consolidados nesta revisão
 
-- agentes configuráveis pelo dashboard e, como gate ainda pendente, versionados/publicados com rollback, administrados com `agents.manage`;
+- agentes configuráveis pelo dashboard, versionados/publicados com rollback e administrados com `agents.manage`; a validação no Hermes real continua como gate;
 - capacidades fechadas `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`, sempre negadas por padrão e limitadas por papel, configuração e credencial;
 - `source_ids` separado de `allowed_domains`; `browser_enabled` exige allowlist não vazia e toda URL/evidência do agente precisa pertencer a ela;
 - cartões compactos no Kanban e detalhe expandido com descrição estruturada, ocorrências, score explicado e proveniência por campo;
@@ -32,13 +32,15 @@ Esses itens estão especificados no SDD/BDD/TDD, contrato HTTP, segurança e che
 - cálculo de score, cobertura, bandas e ajuste de preferências;
 - rejeição total/parcial com justificativa obrigatória, regras e sinais persistidos;
 - perguntas humanas correlacionadas a candidatura/vaga/currículo/versão e validação de chat autorizado;
-- scaffold do plugin Hermes com oito papéis, contratos JSON, fila limitada, idempotência, timeout, retentativas e gate Telegram;
+- plugin Hermes com nove papéis, adapters HTTPS concretos, contratos JSON, fila limitada, idempotência, timeout, retentativas e gate Telegram;
 - CI, backup/restore SQLite, health check, runbook, checklist de release e exemplo Supervisor no Docker Hermes existente;
 - dados demonstrativos e anonimização legada transformados em ações opt-in;
 - CRUD de agentes no dashboard, capacidades/campos editáveis fechados, `allowed_domains` validada e eventos de enriquecimento com evidência;
 - descrição, responsabilidades, requisitos, benefícios, informações adicionais e links separados no detalhe expandido, mantendo cartões compactos;
 - papel Hermes `job_enrichment`, contratos ampliados e Browser de coleta somente leitura;
 - testes locais de build, workflow, autenticação, domínio, feedback, persistência, backup e restore.
+- versionamento/publicação/rollback de agentes, proveniência por campo, conflitos revisáveis e teste de carga local de 10 fontes/500 resultados/20 workers;
+- onboarding descoberto pelo manifesto, com perguntas seguras para secrets, Glassdoor, Telegram e primeiro start.
 
 ## Contradições resolvidas
 
