@@ -49,7 +49,7 @@ type BaseResume = { id: string; title: string; file_name: string; mime_type: "ap
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
 type AgentRun = { id: string; agent_name: string; status: string; started_at: string; finished_at: string | null; found_count: number; message: string };
-type AgentConfig = { id: string; name: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; version: number; published_version_id: string | null; draft_version_id: string | null };
+type AgentConfig = { id: string; name: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; memory_enabled: boolean; hermes_prompt_optimization: boolean; version: number; published_version_id: string | null; draft_version_id: string | null };
 type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
 type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; stats: Record<string, any> };
@@ -67,6 +67,12 @@ const statusColumns = [
   { title: "Encerradas", statuses: ["expired", "discarded"], tone: "red" }
 ];
 const movableStatusValues = ["found", "validation", "strong_match", "review"];
+const editableAgentFields: [string, string][] = [
+  ["title", "Título"], ["company", "Empresa"], ["location", "Localização"], ["country", "País"], ["work_model", "Modelo de trabalho"], ["seniority", "Senioridade"],
+  ["salary_min", "Salário mínimo"], ["salary_max", "Salário máximo"], ["currency", "Moeda"], ["salary_period", "Período salarial"], ["salary_source", "Fonte salarial"], ["salary_source_url", "URL da fonte salarial"],
+  ["source_url", "URL de origem"], ["linkedin_post_url", "Post do LinkedIn"], ["job_url", "URL da vaga"], ["application_url", "URL de candidatura"], ["opening_status", "Estado da vaga"], ["deadline_at", "Prazo"],
+  ["description", "Descrição"], ["benefits", "Benefícios"], ["requirements", "Requisitos"], ["responsibilities", "Responsabilidades"], ["additional_information", "Informações adicionais"], ["posted_at", "Data da publicação"]
+];
 const movableColumns = statusColumns.filter((column) => movableStatusValues.includes(column.statuses[0]));
 type VisualFilter = { type: "source" | "status" | "lifecycle" | "location" | "job"; value: string; label: string };
 
@@ -422,7 +428,9 @@ function renderAgents(data: Data) {
 
 function renderSettings(data: Data) {
   const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(source.source_type)}</td><td>${escapeHtml(source.auth_strategy)}</td><td><span class="status-pill ${source.enabled ? "teal" : "red"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}">Editar</button></td></tr>`).join("");
+  const promptCards = data.agentConfigs.map((agent) => `<article class="company-card agent-card"><div class="company-top"><div><h3>${escapeHtml(agent.name)}</h3><p>${escapeHtml(agent.role_type)} · v${agent.version}</p></div><span class="status-pill ${agent.hermes_prompt_optimization ? "teal" : "orange"}">${agent.hermes_prompt_optimization ? "Hermes otimiza" : "Manual"}</span></div><p>${escapeHtml(agent.prompt || "Sem instruções adicionais.")}</p><div class="tag-list"><span class="tag">Memória ${agent.memory_enabled ? "ativa" : "desativada"}</span>${agent.draft_version_id ? `<span class="tag">Rascunho pendente</span>` : ""}</div><div class="card-footer"><span>Permissões separadas do prompt</span><button class="secondary-button" data-edit-agent="${escapeHtml(agent.id)}">Ajustar</button></div></article>`).join("");
   return `${pageHeading("Sistema", "Configurações", "Preferências do workspace e pontos de integração com o Hermes Agent.")}
+    <section class="panel"><div class="section-head flush"><div><h2>Prompts dos agentes padrão</h2><p>Ajuste prompt, memória e otimização assistida. Sugestões do Hermes viram rascunho e só entram em uso após publicação.</p></div></div><div class="company-grid agent-grid">${promptCards || `<div class="empty-state"><div><strong>Nenhum agente padrão configurado</strong><span>Instale ou sincronize os agentes pelo Hermes.</span></div></div>`}</div></section>
     <div class="dashboard-grid equal"><section class="panel"><div class="section-head flush"><div><h2>Perfil de busca</h2><p>Configuração privada do workspace</p></div><span class="chip teal">Local</span></div><p>O perfil e os critérios de busca devem ser configurados no Hermes. Nenhum nome ou preferência pessoal fica embutido nesta aplicação.</p></section>
       <section class="panel"><div class="section-head flush"><div><h2>Fontes e credenciais</h2><p>Segredos permanecem no Hermes</p></div><button class="primary-button" data-action="add-source">＋ Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Autorização</th><th>Estado</th><th></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section></div>
     <div class="section-head"><div><h2>Contrato de eventos para o Hermes</h2><p>O dashboard recebe descobertas e enriquecimentos identificados; o executor consulta a fila autorizada separadamente.</p></div></div><section class="panel"><code class="code-note">POST /api/agent-events\n\n{\n  "event": "job.discovered",\n  "agent_id": "...",\n  "job": {\n    "title": "...", "company": "...",\n    "source": "portal autorizado",\n    "source_url": "https://...",\n    "linkedin_post_url": "https://...",\n    "job_url": "https://...",\n    "description": "...", "benefits": "..."\n  }\n}\n\njob.updated exige evidence_source_url e respeita os campos editáveis do agente.\nGET /api/authorized-applications — somente itens autorizados para candidatura</code></section>
@@ -566,10 +574,12 @@ function showAgentModal(id?: string) {
       <div class="form-field"><label><input type="checkbox" name="browser_enabled" ${checked(agent?.browser_enabled)} /> Browser Harness para leitura</label></div>
       <div class="form-field"><label><input type="checkbox" name="can_create_jobs" ${checked(agent?.can_create_jobs)} /> Pode criar vagas</label></div>
       <div class="form-field"><label><input type="checkbox" name="can_edit_jobs" ${checked(agent?.can_edit_jobs)} /> Pode enriquecer vagas</label></div>
-      <div class="form-field full"><label for="agent-fields">Campos que pode editar</label><input class="input" id="agent-fields" name="editable_fields" value="${escapeHtml(agent?.editable_fields.join(", ") ?? "salary_min, salary_max, currency, salary_period, salary_source, salary_source_url, description, benefits, requirements, responsibilities, additional_information, linkedin_post_url, job_url")}" /></div>
+      <fieldset class="form-field full permission-fieldset"><legend>Escopo de edição no dashboard e Kanban</legend><p>Permissões gerais continuam controladas pelo Hermes. Este checklist limita quais dados este agente gerencia nesta aplicação.</p><div class="permission-grid">${editableAgentFields.map(([value, label]) => `<label><input type="checkbox" name="editable_fields" value="${value}" ${checked(agent?.editable_fields.includes(value) ?? ["salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "description", "benefits", "requirements", "responsibilities", "additional_information", "linkedin_post_url", "job_url"].includes(value))} /> ${label}</label>`).join("")}</div></fieldset>
       <div class="form-field"><label for="agent-concurrency">Concorrência</label><input class="input" id="agent-concurrency" name="concurrency" type="number" min="1" max="20" value="${escapeHtml(agent?.concurrency ?? 1)}" /></div>
       <div class="form-field"><label for="agent-timeout">Timeout (s)</label><input class="input" id="agent-timeout" name="timeout_seconds" type="number" min="10" max="1800" value="${escapeHtml(agent?.timeout_seconds ?? 120)}" /></div>
       <div class="form-field full"><label for="agent-prompt">Instruções adicionais</label><textarea class="textarea" id="agent-prompt" name="prompt">${escapeHtml(agent?.prompt ?? "")}</textarea></div>
+      <div class="form-field"><label><input type="checkbox" name="memory_enabled" ${checked(agent?.memory_enabled ?? true)} /> Usar memória do Hermes</label></div>
+      <div class="form-field"><label><input type="checkbox" name="hermes_prompt_optimization" ${checked(agent?.hermes_prompt_optimization)} /> Permitir sugestões automáticas de prompt</label></div>
     </div><div class="modal-actions">${agent ? `<button type="button" class="secondary-button" data-delete-agent="${escapeHtml(agent.id)}">Excluir</button>` : ""}<button type="button" class="secondary-button" data-close-modal>Cancelar</button><button class="primary-button" type="submit">Salvar agente</button></div></form>`);
 }
 
@@ -713,8 +723,9 @@ async function handleForm(form: HTMLFormElement) {
       source_ids: get("source_ids").split(",").map((item) => item.trim()).filter(Boolean),
       allowed_domains: get("allowed_domains").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
       tool_scopes: toolScopes, browser_enabled: browserEnabled, can_create_jobs: canCreate, can_edit_jobs: canEdit,
-      editable_fields: canEdit ? get("editable_fields").split(",").map((item) => item.trim()).filter(Boolean) : [],
-      concurrency: Number(get("concurrency") || 1), timeout_seconds: Number(get("timeout_seconds") || 120), prompt: get("prompt")
+      editable_fields: canEdit ? formData.getAll("editable_fields").map(String) : [],
+      concurrency: Number(get("concurrency") || 1), timeout_seconds: Number(get("timeout_seconds") || 120), prompt: get("prompt"),
+      memory_enabled: formData.has("memory_enabled"), hermes_prompt_optimization: formData.has("hermes_prompt_optimization")
     };
     const id = form.dataset.agentId;
     await fetchJson(id ? `/api/agents/${encodeURIComponent(id)}` : "/api/agents", { method: id ? "PATCH" : "POST", body: JSON.stringify(body) });

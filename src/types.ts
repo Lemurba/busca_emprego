@@ -73,6 +73,8 @@ export interface AgentConfig {
   concurrency: number;
   timeout_seconds: number;
   prompt: string;
+  memory_enabled: boolean;
+  hermes_prompt_optimization: boolean;
   version: number;
   published_version_id: string | null;
   draft_version_id: string | null;

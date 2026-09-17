@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { isWorkflowError } from "./workflow.js";
 
 const port = Number(process.env.PORT ?? 8787);
@@ -75,6 +75,9 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
     if (req.method === "POST" && pathname.startsWith("/api/agents/") && pathname.endsWith("/rollback")) {
       const body = await readBody(req);
       return sendJson(res, 200, rollbackAgentConfig(idFromPath(pathname, "/api/agents/"), String(body.version_id ?? ""), actor, projectId));
+    }
+    if (req.method === "POST" && pathname.startsWith("/api/agents/") && pathname.endsWith("/prompt-proposals")) {
+      return sendJson(res, 201, proposeAgentPrompt(idFromPath(pathname, "/api/agents/"), await readBody(req), projectId));
     }
     if (req.method === "PATCH" && pathname.startsWith("/api/agents/")) return sendJson(res, 200, updateAgentConfig(idFromPath(pathname, "/api/agents/"), await readBody(req), actor, projectId));
     if (req.method === "DELETE" && pathname.startsWith("/api/agents/")) return sendJson(res, 200, deleteAgentConfig(idFromPath(pathname, "/api/agents/"), actor, projectId));

@@ -333,6 +333,11 @@ body.map-expanded { overflow: hidden; }
 .detail-section p { margin: 7px 0; }
 .agent-grid { margin-top: 20px; }
 .agent-card p { margin: 8px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.permission-fieldset { border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.permission-fieldset legend { padding: 0 6px; font-weight: 700; }
+.permission-fieldset p { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+.permission-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.permission-grid label { display: flex; gap: 8px; align-items: center; }
 .modal-alert { padding: 11px 12px; margin-bottom: 13px; color: #8b6334; border-radius: 10px; background: #fff7e9; font-size: 11px; line-height: 1.45; }
 
 .toast-root { position: fixed; right: 20px; bottom: 20px; z-index: 20; display: grid; gap: 8px; }

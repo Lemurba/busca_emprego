@@ -17,10 +17,15 @@ try {
     name: "Enriquecedor versionado", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"],
     allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"],
     browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["benefits", "description"],
-    concurrency: 1, timeout_seconds: 120, prompt: "v1"
+    concurrency: 1, timeout_seconds: 120, prompt: "v1", memory_enabled: true, hermes_prompt_optimization: true
   }, "operator");
   const firstVersions = store.listAgentConfigVersions(agent.id);
   assert.equal(firstVersions[0].status, "published");
+
+  const proposedAgent = store.proposeAgentPrompt(agent.id, { prompt: "v1 com aprendizado explícito", reason: "Uso recente mostrou respostas sem contexto suficiente." });
+  assert.ok(proposedAgent.draft_version_id);
+  assert.equal(store.listAgentConfigVersions(agent.id)[0].created_by, "hermes-memory");
+  store.publishAgentConfigVersion(agent.id, proposedAgent.draft_version_id, "operator");
 
   const draftAgent = store.updateAgentConfig(agent.id, { prompt: "v2", editable_fields: ["benefits"] }, "operator");
   assert.ok(draftAgent.draft_version_id);
@@ -29,7 +34,7 @@ try {
   store.publishAgentConfigVersion(agent.id, versions[0].id, "operator");
   assert.equal(store.listAgentConfigVersions(agent.id)[0].status, "published");
   store.rollbackAgentConfig(agent.id, firstVersions[0].id, "operator");
-  assert.equal(store.listAgentConfigVersions(agent.id)[0].version, 3);
+  assert.equal(store.listAgentConfigVersions(agent.id)[0].version, 4);
 
   const job = store.upsertJob({ id: "prov-job", title: "Analista", company: "Empresa", source: "manual", source_url: "https://glassdoor.com/job/1" });
   const first = store.enrichJobFromAgent(agent.id, job.id, { benefits: "Plano de saúde" }, "https://glassdoor.com/job/1", "Benefício publicado");
