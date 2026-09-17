@@ -1,0 +1,30 @@
+{
+  "$schema": "./schemas/manifest.schema.json",
+  "id": "busca-emprego",
+  "name": "Busca Emprego",
+  "version": "0.2.0",
+  "description": "Orquestra agentes de busca, enriquecimento, avaliação, currículo e preparação manual de candidatura.",
+  "entrypoint": "dist/src/index.js",
+  "configSchema": "schemas/config.schema.json",
+  "roles": [
+    "coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator",
+    "preference_learner", "resume_writer", "ats_reviewer", "application_assistant"
+  ],
+  "integration": {
+    "kind": "adapter-required",
+    "note": "O host implementa HermesRuntimeAdapter, ReadonlyBrowserHarnessAdapter e HermesTelegramCapability; nenhuma API proprietária é presumida."
+  },
+  "security": {
+    "secrets": "host-only",
+    "automaticApplicationRequiresTelegram": false,
+    "humanAuthorizationRequired": true,
+    "promptCannotExpandCapabilities": true,
+    "browserScoutingAndEnrichmentReadOnly": true,
+    "externalApplicationExecution": false
+  },
+  "dashboard": {
+    "agentConfiguration": true,
+    "editableFields": ["name", "enabled", "promptVersionId", "customInstructions", "sourceIds", "allowedDomains", "requestedCapabilities", "concurrency", "timeoutMs"],
+    "capabilities": "role-bounded"
+  }
+}

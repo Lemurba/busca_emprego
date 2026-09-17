@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["source_id", "fetched_at", "items", "page_complete", "next_cursor", "warnings"],
+  "properties": {
+    "source_id": { "type": "string" },
+    "fetched_at": { "type": "string", "format": "date-time" },
+    "items": {
+      "type": "array", "maxItems": 25,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_id", "source_job_id", "title", "company", "location_text", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "posted_at", "deadline_at", "opening_status", "linkedin_post_url", "job_url", "application_url", "evidence_refs"],
+        "properties": {
+          "source_id": { "type": "string" }, "source_job_id": { "type": ["string", "null"] },
+          "title": { "type": ["string", "null"] }, "company": { "type": ["string", "null"] },
+          "location_text": { "type": ["string", "null"] },
+          "work_model": { "enum": ["remote", "hybrid", "onsite", "unknown", null] },
+          "seniority": { "type": ["string", "null"] }, "description": { "type": ["string", "null"] },
+          "benefits": { "type": "array", "items": { "type": "string" } },
+          "requirements": { "type": "array", "items": { "type": "string" } },
+          "responsibilities": { "type": "array", "items": { "type": "string" } },
+          "additional_information": { "type": ["string", "null"] },
+          "salary_min": { "type": ["number", "null"], "minimum": 0 },
+          "salary_max": { "type": ["number", "null"], "minimum": 0 },
+          "currency": { "type": ["string", "null"], "pattern": "^[A-Z]{3}$" },
+          "posted_at": { "type": ["string", "null"], "format": "date-time" },
+          "deadline_at": { "type": ["string", "null"], "format": "date-time" },
+          "opening_status": { "enum": ["open", "closed", "unknown"] },
+          "linkedin_post_url": { "type": ["string", "null"], "format": "uri", "pattern": "^https://" },
+          "job_url": { "type": "string", "format": "uri", "pattern": "^https://" },
+          "application_url": { "type": ["string", "null"], "format": "uri", "pattern": "^https://" },
+          "evidence_refs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "page_complete": { "type": "boolean" }, "next_cursor": { "type": ["string", "null"] },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

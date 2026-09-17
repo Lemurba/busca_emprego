@@ -11,12 +11,15 @@ type Job = {
   salary_min: number | null;
   salary_max: number | null;
   currency: string;
+  salary_period: "hour" | "month" | "year" | null;
   salary_source: string;
   salary_source_url: string;
   salary_checked_at: string | null;
   salary_confidence: string;
   source: string;
   source_url: string;
+  linkedin_post_url: string;
+  job_url: string;
   application_url: string;
   opening_status: "open" | "closed" | "unknown";
   opening_checked_at: string | null;
@@ -25,8 +28,13 @@ type Job = {
   decision: string;
   decision_at: string | null;
   description: string;
+  benefits: string;
+  requirements: string;
+  responsibilities: string;
+  additional_information: string;
   match_score: number;
   status: string;
+  version: number;
   posted_at: string | null;
   updated_at: string;
   application_status: string | null;
@@ -41,7 +49,9 @@ type BaseResume = { id: string; title: string; file_name: string; mime_type: "ap
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
 type AgentRun = { id: string; agent_name: string; status: string; started_at: string; finished_at: string | null; found_count: number; message: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; stats: Record<string, any> };
+type AgentConfig = { id: string; name: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string };
+type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; enrichmentEvents: EnrichmentEvent[]; stats: Record<string, any> };
 
 const statusLabels: Record<string, string> = {
   found: "Encontrada", validation: "Validar", strong_match: "Match forte", review: "Em revisão", selected: "Selecionada", resume: "Currículo", resume_approved: "Currículo aprovado", ready_to_apply: "Pronta", applying: "Candidatando", applied: "Candidatado", discarded: "Descartada", expired: "Perdida"
@@ -285,33 +295,56 @@ function renderAnalytics(data: Data) {
     <div class="section-head"><div><h2>Leituras rápidas</h2></div></div><div class="insight-list"><div class="insight"><span class="insight-icon">↗</span><p><strong>${escapeHtml(data.stats.strongMatches ?? 0)} matches fortes</strong> estão acima de 80% de aderência ao perfil.</p></div><div class="insight"><span class="insight-icon">⌛</span><p><strong>${escapeHtml(data.stats.lost ?? 0)} vagas perdidas</strong> foram fechadas sem candidatura enviada; use os prazos críticos no início do dia.</p></div><div class="insight"><span class="insight-icon">◎</span><p><strong>${escapeHtml(data.companies.length)} empresas</strong> aparecem na amostra atual, com ${escapeHtml(data.jobs.filter((job) => job.salary_min != null).length)} vagas contendo faixa salarial.</p></div></div>`;
 }
 
+function renderAgents(data: Data) {
+  const cards = data.agentConfigs.map((agent) => `<article class="company-card agent-card">
+    <div class="company-top"><div><h3>${escapeHtml(agent.name)}</h3><p>${escapeHtml(agent.role_type)}</p></div><span class="status-pill ${agent.enabled ? "teal" : "red"}">${agent.enabled ? "Ativo" : "Pausado"}</span></div>
+    <div class="tag-list">${agent.browser_enabled ? `<span class="tag">Browser Harness: leitura</span>` : ""}${agent.can_create_jobs ? `<span class="tag">Cria vagas</span>` : ""}${agent.can_edit_jobs ? `<span class="tag">Enriquece vagas</span>` : ""}</div>
+    <p><strong>Fontes:</strong> ${escapeHtml(agent.source_ids.join(", ") || "Não informadas")}</p><p><strong>Domínios permitidos:</strong> ${escapeHtml(agent.allowed_domains.join(", ") || "Nenhum")}</p>
+    <p><strong>Campos editáveis:</strong> ${escapeHtml(agent.editable_fields.join(", ") || "Nenhum")}</p>
+    <div class="card-footer"><span>${agent.concurrency} trabalho(s) · ${agent.timeout_seconds}s</span><button class="secondary-button" data-edit-agent="${escapeHtml(agent.id)}">Editar</button></div>
+  </article>`).join("");
+  return `${pageHeading("Orquestração Hermes", "Agentes configuráveis", "Crie agentes de coleta e enriquecimento com capacidades explícitas e campos editáveis limitados.", `<button class="primary-button" data-action="add-agent">＋ Novo agente</button>`)}
+    <div class="notice warning"><span>!</span><div><strong>Browser Harness somente para leitura autorizada.</strong> O agente pode visitar fontes permitidas, extrair informações e enriquecer vagas. Isso não concede autorização de candidatura, não contorna login, CAPTCHA, paywall ou termos da fonte.</div></div>
+    <div class="company-grid agent-grid">${cards || `<div class="empty-state"><div><strong>Nenhum agente configurado</strong><span>Crie um coletor ou agente de enriquecimento.</span></div></div>`}</div>`;
+}
+
 function renderSettings(data: Data) {
   return `${pageHeading("Sistema", "Configurações", "Preferências do workspace e pontos de integração com o Hermes Agent.")}
     <div class="dashboard-grid equal"><section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Perfil de busca</h2><p>Configuração privada do workspace</p></div><span class="chip teal">Local</span></div><p>O perfil e os critérios de busca devem ser configurados no Hermes. Nenhum nome ou preferência pessoal fica embutido nesta aplicação.</p></section>
       <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Fontes e limites</h2><p>Como os dados podem entrar no painel</p></div></div><table class="source-table"><tr><td>Portais</td><td>Ingestão por evento do Hermes, API oficial, alerta ou link fornecido.</td></tr><tr><td>LinkedIn</td><td>Use integrações autorizadas, alertas e links ou textos fornecidos.</td></tr><tr><td>Glassdoor</td><td>Registre salários somente com fonte, confiança e data verificáveis.</td></tr><tr><td>SQLite</td><td>Banco local persistido em <code>RADAR_DB_PATH</code>; vagas antigas são anonimizadas na primeira inicialização desta versão.</td></tr></table></section></div>
-    <div class="section-head"><div><h2>Contrato de eventos para o Hermes</h2><p>O dashboard recebe descobertas por HTTP; o executor consulta a fila autorizada separadamente.</p></div></div><section class="panel"><code class="code-note">POST /api/agent-events\n\n{\n  "event": "job.discovered",\n  "job": {\n    "title": "...", "company": "...",\n    "source": "portal autorizado",\n    "source_url": "https://..."\n  }\n}\n\nGET /api/authorized-applications — itens autorizados para o Browser Harness</code></section>
+    <div class="section-head"><div><h2>Contrato de eventos para o Hermes</h2><p>O dashboard recebe descobertas e enriquecimentos identificados; o executor consulta a fila autorizada separadamente.</p></div></div><section class="panel"><code class="code-note">POST /api/agent-events\n\n{\n  "event": "job.discovered",\n  "agent_id": "...",\n  "job": {\n    "title": "...", "company": "...",\n    "source": "portal autorizado",\n    "source_url": "https://...",\n    "linkedin_post_url": "https://...",\n    "job_url": "https://...",\n    "description": "...", "benefits": "..."\n  }\n}\n\njob.updated exige evidence_source_url e respeita os campos editáveis do agente.\nGET /api/authorized-applications — somente itens autorizados para candidatura</code></section>
     <div class="notice warning" style="margin-top:18px"><span>!</span><div><strong>Autorização separada por vaga.</strong> Aprovar o currículo não autoriza candidatura automática. O modo automático exige confirmação escrita para uma vaga e uma versão específica do currículo. A integração Hermes/Browser Harness consome a fila autorizada; sem um executor configurado, nenhum envio é realizado.</div></div>`;
 }
 
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, () => string> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), settings: () => renderSettings(data) };
+  const pages: Record<string, () => string> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), agents: () => renderAgents(data), settings: () => renderSettings(data) };
   view().innerHTML = pages[state.page]?.() ?? renderOverview(data);
   initializeMap(data);
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.classList.toggle("active", element.dataset.page === state.page));
   const pageTitle = document.getElementById("page-title");
-  if (pageTitle) pageTitle.textContent = ({ overview: "Visão geral", board: "Kanban", jobs: "Vagas", applications: "Candidaturas", resumes: "Currículos ATS", companies: "Empresas", analytics: "Análises", settings: "Configurações" } as Record<string, string>)[state.page] ?? "Visão geral";
+  if (pageTitle) pageTitle.textContent = ({ overview: "Visão geral", board: "Kanban", jobs: "Vagas", applications: "Candidaturas", resumes: "Currículos ATS", companies: "Empresas", analytics: "Análises", agents: "Agentes", settings: "Configurações" } as Record<string, string>)[state.page] ?? "Visão geral";
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
   bindViewEvents();
 }
 
-async function fetchJson<T>(url: string, options: RequestInit = {}) {
+async function fetchJson<T>(url: string, options: RequestInit = {}, retriedAuth = false): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body) headers.set("content-type", "application/json");
+  const token = sessionStorage.getItem("radar-api-token");
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  headers.set("x-project-id", "busca-emprego");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401 && !retriedAuth) {
+    const entered = window.prompt("Informe o token de acesso do Radar de Vagas:")?.trim();
+    if (entered) {
+      sessionStorage.setItem("radar-api-token", entered);
+      return fetchJson<T>(url, options, true);
+    }
+  }
   if (!response.ok) throw new Error((body as { error?: string }).error || "Não foi possível concluir a operação");
   return body as T;
 }
@@ -385,7 +418,49 @@ function localFromIso(value: string | null) {
 }
 
 function showAddJobModal() {
-  openModal("Adicionar vaga", "Registre uma oportunidade descoberta por portal, alerta, API ou link fornecido.", `<form data-form="job"><div class="form-grid"><div class="form-field"><label for="job-title">Cargo</label><input class="input" id="job-title" name="title" required placeholder="Ex.: Analista de EHS" /></div><div class="form-field"><label for="job-company">Empresa</label><input class="input" id="job-company" name="company" required placeholder="Nome da empresa" /></div><div class="form-field"><label for="job-location">Localização</label><input class="input" id="job-location" name="location" placeholder="Cidade, UF" /></div><div class="form-field"><label for="job-latitude">Latitude (opcional)</label><input class="input" id="job-latitude" name="latitude" type="number" min="-90" max="90" step="any" placeholder="-23.55" /></div><div class="form-field"><label for="job-longitude">Longitude (opcional)</label><input class="input" id="job-longitude" name="longitude" type="number" min="-180" max="180" step="any" placeholder="-46.63" /></div><div class="form-field"><label for="job-model">Modelo</label><select class="select" id="job-model" name="work_model"><option>Híbrido</option><option>Remoto</option><option>Presencial</option><option>Não informado</option></select></div><div class="form-field"><label for="job-seniority">Senioridade</label><input class="input" id="job-seniority" name="seniority" placeholder="Júnior / Pleno / Sênior" /></div><div class="form-field"><label for="job-score">Match (%)</label><input class="input" id="job-score" name="match_score" type="number" min="0" max="100" value="50" /></div><div class="form-field"><label for="job-source">Fonte</label><select class="select" id="job-source" name="source"><option>LinkedIn — alerta/link fornecido</option><option>Glassdoor — API/URL autorizado</option><option>Gupy</option><option>Indeed</option><option>Portal autorizado</option><option>Manual</option></select></div><div class="form-field"><label for="job-opening">Abertura confirmada</label><select class="select" id="job-opening" name="opening_status"><option value="unknown">A confirmar</option><option value="open">Aberta</option><option value="closed">Fechada</option></select></div><div class="form-field"><label for="job-min">Salário mínimo</label><input class="input" id="job-min" name="salary_min" type="number" min="0" placeholder="6500" /></div><div class="form-field"><label for="job-max">Salário máximo</label><input class="input" id="job-max" name="salary_max" type="number" min="0" placeholder="8500" /></div><div class="form-field"><label for="job-deadline">Prazo estimado</label><input class="input" id="job-deadline" name="deadline_at" type="datetime-local" /></div><div class="form-field"><label for="job-url">Link da vaga</label><input class="input" id="job-url" name="source_url" type="url" required placeholder="https://..." /></div><div class="form-field"><label for="job-salary-url">Link do salário</label><input class="input" id="job-salary-url" name="salary_source_url" type="url" placeholder="https://..." /></div><div class="form-field"><label for="job-apply-url">Link de candidatura</label><input class="input" id="job-apply-url" name="application_url" type="url" placeholder="https://..." /></div><div class="form-field full"><label for="job-description">Descrição / observações</label><textarea class="textarea" id="job-description" name="description" placeholder="Requisitos, origem do post, palavras-chave ou observações…"></textarea></div></div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button class="primary-button" type="submit">Salvar vaga</button></div></form>`);
+  openModal("Adicionar vaga", "Registre a oportunidade e preserve os links e textos encontrados nas fontes.", `
+    <form data-form="job"><div class="form-grid">
+      <div class="form-field"><label for="job-title">Cargo</label><input class="input" id="job-title" name="title" required /></div>
+      <div class="form-field"><label for="job-company">Empresa</label><input class="input" id="job-company" name="company" required /></div>
+      <div class="form-field"><label for="job-location">Localização</label><input class="input" id="job-location" name="location" /></div>
+      <div class="form-field"><label for="job-model">Modelo</label><select class="select" id="job-model" name="work_model"><option>Híbrido</option><option>Remoto</option><option>Presencial</option><option>Não informado</option></select></div>
+      <div class="form-field"><label for="job-seniority">Senioridade</label><input class="input" id="job-seniority" name="seniority" /></div>
+      <div class="form-field"><label for="job-source">Fonte</label><input class="input" id="job-source" name="source" required placeholder="LinkedIn, Gupy, site da empresa..." /></div>
+      <div class="form-field"><label for="job-min">Salário mínimo</label><input class="input" id="job-min" name="salary_min" type="number" min="0" /></div>
+      <div class="form-field"><label for="job-max">Salário máximo</label><input class="input" id="job-max" name="salary_max" type="number" min="0" /></div>
+      <div class="form-field"><label for="job-salary-period">Período salarial</label><select class="select" id="job-salary-period" name="salary_period"><option value="month">Mensal</option><option value="year">Anual</option><option value="hour">Por hora</option></select></div>
+      <div class="form-field"><label for="job-deadline">Prazo</label><input class="input" id="job-deadline" name="deadline_at" type="datetime-local" /></div>
+      <div class="form-field full"><label for="job-linkedin-url">Link do post no LinkedIn</label><input class="input" id="job-linkedin-url" name="linkedin_post_url" type="url" placeholder="https://www.linkedin.com/posts/..." /></div>
+      <div class="form-field full"><label for="job-direct-url">Link direto da vaga</label><input class="input" id="job-direct-url" name="job_url" type="url" required placeholder="https://empresa.com/vaga/..." /></div>
+      <div class="form-field"><label for="job-salary-url">Fonte do salário</label><input class="input" id="job-salary-url" name="salary_source_url" type="url" /></div>
+      <div class="form-field"><label for="job-apply-url">Link de candidatura</label><input class="input" id="job-apply-url" name="application_url" type="url" /></div>
+      <div class="form-field full"><label for="job-description">Descrição completa</label><textarea class="textarea" id="job-description" name="description"></textarea></div>
+      <div class="form-field full"><label for="job-requirements">Requisitos</label><textarea class="textarea" id="job-requirements" name="requirements"></textarea></div>
+      <div class="form-field full"><label for="job-responsibilities">Responsabilidades</label><textarea class="textarea" id="job-responsibilities" name="responsibilities"></textarea></div>
+      <div class="form-field full"><label for="job-benefits">Benefícios</label><textarea class="textarea" id="job-benefits" name="benefits"></textarea></div>
+      <div class="form-field full"><label for="job-additional">Outras informações encontradas</label><textarea class="textarea" id="job-additional" name="additional_information"></textarea></div>
+    </div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button class="primary-button" type="submit">Salvar vaga</button></div></form>`);
+}
+
+function showAgentModal(id?: string) {
+  const agent = id ? currentData().agentConfigs.find((item) => item.id === id) : undefined;
+  const checked = (value: boolean | undefined) => value ? "checked" : "";
+  const role = agent?.role_type ?? "source_scout";
+  openModal(agent ? "Editar agente" : "Criar agente", "Defina o que o agente pode fazer. O prompt nunca amplia as capacidades selecionadas.", `
+    <form data-form="agent" ${agent ? `data-agent-id="${escapeHtml(agent.id)}"` : ""}><div class="form-grid">
+      <div class="form-field full"><label for="agent-name">Nome</label><input class="input" id="agent-name" name="name" required value="${escapeHtml(agent?.name ?? "")}" /></div>
+      <div class="form-field"><label for="agent-role">Papel</label><select class="select" id="agent-role" name="role_type">${["source_scout", "job_enrichment", "match_evaluator", "resume_writer", "ats_reviewer", "custom"].map((item) => `<option value="${item}" ${role === item ? "selected" : ""}>${item}</option>`).join("")}</select></div>
+      <div class="form-field"><label for="agent-sources">Identificadores de fontes</label><input class="input" id="agent-sources" name="source_ids" value="${escapeHtml(agent?.source_ids.join(", ") ?? "")}" placeholder="gupy, site-da-empresa" /></div>
+      <div class="form-field"><label for="agent-domains">Domínios permitidos</label><input class="input" id="agent-domains" name="allowed_domains" value="${escapeHtml(agent?.allowed_domains.join(", ") ?? "")}" placeholder="empresa.com, glassdoor.com.br" /></div>
+      <div class="form-field"><label><input type="checkbox" name="enabled" ${checked(agent?.enabled ?? true)} /> Agente ativo</label></div>
+      <div class="form-field"><label><input type="checkbox" name="browser_enabled" ${checked(agent?.browser_enabled)} /> Browser Harness para leitura</label></div>
+      <div class="form-field"><label><input type="checkbox" name="can_create_jobs" ${checked(agent?.can_create_jobs)} /> Pode criar vagas</label></div>
+      <div class="form-field"><label><input type="checkbox" name="can_edit_jobs" ${checked(agent?.can_edit_jobs)} /> Pode enriquecer vagas</label></div>
+      <div class="form-field full"><label for="agent-fields">Campos que pode editar</label><input class="input" id="agent-fields" name="editable_fields" value="${escapeHtml(agent?.editable_fields.join(", ") ?? "salary_min, salary_max, currency, salary_period, salary_source, salary_source_url, description, benefits, requirements, responsibilities, additional_information, linkedin_post_url, job_url")}" /></div>
+      <div class="form-field"><label for="agent-concurrency">Concorrência</label><input class="input" id="agent-concurrency" name="concurrency" type="number" min="1" max="20" value="${escapeHtml(agent?.concurrency ?? 1)}" /></div>
+      <div class="form-field"><label for="agent-timeout">Timeout (s)</label><input class="input" id="agent-timeout" name="timeout_seconds" type="number" min="10" max="1800" value="${escapeHtml(agent?.timeout_seconds ?? 120)}" /></div>
+      <div class="form-field full"><label for="agent-prompt">Instruções adicionais</label><textarea class="textarea" id="agent-prompt" name="prompt">${escapeHtml(agent?.prompt ?? "")}</textarea></div>
+    </div><div class="modal-actions">${agent ? `<button type="button" class="secondary-button" data-delete-agent="${escapeHtml(agent.id)}">Excluir</button>` : ""}<button type="button" class="secondary-button" data-close-modal>Cancelar</button><button class="primary-button" type="submit">Salvar agente</button></div></form>`);
 }
 
 function showJobDetail(id: string) {
@@ -420,8 +495,21 @@ function showJobDetail(id: string) {
     }
     if (application?.status !== "in_progress") actionButtons += `<button class="secondary-button" data-action="no-time" data-job-id="${escapeHtml(job.id)}">Sem tempo agora</button><button class="secondary-button" data-action="not-interested" data-job-id="${escapeHtml(job.id)}">Não tenho interesse</button>`;
   }
-  const sourceLinks = `${job.source_url ? `<a class="secondary-button" href="${escapeHtml(job.source_url)}" target="_blank" rel="noreferrer">Abrir fonte ↗</a>` : ""}${job.salary_source_url ? `<a class="secondary-button" href="${escapeHtml(job.salary_source_url)}" target="_blank" rel="noreferrer">Ver salário ↗</a>` : ""}${job.application_url ? `<a class="secondary-button" href="${escapeHtml(job.application_url)}" target="_blank" rel="noreferrer">Abrir candidatura ↗</a>` : ""}`;
+  const sourceLinks = `${job.linkedin_post_url ? `<a class="secondary-button" href="${escapeHtml(job.linkedin_post_url)}" target="_blank" rel="noreferrer">Post do LinkedIn ↗</a>` : ""}${job.job_url ? `<a class="secondary-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Link da vaga ↗</a>` : ""}${job.salary_source_url ? `<a class="secondary-button" href="${escapeHtml(job.salary_source_url)}" target="_blank" rel="noreferrer">Fonte do salário ↗</a>` : ""}${job.application_url ? `<a class="secondary-button" href="${escapeHtml(job.application_url)}" target="_blank" rel="noreferrer">Candidatura ↗</a>` : ""}`;
   openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Esta vaga está marcada como perdida porque foi encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Match com o perfil</span><strong>${escapeHtml(job.match_score)}%</strong></div><div class="detail-box"><span>Estado</span><strong><span class="status-pill ${lifecycle.className}">${escapeHtml(lifecycle.label)}</span></strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)} · ${escapeHtml(formatDate(job.salary_checked_at))}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Aguardando sua decisão de interesse")}</small></div></div><div class="detail-description">${escapeHtml(job.description || "Sem descrição registrada.")}</div><div class="button-row">${sourceLinks}</div><div class="modal-actions">${resume && job.decision === "interested" && resume.status !== "approved" ? `<button class="secondary-button" data-edit-resume="${escapeHtml(resume.id)}">Editar currículo</button>` : ""}${actionButtons}</div>`);
+  const descriptionRoot = modalRoot().querySelector<HTMLElement>(".detail-description");
+  if (descriptionRoot) {
+    const enrichmentEvents = data.enrichmentEvents.filter((event) => event.job_id === job.id);
+    const section = (title: string, value: string) => `<section class="detail-section"><h3>${escapeHtml(title)}</h3><div>${escapeHtml(value || "Não informado").replace(/\n/g, "<br>")}</div></section>`;
+    descriptionRoot.innerHTML = [
+      section("Descrição completa", job.description),
+      section("Responsabilidades", job.responsibilities),
+      section("Requisitos", job.requirements),
+      section("Benefícios", job.benefits),
+      section("Outras informações", job.additional_information),
+      enrichmentEvents.length ? `<section class="detail-section"><h3>Fontes e enriquecimentos</h3>${enrichmentEvents.map((event) => `<p><a href="${escapeHtml(event.source_url)}" target="_blank" rel="noreferrer">Fonte verificada ↗</a> · ${escapeHtml(formatDate(event.created_at))}<br><small>${escapeHtml(event.evidence_excerpt || "Campos atualizados pelo agente configurado.")}</small></p>`).join("")}</section>` : ""
+    ].join("");
+  }
 }
 
 function showResumeModal(id: string) {
@@ -464,9 +552,36 @@ async function handleForm(form: HTMLFormElement) {
     await loadData(); toast("PDF salvo na biblioteca local."); return;
   }
   if (form.dataset.form === "job") {
-    const body = { title: get("title"), company: get("company"), location: get("location") || "Não informado", latitude: get("latitude") ? Number(get("latitude")) : null, longitude: get("longitude") ? Number(get("longitude")) : null, country: "Brasil", work_model: get("work_model"), seniority: get("seniority") || "Não informado", match_score: Number(get("match_score") || 0), source: get("source"), source_url: get("source_url"), application_url: get("application_url"), opening_status: get("opening_status"), deadline_at: isoFromLocal(get("deadline_at")), salary_min: get("salary_min") ? Number(get("salary_min")) : null, salary_max: get("salary_max") ? Number(get("salary_max")) : null, salary_source: get("salary_source_url") ? "URL fornecida" : "Não informado", salary_source_url: get("salary_source_url"), description: get("description"), status: "found" };
+    const jobUrl = get("job_url");
+    const body = {
+      title: get("title"), company: get("company"), location: get("location") || "Não informado", country: "Brasil",
+      work_model: get("work_model"), seniority: get("seniority") || "Não informado", match_score: 0,
+      source: get("source"), source_url: jobUrl, linkedin_post_url: get("linkedin_post_url"), job_url: jobUrl,
+      application_url: get("application_url"), opening_status: "unknown", deadline_at: isoFromLocal(get("deadline_at")),
+      salary_min: get("salary_min") ? Number(get("salary_min")) : null, salary_max: get("salary_max") ? Number(get("salary_max")) : null,
+      currency: "BRL", salary_period: get("salary_period") || null, salary_source: get("salary_source_url") ? "URL fornecida" : "Não informado",
+      salary_source_url: get("salary_source_url"), description: get("description"), requirements: get("requirements"),
+      responsibilities: get("responsibilities"), benefits: get("benefits"), additional_information: get("additional_information")
+    };
     await fetchJson("/api/jobs", { method: "POST", body: JSON.stringify(body) });
     closeModal(); await loadData(); toast("Vaga adicionada ao radar."); return;
+  }
+  if (form.dataset.form === "agent") {
+    const browserEnabled = formData.has("browser_enabled");
+    const canCreate = formData.has("can_create_jobs");
+    const canEdit = formData.has("can_edit_jobs");
+    const toolScopes = ["jobs.read", ...(browserEnabled ? ["browser.read"] : []), ...(canCreate ? ["jobs.create"] : []), ...(canEdit ? ["jobs.enrich", "salary.lookup"] : [])];
+    const body = {
+      name: get("name"), role_type: get("role_type"), enabled: formData.has("enabled"),
+      source_ids: get("source_ids").split(",").map((item) => item.trim()).filter(Boolean),
+      allowed_domains: get("allowed_domains").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
+      tool_scopes: toolScopes, browser_enabled: browserEnabled, can_create_jobs: canCreate, can_edit_jobs: canEdit,
+      editable_fields: canEdit ? get("editable_fields").split(",").map((item) => item.trim()).filter(Boolean) : [],
+      concurrency: Number(get("concurrency") || 1), timeout_seconds: Number(get("timeout_seconds") || 120), prompt: get("prompt")
+    };
+    const id = form.dataset.agentId;
+    await fetchJson(id ? `/api/agents/${encodeURIComponent(id)}` : "/api/agents", { method: id ? "PATCH" : "POST", body: JSON.stringify(body) });
+    closeModal(); await loadData(); state.page = "agents"; render(); toast(id ? "Agente atualizado." : "Agente criado."); return;
   }
   if (form.dataset.form === "resume") {
     const body = { base_resume_id: get("base_resume_id") || null, title: get("title"), status: get("status"), content: get("content"), keywords: get("keywords").split(",").map((item) => item.trim()).filter(Boolean), changes: get("changes").split("\n").map((item) => item.trim()).filter(Boolean) };
@@ -530,8 +645,19 @@ async function revokeAutomaticApplication(id: string) {
 }
 
 async function markNotInterested(jobId: string) {
-  await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/decision`, { method: "POST", body: JSON.stringify({ decision: "not_interested", confirmation: "SEM INTERESSE" }) });
-  await loadData(); toast("Vaga separada como sem interesse.");
+  const modeAnswer = (window.prompt("Digite TOTAL para descartar esta vaga e suprimir semelhantes, ou PARCIAL para registrar apenas um detalhe negativo:") ?? "").trim().toUpperCase();
+  const mode = modeAnswer === "TOTAL" ? "total" : modeAnswer === "PARCIAL" ? "partial" : null;
+  if (!mode) { toast("Feedback cancelado."); return; }
+  const reasonCode = (window.prompt("Categoria: role, company, seniority, skill, salary, location, work_model, contract, schedule_benefits, responsibility ou other") ?? "").trim();
+  const defaults: Record<string, string> = { role: "role_family", company: "company", seniority: "seniority", skill: "required_skill", salary: "salary", location: "location", work_model: "work_model", contract: "contract", schedule_benefits: "schedule", responsibility: "responsibilities", other: "other" };
+  const defaultDetail = defaults[reasonCode];
+  if (!defaultDetail) { toast("Categoria inválida.", true); return; }
+  const detailKey = mode === "partial" ? (window.prompt(`Detalhe específico (padrão: ${defaultDetail}):`) ?? defaultDetail).trim() : defaultDetail;
+  const explanation = (window.prompt("Explique o motivo em 10 a 500 caracteres:") ?? "").trim();
+  if (explanation.length < 10 || explanation.length > 500) { toast("A justificativa deve ter entre 10 e 500 caracteres.", true); return; }
+  const confirmation = mode === "total" ? "SEM INTERESSE" : "REJEITAR PARCIALMENTE";
+  await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/feedback`, { method: "POST", body: JSON.stringify({ mode, reason_code: reasonCode, detail_key: detailKey, explanation, confirmation }) });
+  await loadData(); toast(mode === "total" ? "Vaga descartada e regra registrada." : "Feedback parcial registrado; a vaga continua ativa.");
   closeModal();
 }
 
@@ -553,7 +679,16 @@ async function createResume(jobId: string) {
 async function moveJob(jobId: string, status: string) {
   if (!status) return;
   if (!movableStatusValues.includes(status)) throw new Error("Use as ações de interesse, currículo ou candidatura para avançar esta vaga.");
-  await mutate(`/api/jobs/${encodeURIComponent(jobId)}`, "PATCH", { status }, `Vaga movida para ${statusLabels[status] ?? status}.`);
+  const job = currentData().jobs.find((item) => item.id === jobId);
+  if (!job || job.status === status) return;
+  let command = "";
+  let data: Record<string, unknown> = {};
+  if (job.status === "found" && status === "validation") { command = "normalize"; data = { source_ref: job.source_url || job.job_url, normalized: true }; }
+  else if (job.status === "validation" && status === "strong_match") { command = "mark_strong_match"; data = { validation_sufficient: true, score: job.match_score, coverage: 100 }; }
+  else if (job.status === "validation" && status === "review") { command = "request_review"; data = { score: job.match_score, review_required: true }; }
+  else if (job.status === "strong_match" && status === "review") { command = "present_for_review"; data = { presented_to_user: true }; }
+  else throw new Error("O Kanban permite apenas a próxima etapa válida; use as ações do cartão para decisões protegidas.");
+  await mutate(`/api/jobs/${encodeURIComponent(jobId)}/transitions`, "POST", { command, expected_version: job.version, data }, `Vaga movida para ${statusLabels[status] ?? status}.`);
 }
 
 function bindDragEvents() {
@@ -577,6 +712,7 @@ function bindViewEvents() {
     if (detail && !target.closest("select")) { showJobDetail(detail); return; }
     const action = target.closest<HTMLElement>("[data-action]");
     if (action?.dataset.action === "add-job") { showAddJobModal(); return; }
+    if (action?.dataset.action === "add-agent") { showAgentModal(); return; }
     if (action?.dataset.action === "mark-applied" && action.dataset.jobId) { await markApplied(action.dataset.jobId); return; }
     if (action?.dataset.action === "mark-interested" && action.dataset.jobId) { await markInterested(action.dataset.jobId); return; }
     if (action?.dataset.action === "not-interested" && action.dataset.jobId) { await markNotInterested(action.dataset.jobId); return; }
@@ -590,6 +726,8 @@ function bindViewEvents() {
     if (action?.dataset.action === "application-detail" && action.dataset.jobId) { showApplicationModal(action.dataset.jobId); return; }
     const editResume = target.closest<HTMLElement>("[data-edit-resume]")?.dataset.editResume;
     if (editResume) { showResumeModal(editResume); return; }
+    const editAgent = target.closest<HTMLElement>("[data-edit-agent]")?.dataset.editAgent;
+    if (editAgent) { showAgentModal(editAgent); return; }
     } catch (error) {
       toast(error instanceof Error ? error.message : "Falha na operação", true);
     }
@@ -626,6 +764,13 @@ document.addEventListener("DOMContentLoaded", () => {
     if (approveButton?.dataset.approveResume) {
       try { await confirmResumeApproval(approveButton.dataset.approveResume); }
       catch (error) { toast(error instanceof Error ? error.message : "Falha ao aprovar currículo", true); }
+      return;
+    }
+    const deleteAgent = target.closest<HTMLElement>("[data-delete-agent]")?.dataset.deleteAgent;
+    if (deleteAgent) {
+      if (!window.confirm("Excluir este agente? Se ele já tiver histórico, pause-o em vez de excluir.")) return;
+      try { await fetchJson(`/api/agents/${encodeURIComponent(deleteAgent)}`, { method: "DELETE" }); closeModal(); await loadData(); state.page = "agents"; render(); toast("Agente excluído."); }
+      catch (error) { toast(error instanceof Error ? error.message : "Falha ao excluir agente", true); }
       return;
     }
   });

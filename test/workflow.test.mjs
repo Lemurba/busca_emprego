@@ -55,6 +55,7 @@ old.prepare(`INSERT INTO agent_runs VALUES (?,?,?,?,?,?,?)`).run("legacy-run", "
 old.close();
 
 process.env.RADAR_DB_PATH = dbPath;
+process.env.RADAR_RUN_LEGACY_ANONYMIZATION = "true";
 const store = await import(`../dist/src/db.js?test=${Date.now()}`);
 const first = store.getBootstrap();
 assert.equal(first.jobs.length, 1);
@@ -103,10 +104,11 @@ store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO");
 assert.equal(store.listAuthorizedApplications().length, 1);
 assert.equal(store.listAuthorizedApplications()[0].authorized_resume_version, store.listResumes().find((item) => item.id === draft.id).version);
 assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /já recebeu/i);
-store.recordJobDecision(job.id, "not_interested", "SEM INTERESSE");
+store.recordJobFeedback(job.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" });
 assert.equal(store.listAuthorizedApplications().length, 0, "withdrawing interest removes an automatic application from the queue");
 assert.equal(store.listApplications().find((item) => item.id === automatic.id).automation_mode, "assisted");
 assert.throws(() => store.updateApplication(automatic.id, { status: "submitted" }), /autorização automática explícita/i);
+store.transitionJob(job.id, { command: "reopen", expected_version: store.getJob(job.id).version, actor: "test", data: { reason: "Quero reconsiderar esta vaga." } });
 store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
 assert.equal(store.getJob(job.id).status, "ready_to_apply", "renewed interest restores the stage for its approved resume and existing application");
 store.selectManualApplication(automatic.id);
@@ -128,7 +130,7 @@ const runningApplication = store.createApplication({ job_id: runningJob.id, resu
 store.authorizeAutoApplication(runningApplication.id, runningResume.id, "AUTORIZO");
 store.updateApplication(runningApplication.id, { status: "in_progress" });
 assert.throws(() => store.updateResume(runningResume.id, { status: "review" }), /em andamento/i);
-assert.throws(() => store.recordJobDecision(runningJob.id, "not_interested", "SEM INTERESSE"), /em andamento/i);
+assert.throws(() => store.recordJobFeedback(runningJob.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" }), /em andamento/i);
 assert.throws(() => store.revokeAutoApplication(runningApplication.id), /após o início/i);
 assert.throws(() => store.updateApplication(runningApplication.id, { status: "queued" }), /recolocada na fila/i);
 store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp });

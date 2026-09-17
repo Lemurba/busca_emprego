@@ -2,6 +2,8 @@
 
 Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e persiste os dados em SQLite no mesmo ambiente Node.js do dashboard.
 
+Este documento descreve a API implementada. Requisitos-alvo ainda não entregues, como versionamento imutável de agentes e proveniência por campo, ficam no SDD e na checklist de release.
+
 ## Conexão
 
 - Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes.
@@ -9,8 +11,24 @@ Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e 
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
-- A API não possui autenticação própria. Use-a pela rede interna do Hermes ou atrás do controle de acesso já configurado nele.
-- Uma migração local única (`anonymize_public_vacancy_data_v1`) substitui os dados existentes das vagas por marcadores genéricos, limpa links, salários, descrições, coordenadas, notas e payloads de auditoria. Mantém IDs e relações com currículos/candidaturas. O banco demonstrativo não deve ser usado como cópia de arquivo dos dados anteriores.
+- Envie `Authorization: Bearer <token>` e `X-Project-Id: busca-emprego`. Credenciais e escopos vêm de `RADAR_AUTH_CREDENTIALS`; ausência/erro retorna 401, falta de escopo 403 e limite excedido 429.
+- Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. A credencial HTTP precisa de `jobs.write`; o servidor também confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
+- A anonimização legada e os dados demonstrativos são opt-in e devem ficar desabilitados em produção.
+
+## Capacidades e allowlist
+
+As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`. A capacidade efetiva é a interseção entre contrato do papel, versão da configuração e credencial do serviço. Negação é o padrão.
+
+`agent_configs.source_ids` identifica fontes/conectores lógicos. `agent_configs.allowed_domains` contém hosts autorizados. Um não concede o outro. `browser_enabled=true` exige `browser.read` e `allowed_domains` não vazio. A URL de criação, enriquecimento, consulta salarial ou evidência deve pertencer à allowlist da versão do agente, inclusive após redirecionamentos; URL fora dela retorna 403 e não é persistida.
+
+| Capacidade | Uso | Não permite |
+| --- | --- | --- |
+| `browser.read` | Ler páginas aprovadas em contexto isolado de descoberta | Formulário, upload, submissão, sessão de candidatura ou CAPTCHA |
+| `jobs.create` | Criar vaga/ocorrência com origem e evidência | Alterar decisão, workflow, currículo ou candidatura |
+| `jobs.enrich` | Propor atualização descritiva com proveniência por campo | Sobrescrever silenciosamente dado humano/mais confiável |
+| `salary.lookup` | Consultar e registrar salário com moeda, período, confiança e evidência | Inventar valor ou converter sem taxa/configuração auditada |
+
+Administrar configurações pelo dashboard exige `agents.manage` em uma credencial de usuário. Esse escopo não é concedido ao Source Scout nem implica qualquer das capacidades acima.
 
 ## Regras de preenchimento
 
@@ -18,9 +36,11 @@ Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e 
 2. Para atualizar parcialmente uma vaga via evento `job.updated`, envie o `id` retornado ao criar a vaga. Sem `id`, o backend calcula um identificador a partir da fonte, links, cargo e empresa.
 3. Não invente salário, prazo ou estado de abertura. Se não houver confirmação, use `opening_status: "unknown"`, deixe `deadline_at` como `null` e registre a incerteza na descrição.
 4. Uma candidatura só deve receber `status: "submitted"` quando o envio tiver sido confirmado. Envie `submitted_at` se souber o horário; se omitir, a API grava o horário atual.
-5. `decision: "not_interested"` e `decision: "no_time"` registram decisões diferentes. `lifecycle: "lost"` é calculado pelo servidor quando a vaga fecha ou vence sem candidatura enviada.
+5. Rejeição total/parcial usa `/feedback` com motivo obrigatório. `decision: "no_time"` é neutra e não ensina preferência. `lifecycle: "lost"` é calculado quando a vaga fecha ou vence sem candidatura enviada.
 6. A ingestão de vagas não pode registrar interesse, aprovar currículos ou autorizar candidaturas. Essas ações exigem as rotas de confirmação humana descritas abaixo.
-7. Valores aceitos estão listados abaixo. O servidor não valida todos os tipos de campo antes de gravar; os agentes devem seguir os tipos e enums deste contrato.
+7. Valores aceitos estão listados abaixo. O servidor valida URL HTTPS, tracking, salário/moeda, coordenadas e transições; payload inválido não deve ser repetido sem correção.
+8. `source_url` e `application_url` são independentes. Nunca copie um para o outro para preencher ausência; `application_url` desconhecido é `null`/vazio.
+9. Todo enriquecimento exige `evidence_source_url`; `evidence_excerpt` é opcional. A proveniência por campo ainda é um requisito-alvo não implementado.
 
 ## Endpoints
 
@@ -62,9 +82,22 @@ Campos calculados que aparecem dentro de cada elemento de `jobs`:
 
 `stats` contém `total`, `strongMatches`, `awaitingReview`, `selected`, `applications`, `openVacancies`, `unknownVacancies`, `applied`, `lost`, `notInterested`, `averageSalary`, `statuses`, `sources` e `locations`. Os primeiros campos são números; `averageSalary` pode ser `null`; `statuses`, `sources` e `locations` são mapas de rótulo para contagem.
 
+Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, não descrição/evidência integral. O detalhe completo é carregado sob demanda por `GET /api/jobs/{id}` para reduzir payload e exposição desnecessária.
+
+### Configuração de agentes no dashboard
+
+| Método | Endpoint | Escopo | Uso |
+| --- | --- | --- | --- |
+| `GET` | `/api/agents` | `dashboard.read` | Listar agentes do projeto |
+| `POST` | `/api/agents` | `agents.manage` | Criar agente |
+| `PATCH` | `/api/agents/{id}` | `agents.manage` | Editar, habilitar ou pausar agente |
+| `DELETE` | `/api/agents/{id}` | `agents.manage` | Excluir agente sem histórico; com histórico, deve ser pausado |
+
+Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browser_enabled`, `tool_scopes`, `can_create_jobs`, `can_edit_jobs`, `editable_fields`, `concurrency`, `timeout_seconds` e `prompt`. `source_ids` e `allowed_domains` são listas distintas. A API retorna 422 para capacidade/campo desconhecido, limites inválidos ou Browser habilitado sem allowlist. Versionamento/publicação/rollback continuam pendentes para produção.
+
 ### `GET /api/jobs/{id}`
 
-Retorna uma vaga pelo identificador. A resposta `200` é um objeto `Job`, ou `null` se não houver esse `id`.
+Retorna a vaga pelo identificador, incluindo `description`, `responsibilities`, `requirements`, `benefits`, `additional_information`, `linkedin_post_url`, `job_url` e `application_url`. Atualmente uma ausência retorna `200` com `null`; alterar isso para 404 permanece um gate de produção.
 
 ### `POST /api/jobs`
 
@@ -86,12 +119,15 @@ Campos de entrada:
 | `salary_min` | `number \| null` | Não | `null`; valor mensal mínimo conhecido |
 | `salary_max` | `number \| null` | Não | `null`; valor mensal máximo conhecido |
 | `currency` | `string` | Não | `"BRL"`; código ISO 4217, como `BRL` ou `USD` |
+| `salary_period` | `string \| null` | Não | `hour`, `month`, `year` ou `null` |
 | `salary_source` | `string` | Não | `"Não informado"` |
 | `salary_source_url` | `string` | Não | `""`; URL que comprova o dado salarial |
 | `salary_checked_at` | `string \| null` | Não | `null`; data ISO 8601 de consulta |
 | `salary_confidence` | `string` | Não | `"not_checked"`; por exemplo `high`, `medium`, `low`, `not_checked` |
 | `source` | `string` | Sim | Portal, alerta, API ou origem da descoberta |
 | `source_url` | `string` | Sim | Link da vaga ou da publicação de origem |
+| `linkedin_post_url` | `string` | Não | `""`; link específico do post no LinkedIn |
+| `job_url` | `string` | Não | `""`; página pública da vaga |
 | `application_url` | `string` | Não | `""`; link direto da candidatura |
 | `opening_status` | `string` | Não | `unknown`; valores: `open`, `closed`, `unknown` |
 | `opening_checked_at` | `string \| null` | Não | `null`; data ISO 8601 em que a abertura foi conferida |
@@ -100,13 +136,19 @@ Campos de entrada:
 | `decision` | `string` | Não | Campos recebidos são ignorados. A decisão só muda em `POST /api/jobs/{id}/decision` |
 | `decision_at` | `string \| null` | Não | Preenchido pelo servidor na rota de decisão |
 | `description` | `string` | Não | `""`; descrição, requisitos ou observações |
+| `responsibilities` | `string` | Não | `""`; responsabilidades encontradas |
+| `requirements` | `string` | Não | `""`; requisitos encontrados |
+| `benefits` | `string` | Não | `""`; benefícios encontrados |
+| `additional_information` | `string` | Não | `""`; demais informações relevantes |
 | `match_score` | `integer` | Não | `0`; aderência estimada de 0 a 100 |
 | `status` | `string` | Não | O valor recebido é ignorado na ingestão; vaga nova começa em `found`. O status de vaga existente é preservado |
 | `posted_at` | `string \| null` | Não | `null`; data ISO 8601 de publicação |
 
 O servidor preenche `created_at` e `updated_at`; não os envie. A ingestão também preserva a decisão/status de uma vaga existente para que agentes não avancem o fluxo controlado pelo usuário.
 
-Status de quadro possíveis: `found`, `validation`, `strong_match`, `review`, `selected`, `resume`, `resume_approved`, `ready_to_apply`, `applying`, `applied`, `discarded`, `expired`. A ingestão inicia em `found`; decisões, currículo e candidatura avançam as etapas protegidas.
+`source_url` é obrigatório para criação automatizada. `linkedin_post_url`, `job_url` e `application_url` são independentes e opcionais. Todas as URLs fornecidas por agente, inclusive a evidência do enriquecimento, precisam pertencer a `allowed_domains`.
+
+Status de quadro possíveis: `found`, `validation`, `strong_match`, `review`, `selected`, `resume`, `resume_approved`, `ready_to_apply`, `applying`, `applied`, `interview_scheduled`, `interview_completed`, `completed`, `discarded`, `expired`. A ingestão inicia em `found`; somente comandos de transição validados avançam o fluxo.
 
 Exemplo de criação:
 
@@ -122,6 +164,7 @@ Exemplo de criação:
   "salary_min": 6500,
   "salary_max": 8500,
   "currency": "BRL",
+  "salary_period": "month",
   "salary_source": "Página salarial consultada",
   "salary_source_url": "https://example.com/salarios",
   "salary_checked_at": "2026-09-16T12:00:00.000Z",
@@ -141,7 +184,7 @@ Resposta: `201` com o objeto `Job` salvo.
 
 ### `PATCH /api/jobs/{id}`
 
-Atualiza os campos descritivos editáveis da vaga. Não aceita alterações de `decision` ou avanço para etapas protegidas. Para uma movimentação de descoberta, `status` só pode ser `found`, `validation`, `strong_match` ou `review`. Campos desconhecidos são ignorados. Resposta `200` com o objeto atualizado ou `null` se não existir.
+Atualiza somente campos descritivos editáveis. `status` nunca é aceito nesta rota; use `POST /api/jobs/{id}/transitions` com comando e `expected_version`. Campos desconhecidos são ignorados.
 
 ### `POST /api/jobs/{id}/decision`
 
@@ -154,7 +197,11 @@ Esta rota registra a decisão explícita do usuário. O corpo requer a frase exa
 }
 ```
 
-Valores aceitos: `interested` + `TENHO INTERESSE`, `not_interested` + `SEM INTERESSE`, ou `no_time` + `SEM TEMPO`. Resposta `200` com a vaga atualizada. A decisão não pode ser alterada enquanto o envio estiver em andamento ou depois de enviada a candidatura.
+Valores aceitos: `interested` + `TENHO INTERESSE` ou `no_time` + `SEM TEMPO`. Rejeição não é aceita nesta rota. Resposta `200` com a vaga atualizada. A decisão não pode ser alterada enquanto o envio estiver em andamento ou depois de enviada a candidatura.
+
+### `POST /api/jobs/{id}/feedback`
+
+Registra feedback explícito. `mode` é `total` ou `partial`; `reason_code`, `detail_key` e justificativa de 10–500 caracteres são obrigatórios. Total exige `SEM INTERESSE`, descarta a vaga e cria regra; parcial exige `REJEITAR PARCIALMENTE` e conserva estado/decisão.
 
 ### `POST /api/resumes`
 
@@ -240,44 +287,60 @@ Para autorizar, envie `resume_id` e a confirmação exata `AUTORIZO`:
 { "resume_id": "id-do-curriculo", "confirmation": "AUTORIZO" }
 ```
 
-A vaga deve estar marcada como de interesse, o currículo associado deve estar aprovado, e a autorização fica vinculada ao ID e à versão do currículo. Uma autorização já concedida não pode ser repetida; revogue-a primeiro para voltar ao fluxo manual ou reiniciar a escolha. O executor Hermes/Browser Harness deve consultar `GET /api/authorized-applications`; alterar para `in_progress` só é permitido para um item válido da fila. O endpoint da fila entrega metadados da vaga e o conteúdo do currículo ATS, mas não executa o portal nem baixa o PDF-base automaticamente.
+A vaga deve estar marcada como de interesse, o currículo associado deve estar aprovado, e a autorização fica vinculada ao ID/versão do currículo e à `application_url` canônica/hash apresentada ao usuário. Mudança de URL, host ou redirecionamento invalida a autorização e exige novo `AUTORIZO`. Uma autorização já concedida não pode ser repetida; revogue-a primeiro para voltar ao fluxo manual ou reiniciar a escolha. O executor Hermes/Browser Harness deve consultar `GET /api/authorized-applications`; alterar para `in_progress` só é permitido para um item válido da fila. O endpoint da fila entrega metadados da vaga e o conteúdo do currículo ATS, mas não executa o portal nem baixa o PDF-base automaticamente. O executor usa perfil de navegador separado de `browser.read`.
 
 ### `POST /api/agent-events`
 
 Endpoint de entrada recomendado para sub-agentes. O campo `event` seleciona um dos formatos abaixo.
+
+`job.discovered` exige `jobs.create`; `job.updated` exige `jobs.enrich`. A credencial HTTP precisa de `jobs.write`, e o corpo precisa identificar uma configuração de agente habilitada. URLs são conferidas contra `allowed_domains`.
 
 #### Descoberta: `job.discovered`
 
 ```json
 {
   "event": "job.discovered",
+  "agent_id": "id-do-agente-coletor",
   "job": {
     "title": "Analista de Dados",
     "company": "Empresa Exemplo",
     "source": "Alerta de vagas",
-    "source_url": "https://example.com/post/456",
+    "source_url": "https://example.com/vagas/456",
+    "linkedin_post_url": "https://www.linkedin.com/posts/exemplo-456",
+    "job_url": "https://example.com/vagas/456",
+    "application_url": "https://jobs.example.com/apply/456",
     "opening_status": "unknown",
-    "match_score": 78
+    "description": "Descrição completa encontrada.",
+    "responsibilities": "Responsabilidades encontradas.",
+    "requirements": "Requisitos encontrados.",
+    "benefits": "Benefícios encontrados.",
+    "additional_information": "Demais informações relevantes."
   }
 }
 ```
 
-`job` usa os campos de `POST /api/jobs`; `title`, `company`, `source` e `source_url` são obrigatórios. Resposta `201` com a vaga gravada.
+`job` usa os campos de `POST /api/jobs`; `title`, `company`, `source` e `source_url` são obrigatórios. Todos os hosts enviados precisam constar em `allowed_domains`; isso pode exigir mais de um domínio na configuração. Resposta `201` com a vaga gravada. Um coletor não pode usar esse evento para sobrescrever uma vaga existente.
 
 #### Atualização: `job.updated`
 
 ```json
 {
   "event": "job.updated",
+  "agent_id": "id-do-agente-de-enriquecimento",
+  "evidence_source_url": "https://salary.example.com/company",
+  "evidence_excerpt": "Faixa e benefícios publicados pela fonte.",
   "job": {
     "id": "id-retornado-na-criacao",
-    "opening_status": "closed",
-    "closed_at": "2026-09-16T16:00:00.000Z"
+    "salary_min": 7000,
+    "salary_max": 9000,
+    "salary_period": "month",
+    "salary_source_url": "https://salary.example.com/company",
+    "benefits": "Plano de saúde e vale-alimentação."
   }
 }
 ```
 
-Envie `job.id` para atualizar uma vaga existente com campos parciais. A API faz merge desses campos com o registro atual. A resposta é `201` com a vaga atualizada.
+Envie `job.id`, `evidence_source_url` e apenas os campos permitidos em `editable_fields`. A API faz merge e registra um evento de enriquecimento com URL, campos alterados e trecho opcional. A resposta é `200` com `{ "job": ..., "enrichment_event_id": "..." }`.
 
 #### Execução de agente: `agent.status`
 
@@ -317,6 +380,11 @@ Resposta: `201` com `AgentRun` salvo.
 | `200` | Consulta ou atualização concluída |
 | `201` | Registro criado ou upsert processado |
 | `400` | JSON inválido, evento desconhecido ou falha ao processar/gravar os dados; corpo `{ "error": "..." }` |
-| `404` | Rota desconhecida; corpo `{ "error": "not found" }` |
+| `401` | Credencial ausente ou inválida |
+| `403` | Projeto/capacidade negado, agente desabilitado ou URL fora de `allowed_domains` |
+| `404` | Rota ou registro desconhecido; corpo `{ "error": "not found" }` |
+| `409` | Conflito de versão, idempotência ou transição |
+| `422` | Schema, evidência, configuração, domínio ou precondição inválidos |
+| `429` | Rate limit excedido; respeitar `Retry-After` |
 
-Rotas de atualização/consulta por ID atualmente retornam `200` com `null` quando o registro não existe. A API não possui endpoints de exclusão.
+Algumas rotas por ID ainda retornam `200` com `null`; a uniformização para 404 é um gate pendente. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.

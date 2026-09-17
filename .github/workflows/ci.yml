@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Instalar e testar plugin Hermes
+        working-directory: hermes-plugin
+        run: npm ci && npm test
+      - name: Testar backup e restore SQLite
+        run: node test/ops.test.mjs
+      - name: Validar CLIs operacionais
+        run: |
+          node scripts/ops/backup-sqlite.mjs --help
+          node scripts/ops/restore-sqlite.mjs --help
+          node scripts/ops/health-check.mjs --help

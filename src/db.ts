@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume } from "./types.js";
+import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume } from "./types.js";
+import { executeWorkflowCommand, type TransitionInput } from "./workflow.js";
+import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "./domain.js";
 
 const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -24,12 +26,15 @@ db.exec(`
     salary_min REAL,
     salary_max REAL,
     currency TEXT NOT NULL DEFAULT 'BRL',
+    salary_period TEXT,
     salary_source TEXT NOT NULL DEFAULT 'Não informado',
     salary_source_url TEXT NOT NULL DEFAULT '',
     salary_checked_at TEXT,
     salary_confidence TEXT NOT NULL DEFAULT 'not_checked',
     source TEXT NOT NULL,
     source_url TEXT NOT NULL,
+    linkedin_post_url TEXT NOT NULL DEFAULT '',
+    job_url TEXT NOT NULL DEFAULT '',
     application_url TEXT NOT NULL DEFAULT '',
     opening_status TEXT NOT NULL DEFAULT 'unknown',
     opening_checked_at TEXT,
@@ -38,6 +43,10 @@ db.exec(`
     decision TEXT NOT NULL DEFAULT 'pending',
     decision_at TEXT,
     description TEXT NOT NULL DEFAULT '',
+    benefits TEXT NOT NULL DEFAULT '',
+    requirements TEXT NOT NULL DEFAULT '',
+    responsibilities TEXT NOT NULL DEFAULT '',
+    additional_information TEXT NOT NULL DEFAULT '',
     match_score INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'found',
     posted_at TEXT,
@@ -96,6 +105,36 @@ db.exec(`
     message TEXT NOT NULL DEFAULT ''
   );
 
+  CREATE TABLE IF NOT EXISTS agent_configs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT 'busca-emprego',
+    name TEXT NOT NULL,
+    role_type TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    source_ids TEXT NOT NULL DEFAULT '[]',
+    allowed_domains TEXT NOT NULL DEFAULT '[]',
+    tool_scopes TEXT NOT NULL DEFAULT '[]',
+    browser_enabled INTEGER NOT NULL DEFAULT 0,
+    can_create_jobs INTEGER NOT NULL DEFAULT 0,
+    can_edit_jobs INTEGER NOT NULL DEFAULT 0,
+    editable_fields TEXT NOT NULL DEFAULT '[]',
+    concurrency INTEGER NOT NULL DEFAULT 1,
+    timeout_seconds INTEGER NOT NULL DEFAULT 120,
+    prompt TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS job_enrichment_events (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agent_configs(id) ON DELETE RESTRICT,
+    source_url TEXT NOT NULL,
+    fields_changed TEXT NOT NULL,
+    evidence_excerpt TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type TEXT NOT NULL,
@@ -103,6 +142,71 @@ db.exec(`
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS workflow_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    from_status TEXT NOT NULL,
+    to_status TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    command TEXT NOT NULL,
+    evidence_ref TEXT,
+    version INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS job_feedback_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    cycle INTEGER NOT NULL DEFAULT 1,
+    mode TEXT NOT NULL CHECK(mode IN ('total','partial')),
+    reason_code TEXT NOT NULL,
+    detail_key TEXT,
+    explanation TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS preference_rules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    source_feedback_ids TEXT NOT NULL DEFAULT '[]',
+    match_json TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'suppress',
+    state TEXT NOT NULL DEFAULT 'active',
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    suppressed_count INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS preference_values (
+    project_id TEXT NOT NULL DEFAULT 'default',
+    facet_key TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    positive_count INTEGER NOT NULL DEFAULT 0,
+    negative_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, facet_key, normalized_value)
+  );
+
+  CREATE TABLE IF NOT EXISTS human_questions (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    resume_id TEXT NOT NULL REFERENCES resumes(id) ON DELETE CASCADE,
+    resume_version INTEGER NOT NULL,
+    field_ref TEXT NOT NULL,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    asked_at TEXT NOT NULL,
+    answered_at TEXT,
+    answer TEXT,
+    answer_actor TEXT,
+    telegram_message_ref TEXT,
+    sanitized_delivery_error TEXT
   );
 
   CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -116,6 +220,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_jobs_location ON jobs(location);
   CREATE INDEX IF NOT EXISTS idx_resumes_job ON resumes(job_id, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_agent_configs_project ON agent_configs(project_id, enabled);
+  CREATE INDEX IF NOT EXISTS idx_job_enrichment_job ON job_enrichment_events(job_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_feedback_job ON job_feedback_events(job_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_rules_project_state ON preference_rules(project_id, state);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_question ON human_questions(application_id) WHERE status IN ('pending','delivered');
 `);
 
 function ensureColumn(table: string, column: string, definition: string) {
@@ -135,6 +244,15 @@ ensureColumn("applications", "auto_authorized_at", "TEXT");
 ensureColumn("applications", "authorized_resume_id", "TEXT REFERENCES resumes(id) ON DELETE SET NULL");
 ensureColumn("applications", "authorized_resume_version", "INTEGER");
 ensureColumn("resumes", "base_resume_id", "TEXT REFERENCES base_resumes(id) ON DELETE SET NULL");
+ensureColumn("jobs", "version", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("jobs", "salary_period", "TEXT");
+ensureColumn("jobs", "linkedin_post_url", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("jobs", "job_url", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("jobs", "benefits", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("jobs", "requirements", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("jobs", "responsibilities", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("jobs", "additional_information", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("agent_configs", "allowed_domains", "TEXT NOT NULL DEFAULT '[]'");
 
 function now() {
   return new Date().toISOString();
@@ -152,9 +270,9 @@ function anonymizeStoredVacanciesOnce() {
       latitude = NULL, longitude = NULL,
       work_model = 'Não informado', seniority = 'Não informado', salary_min = NULL, salary_max = NULL,
       salary_source = 'Não informado', salary_source_url = '', salary_checked_at = NULL,
-      salary_confidence = 'not_checked', source = 'Confidencial', source_url = '', application_url = '',
+      salary_confidence = 'not_checked', source = 'Confidencial', source_url = '', linkedin_post_url = '', job_url = '', application_url = '',
       opening_status = 'unknown', opening_checked_at = NULL, deadline_at = NULL, closed_at = NULL,
-      decision_at = NULL, description = '', match_score = 0, posted_at = NULL
+      decision_at = NULL, description = '', benefits = '', requirements = '', responsibilities = '', additional_information = '', match_score = 0, posted_at = NULL
       WHERE id = ?`);
     jobs.forEach((job, index) => redact.run(`Vaga anonimizada ${String(index + 1).padStart(3, "0")}`, job.id));
     db.prepare("UPDATE applications SET notes = '', automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL").run();
@@ -168,7 +286,9 @@ function anonymizeStoredVacanciesOnce() {
   }
 }
 
-anonymizeStoredVacanciesOnce();
+// A production database must never be destructively anonymized as a side
+// effect of startup. This legacy maintenance action is now explicit and opt-in.
+if (process.env.RADAR_RUN_LEGACY_ANONYMIZATION === "true") anonymizeStoredVacanciesOnce();
 
 function idFor(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 18);
@@ -184,7 +304,7 @@ function parseJsonArray(value: unknown): string[] {
 }
 
 function mapJob(row: Record<string, unknown>): Job {
-  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0) } as Job;
+  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0) } as Job;
 }
 
 function mapResume(row: Record<string, unknown>): Resume {
@@ -219,6 +339,32 @@ export function listAgentRuns(): AgentRun[] {
   return db.prepare("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 20").all() as unknown as AgentRun[];
 }
 
+function mapAgentConfig(row: Record<string, unknown>): AgentConfig {
+  return {
+    ...row,
+    enabled: Number(row.enabled) === 1,
+    browser_enabled: Number(row.browser_enabled) === 1,
+    can_create_jobs: Number(row.can_create_jobs) === 1,
+    can_edit_jobs: Number(row.can_edit_jobs) === 1,
+    source_ids: parseJsonArray(row.source_ids),
+    allowed_domains: parseJsonArray(row.allowed_domains),
+    tool_scopes: parseJsonArray(row.tool_scopes),
+    editable_fields: parseJsonArray(row.editable_fields),
+    concurrency: Number(row.concurrency),
+    timeout_seconds: Number(row.timeout_seconds)
+  } as AgentConfig;
+}
+
+export function listAgentConfigs(projectId = "busca-emprego"): AgentConfig[] {
+  return (db.prepare("SELECT * FROM agent_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapAgentConfig);
+}
+
+export function listJobEnrichmentEvents(jobId?: string) {
+  return jobId
+    ? db.prepare("SELECT * FROM job_enrichment_events WHERE job_id=? ORDER BY created_at DESC").all(jobId)
+    : db.prepare("SELECT * FROM job_enrichment_events ORDER BY created_at DESC LIMIT 200").all();
+}
+
 export function listCompanies(): CompanySummary[] {
   const rows = db.prepare(`
     SELECT company, COUNT(*) AS jobs,
@@ -236,7 +382,7 @@ export function listCompanies(): CompanySummary[] {
   }));
 }
 
-export function getBootstrap() {
+export function getBootstrap(projectId = "busca-emprego") {
   refreshExpiredJobs();
   const applications = listApplications();
   const applicationByJob = new Map<string, Application>();
@@ -262,8 +408,12 @@ export function getBootstrap() {
     resumes: listResumes(),
     baseResumes: listBaseResumes(),
     applications,
+    preferences: listPreferenceState(),
+    humanQuestions: listHumanQuestions(),
     companies: listCompanies(),
     agentRuns: listAgentRuns(),
+    agentConfigs: listAgentConfigs(projectId),
+    enrichmentEvents: listJobEnrichmentEvents(),
     stats: {
       total: jobs.length,
       strongMatches: jobs.filter((job) => job.status === "strong_match" || job.match_score >= 80).length,
@@ -308,7 +458,19 @@ function audit(entityType: string, entityId: string, eventType: string, payload:
 }
 
 export function upsertJob(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
-  const id = input.id || idFor(`${input.source}|${input.application_url || ""}|${input.source_url}|${input.title}|${input.company}`);
+  if (!input.title?.trim() || !input.company?.trim() || !input.source?.trim()) throw new Error("job.required_fields.invalid");
+  const sourceUrl = input.source_url ? canonicalizeJobUrl(input.source_url) : "";
+  const linkedinPostUrl = input.linkedin_post_url ? canonicalizeJobUrl(input.linkedin_post_url) : "";
+  const jobUrl = input.job_url ? canonicalizeJobUrl(input.job_url) : "";
+  const applicationUrl = input.application_url ? canonicalizeJobUrl(input.application_url) : "";
+  const salary = validateSalary({ min: input.salary_min ?? null, max: input.salary_max ?? null, currency: input.currency ?? null });
+  if (salary.fieldErrors.length || !salary.value) throw new Error(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
+  const salaryPeriod = input.salary_period ?? null;
+  if (salaryPeriod !== null && !["hour", "month", "year"].includes(String(salaryPeriod))) throw new Error("job.salary_period.invalid");
+  const coordinates = validateCoordinates({ latitude: input.latitude ?? null, longitude: input.longitude ?? null });
+  if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
+  input = { ...input, source_url: sourceUrl, linkedin_post_url: linkedinPostUrl, job_url: jobUrl, application_url: applicationUrl, currency: salary.value.currency ?? input.currency ?? "BRL", salary_period: salaryPeriod };
+  const id = input.id || idFor(`${input.source}|${jobUrl || linkedinPostUrl || applicationUrl || sourceUrl}|${input.title}|${input.company}`);
   const timestamp = now();
   const existing = db.prepare("SELECT id FROM jobs WHERE id = ?").get(id) as { id: string } | undefined;
   const current = existing ? db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined : undefined;
@@ -320,13 +482,13 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
   } as Partial<Job> & { source: string; title: string; company: string; source_url: string };
   const values = [
     id, job.title, job.company, job.location ?? "Não informado", job.latitude ?? null, job.longitude ?? null, job.country ?? "Brasil", job.work_model ?? "Não informado", job.seniority ?? "Não informado",
-    job.salary_min ?? null, job.salary_max ?? null, job.currency ?? "BRL", job.salary_source ?? "Não informado", job.salary_source_url ?? "", job.salary_checked_at ?? null,
-    job.salary_confidence ?? "not_checked", job.source, job.source_url, job.application_url ?? "", job.opening_status ?? "unknown", job.opening_checked_at ?? null, job.deadline_at ?? null, job.closed_at ?? null, job.decision ?? "pending", job.decision_at ?? null, job.description ?? "", job.match_score ?? 0, job.status ?? "found", job.posted_at ?? null, timestamp, timestamp
+    job.salary_min ?? null, job.salary_max ?? null, job.currency ?? "BRL", job.salary_period ?? null, job.salary_source ?? "Não informado", job.salary_source_url ?? "", job.salary_checked_at ?? null,
+    job.salary_confidence ?? "not_checked", job.source, job.source_url, job.linkedin_post_url ?? "", job.job_url ?? "", job.application_url ?? "", job.opening_status ?? "unknown", job.opening_checked_at ?? null, job.deadline_at ?? null, job.closed_at ?? null, job.decision ?? "pending", job.decision_at ?? null, job.description ?? "", job.benefits ?? "", job.requirements ?? "", job.responsibilities ?? "", job.additional_information ?? "", job.match_score ?? 0, job.status ?? "found", job.posted_at ?? null, timestamp, timestamp
   ];
   if (existing) {
-    db.prepare(`UPDATE jobs SET title=?, company=?, location=?, latitude=?, longitude=?, country=?, work_model=?, seniority=?, salary_min=?, salary_max=?, currency=?, salary_source=?, salary_source_url=?, salary_checked_at=?, salary_confidence=?, source=?, source_url=?, application_url=?, opening_status=?, opening_checked_at=?, deadline_at=?, closed_at=?, decision=?, decision_at=?, description=?, match_score=?, status=?, posted_at=?, updated_at=? WHERE id=?`).run(...values.slice(1, -2), timestamp, id);
+    db.prepare(`UPDATE jobs SET title=?, company=?, location=?, latitude=?, longitude=?, country=?, work_model=?, seniority=?, salary_min=?, salary_max=?, currency=?, salary_period=?, salary_source=?, salary_source_url=?, salary_checked_at=?, salary_confidence=?, source=?, source_url=?, linkedin_post_url=?, job_url=?, application_url=?, opening_status=?, opening_checked_at=?, deadline_at=?, closed_at=?, decision=?, decision_at=?, description=?, benefits=?, requirements=?, responsibilities=?, additional_information=?, match_score=?, status=?, posted_at=?, updated_at=? WHERE id=?`).run(...values.slice(1, -2), timestamp, id);
   } else {
-    db.prepare(`INSERT INTO jobs (id,title,company,location,latitude,longitude,country,work_model,seniority,salary_min,salary_max,currency,salary_source,salary_source_url,salary_checked_at,salary_confidence,source,source_url,application_url,opening_status,opening_checked_at,deadline_at,closed_at,decision,decision_at,description,match_score,status,posted_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values);
+    db.prepare(`INSERT INTO jobs (id,title,company,location,latitude,longitude,country,work_model,seniority,salary_min,salary_max,currency,salary_period,salary_source,salary_source_url,salary_checked_at,salary_confidence,source,source_url,linkedin_post_url,job_url,application_url,opening_status,opening_checked_at,deadline_at,closed_at,decision,decision_at,description,benefits,requirements,responsibilities,additional_information,match_score,status,posted_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values);
   }
   audit("job", id, existing ? "updated" : "discovered", { changed_fields: Object.keys(input) });
   return getJob(id);
@@ -337,10 +499,10 @@ export function getJob(id: string) {
   return row ? mapJob(row) : null;
 }
 
-const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source", "source_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "match_score", "status", "posted_at"]);
+const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source", "source_url", "linkedin_post_url", "job_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities", "additional_information", "match_score", "status", "posted_at"]);
 
 export function updateJob(id: string, patch: Record<string, unknown>) {
-  if (patch.status !== undefined && !["found", "validation", "strong_match", "review"].includes(String(patch.status))) throw new Error("Essa etapa exige uma decisão explícita no fluxo de interesse, currículo ou candidatura.");
+  if (patch.status !== undefined) throw new Error("workflow.status_requires_transition_command");
   const entries = Object.entries(patch).filter(([key]) => editableJobFields.has(key));
   if (!entries.length) return getJob(id);
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
@@ -350,11 +512,31 @@ export function updateJob(id: string, patch: Record<string, unknown>) {
   return getJob(id);
 }
 
+export function transitionJob(id: string, input: TransitionInput) {
+  const current = getJob(id);
+  if (!current) throw new Error("job.not_found");
+  const result = executeWorkflowCommand({ status: current.status, version: current.version, cycle: 1 }, input);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const update = db.prepare("UPDATE jobs SET status=?,version=?,updated_at=? WHERE id=? AND version=?")
+      .run(result.state.status, result.state.version, result.event.created_at, id, input.expected_version);
+    if (!update.changes) throw new Error("workflow.version_conflict");
+    db.prepare(`INSERT INTO workflow_events
+      (job_id,from_status,to_status,actor,command,evidence_ref,version,created_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, result.event.from_status, result.event.to_status, result.event.actor, result.event.command, result.event.evidence_ref, result.event.version, result.event.created_at);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  audit("job", id, "workflow_transition", result.event);
+  return { job: getJob(id), event: result.event };
+}
+
 export function recordJobDecision(id: string, decision: string, confirmation: string) {
-  const phrases: Record<string, string> = { interested: "TENHO INTERESSE", not_interested: "SEM INTERESSE", no_time: "SEM TEMPO" };
+  if (decision === "not_interested") throw new Error("Use o feedback total com categoria e justificativa para rejeitar uma vaga.");
+  const phrases: Record<string, string> = { interested: "TENHO INTERESSE", no_time: "SEM TEMPO" };
   if (!phrases[decision] || confirmation !== phrases[decision]) throw new Error("Confirme explicitamente sua decisão para esta vaga.");
   const job = getJob(id);
   if (!job) throw new Error("Vaga não encontrada.");
+  if (decision === "interested" && ["discarded", "expired", "completed"].includes(job.status)) throw new Error("Reabra a vaga com motivo antes de registrar novo interesse.");
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
   if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
     throw new Error("A decisão não pode ser alterada enquanto a candidatura está em andamento ou já foi enviada.");
@@ -602,6 +784,286 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
   db.prepare("INSERT OR REPLACE INTO agent_runs (id,agent_name,status,started_at,finished_at,found_count,message) VALUES (?,?,?,?,?,?,?)").run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "");
   audit("agent_run", id, "status", { status: input.status, found_count: input.found_count ?? 0 });
   return listAgentRuns().find((run) => run.id === id) ?? null;
+}
+
+const feedbackDetailByReason: Record<string, Set<string>> = {
+  role: new Set(["title", "role_family"]), company: new Set(["company"]), seniority: new Set(["seniority"]),
+  skill: new Set(["required_skill"]), salary: new Set(["salary"]), location: new Set(["location"]),
+  work_model: new Set(["work_model"]), contract: new Set(["contract"]),
+  schedule_benefits: new Set(["schedule", "benefits"]), responsibility: new Set(["responsibilities"]), other: new Set(["other"])
+};
+
+function normalizedFacet(value: unknown) {
+  return String(value ?? "unknown").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function feedbackFacetValue(job: Job, detailKey: string) {
+  const values: Record<string, unknown> = {
+    title: job.title, role_family: job.title, company: job.company, seniority: job.seniority,
+    salary: job.salary_min == null && job.salary_max == null ? "unknown" : `${job.currency}:${job.salary_min ?? ""}-${job.salary_max ?? ""}`,
+    location: job.location, work_model: job.work_model, required_skill: "feedback-specified",
+    contract: "unknown", schedule: "feedback-specified", benefits: "feedback-specified",
+    responsibilities: "feedback-specified", other: "feedback-specified"
+  };
+  return normalizedFacet(values[detailKey]);
+}
+
+export function recordJobFeedback(jobId: string, input: Record<string, unknown>, actor = "user", projectId = "default") {
+  const mode = String(input.mode ?? "");
+  const reasonCode = String(input.reason_code ?? "");
+  const detailKey = String(input.detail_key ?? "");
+  const explanation = String(input.explanation ?? "").trim();
+  const confirmation = String(input.confirmation ?? "");
+  if (!feedbackDetailByReason[reasonCode]) throw new Error("feedback.reason_code.invalid");
+  if (!detailKey || !feedbackDetailByReason[reasonCode].has(detailKey)) throw new Error("feedback.detail_key.incompatible");
+  if (explanation.length < 10 || explanation.length > 500) throw new Error("feedback.explanation.length");
+  if (mode === "total" && confirmation !== "SEM INTERESSE") throw new Error("feedback.confirmation.total");
+  if (mode === "partial" && confirmation !== "REJEITAR PARCIALMENTE") throw new Error("feedback.confirmation.partial");
+  if (!['total', 'partial'].includes(mode)) throw new Error("feedback.mode.invalid");
+  const job = getJob(jobId);
+  if (!job) throw new Error("job.not_found");
+  const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(jobId) as { status: string } | undefined;
+  if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new Error("A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.");
+  const timestamp = now();
+  const id = idFor(`feedback|${jobId}|${timestamp}|${mode}|${reasonCode}|${detailKey}`);
+  const cycle = Number((db.prepare("SELECT COALESCE(MAX(cycle),0)+1 AS cycle FROM job_feedback_events WHERE job_id = ?").get(jobId) as { cycle: number }).cycle);
+  const facetValue = feedbackFacetValue(job, detailKey);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(`INSERT INTO job_feedback_events
+      (id,project_id,job_id,cycle,mode,reason_code,detail_key,explanation,actor,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, jobId, cycle, mode, reasonCode, detailKey, explanation, actor, timestamp);
+    db.prepare(`INSERT INTO preference_values
+      (project_id,facet_key,normalized_value,positive_count,negative_count,updated_at)
+      VALUES (?,?,?,0,1,?)
+      ON CONFLICT(project_id,facet_key,normalized_value) DO UPDATE SET
+        negative_count=negative_count+1, updated_at=excluded.updated_at`).run(projectId, detailKey, facetValue, timestamp);
+    let ruleId: string | null = null;
+    if (mode === "total") {
+      ruleId = idFor(`rule|${id}`);
+      const match = reasonCode === "company"
+        ? { type: "company", company: normalizedFacet(job.company) }
+        : (["role", "skill"].includes(reasonCode)
+          ? { type: "similar_role", title: normalizedFacet(job.title), detail_key: detailKey }
+          : { type: "facet_match", detail_key: detailKey, value: facetValue });
+      db.prepare(`INSERT INTO preference_rules
+        (id,project_id,source_feedback_ids,match_json,action,state,reason,created_at,updated_at)
+        VALUES (?,?,?,?, 'suppress','active',?,?,?)`).run(ruleId, projectId, JSON.stringify([id]), JSON.stringify(match), explanation, timestamp, timestamp);
+      db.prepare("UPDATE jobs SET decision='not_interested', decision_at=?, status='discarded', version=version+1, updated_at=? WHERE id=?").run(timestamp, timestamp, jobId);
+      db.prepare("UPDATE applications SET automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL WHERE job_id=? AND status IN ('queued','needs_review','failed')").run(jobId);
+    }
+    db.exec("COMMIT");
+    audit("job", jobId, "feedback_recorded", { feedback_id: id, mode, reason_code: reasonCode, detail_key: detailKey, rule_id: ruleId });
+    return { feedback_id: id, mode, reason_code: reasonCode, detail_key: detailKey, facet_value: facetValue, rule_id: ruleId, job: getJob(jobId) };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function listPreferenceState(projectId = "default") {
+  const rules = (db.prepare("SELECT * FROM preference_rules WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[])
+    .map((row) => ({ ...row, source_feedback_ids: parseJsonArray(row.source_feedback_ids), match_json: JSON.parse(String(row.match_json)) }));
+  const values = db.prepare("SELECT * FROM preference_values WHERE project_id=? ORDER BY facet_key,normalized_value").all(projectId);
+  const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString();
+  const suggestions = db.prepare(`SELECT detail_key, COUNT(DISTINCT job_id) AS evidence_count
+    FROM job_feedback_events WHERE project_id=? AND mode='partial' AND created_at>=?
+    GROUP BY detail_key HAVING COUNT(DISTINCT job_id)>=3`).all(projectId, cutoff);
+  return { rules, values, suggestions };
+}
+
+export function setPreferenceRuleState(id: string, state: string) {
+  if (!['active', 'paused'].includes(state)) throw new Error("preference_rule.state.invalid");
+  const result = db.prepare("UPDATE preference_rules SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
+  if (!result.changes) throw new Error("preference_rule.not_found");
+  audit("preference_rule", id, "state_changed", { state });
+  return db.prepare("SELECT * FROM preference_rules WHERE id=?").get(id);
+}
+
+export function createHumanQuestion(applicationId: string, input: Record<string, unknown>) {
+  const application = listApplications().find((item) => item.id === applicationId);
+  if (!application || !application.resume_id) throw new Error("application.not_found");
+  if (application.automation_mode !== "authorized_auto" || !application.auto_authorized_at) throw new Error("application.authorization.required");
+  if (db.prepare("SELECT id FROM human_questions WHERE application_id=? AND status IN ('pending','delivered')").get(applicationId)) throw new Error("human_question.already_active");
+  const resume = listResumes().find((item) => item.id === application.resume_id);
+  if (!resume || resume.version !== application.authorized_resume_version) throw new Error("application.resume_version.changed");
+  const fieldRef = String(input.field_ref ?? "").trim();
+  const question = String(input.question ?? "").trim();
+  if (!fieldRef || !question || question.length > 1000) throw new Error("human_question.invalid");
+  const timestamp = now();
+  const id = idFor(`question|${applicationId}|${timestamp}|${fieldRef}`);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(`INSERT INTO human_questions
+      (id,application_id,job_id,resume_id,resume_version,field_ref,question,status,asked_at)
+      VALUES (?,?,?,?,?,?,?,'pending',?)`).run(id, applicationId, application.job_id, resume.id, resume.version, fieldRef, question, timestamp);
+    db.prepare("UPDATE applications SET status='needs_review',current_step=?,updated_at=? WHERE id=?").run(`Aguardando resposta: ${id}`, timestamp, applicationId);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  audit("human_question", id, "created", { application_id: applicationId, field_ref: fieldRef });
+  return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
+}
+
+export function markHumanQuestionDelivery(id: string, delivered: boolean, messageRef?: string, error?: string) {
+  const status = delivered ? "delivered" : "delivery_failed";
+  const result = db.prepare("UPDATE human_questions SET status=?,telegram_message_ref=?,sanitized_delivery_error=? WHERE id=? AND status='pending'").run(status, messageRef ?? null, error?.slice(0, 240) ?? null, id);
+  if (!result.changes) throw new Error("human_question.not_pending");
+  audit("human_question", id, status, {});
+  return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
+}
+
+export function answerHumanQuestion(id: string, input: Record<string, unknown>) {
+  const row = db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) as Record<string, unknown> | undefined;
+  if (!row || !['pending', 'delivered'].includes(String(row.status))) throw new Error("human_question.not_active");
+  const expectedChat = process.env.HERMES_TELEGRAM_CHAT_ID;
+  const chatId = String(input.chat_id ?? "");
+  const answer = String(input.answer ?? "").trim();
+  if (!expectedChat || chatId !== expectedChat) throw new Error("human_question.chat_unauthorized");
+  if (!answer || answer.length > 1000) throw new Error("human_question.answer.invalid");
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE human_questions SET status='answered',answered_at=?,answer=?,answer_actor=? WHERE id=?").run(timestamp, answer, String(input.actor ?? "telegram-user"), id);
+    db.prepare("UPDATE applications SET status='queued',current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Resposta recebida para ${id}; pronta para retomada`, timestamp, String(row.application_id));
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  audit("human_question", id, "answered", { application_id: row.application_id });
+  return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
+}
+
+export function listHumanQuestions(applicationId?: string) {
+  return applicationId
+    ? db.prepare("SELECT * FROM human_questions WHERE application_id=? ORDER BY asked_at DESC").all(applicationId)
+    : db.prepare("SELECT * FROM human_questions ORDER BY asked_at DESC").all();
+}
+
+const agentRoles = new Set(["source_scout", "job_enrichment", "match_evaluator", "resume_writer", "ats_reviewer", "custom"]);
+const safeAgentTools = new Set(["browser.read", "jobs.create", "jobs.enrich", "jobs.read", "salary.lookup"]);
+const agentEditableJobFields = new Set([
+  "title", "company", "location", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period",
+  "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url",
+  "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities",
+  "additional_information", "posted_at", "latitude", "longitude"
+]);
+
+function validatedStringArray(value: unknown, allowed: Set<string>, field: string) {
+  if (!Array.isArray(value)) throw new Error(`agent.${field}.invalid`);
+  const result = [...new Set(value.map(String))];
+  if (result.some((item) => !allowed.has(item))) throw new Error(`agent.${field}.forbidden`);
+  return result;
+}
+
+function validateAgentConfigInput(input: Record<string, unknown>) {
+  const name = String(input.name ?? "").trim();
+  const roleType = String(input.role_type ?? "");
+  if (name.length < 3 || name.length > 100) throw new Error("agent.name.invalid");
+  if (!agentRoles.has(roleType)) throw new Error("agent.role_type.invalid");
+  const toolScopes = validatedStringArray(input.tool_scopes ?? [], safeAgentTools, "tool_scopes");
+  const editableFields = validatedStringArray(input.editable_fields ?? [], agentEditableJobFields, "editable_fields");
+  const sourceIds = Array.isArray(input.source_ids) ? [...new Set(input.source_ids.map((item) => String(item).trim()).filter(Boolean))] : [];
+  const allowedDomains = Array.isArray(input.allowed_domains) ? [...new Set(input.allowed_domains.map((item) => String(item).trim().toLowerCase()).filter(Boolean))] : [];
+  if (allowedDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(domain))) throw new Error("agent.allowed_domains.invalid");
+  const browserEnabled = Boolean(input.browser_enabled);
+  const canCreate = Boolean(input.can_create_jobs);
+  const canEdit = Boolean(input.can_edit_jobs);
+  if (browserEnabled && !toolScopes.includes("browser.read")) throw new Error("agent.browser_scope.required");
+  if (browserEnabled && !allowedDomains.length) throw new Error("agent.allowed_domains.required");
+  if (canCreate && !toolScopes.includes("jobs.create")) throw new Error("agent.create_scope.required");
+  if (canEdit && (!toolScopes.includes("jobs.enrich") || !editableFields.length)) throw new Error("agent.edit_scope.required");
+  const concurrency = Number(input.concurrency ?? 1);
+  const timeoutSeconds = Number(input.timeout_seconds ?? 120);
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 20) throw new Error("agent.concurrency.invalid");
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 1800) throw new Error("agent.timeout.invalid");
+  const prompt = String(input.prompt ?? "").trim();
+  if (prompt.length > 12_000) throw new Error("agent.prompt.too_long");
+  return { name, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, enabled: input.enabled === false ? 0 : 1 };
+}
+
+function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
+  if (!value) return;
+  const canonicalUrl = canonicalizeJobUrl(String(value));
+  const hostname = new URL(canonicalUrl).hostname.toLowerCase();
+  if (!agent.allowed_domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) {
+    throw new Error("agent.domain.forbidden");
+  }
+}
+
+export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
+  const values = validateAgentConfigInput(input);
+  const id = idFor(`agent|${projectId}|${Date.now()}|${values.name}`);
+  const timestamp = now();
+  db.prepare(`INSERT INTO agent_configs
+    (id,project_id,name,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, timestamp, timestamp);
+  audit("agent_config", id, "created", { actor, role_type: values.roleType, tool_scopes: values.toolScopes, editable_fields: values.editableFields });
+  return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
+}
+
+export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
+  const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
+  if (!current) throw new Error("agent.not_found");
+  const merged = { ...current, ...input } as unknown as Record<string, unknown>;
+  const values = validateAgentConfigInput(merged);
+  db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,updated_at=? WHERE id=? AND project_id=?`)
+    .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, now(), id, projectId);
+  audit("agent_config", id, "updated", { actor, changed_fields: Object.keys(input) });
+  return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
+}
+
+export function deleteAgentConfig(id: string, actor: string, projectId = "busca-emprego") {
+  if (db.prepare("SELECT id FROM job_enrichment_events WHERE agent_id=? LIMIT 1").get(id)) throw new Error("agent.has_history.disable_instead");
+  const result = db.prepare("DELETE FROM agent_configs WHERE id=? AND project_id=?").run(id, projectId);
+  if (!result.changes) throw new Error("agent.not_found");
+  audit("agent_config", id, "deleted", { actor });
+  return { deleted: true };
+}
+
+export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId && item.enabled);
+  if (!agent || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
+  for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
+  const identityUrl = input.job_url || input.linkedin_post_url || input.application_url || input.source_url;
+  const canonicalIdentityUrl = identityUrl ? canonicalizeJobUrl(identityUrl) : "";
+  const candidateId = input.id || idFor(`${input.source}|${canonicalIdentityUrl}|${input.title}|${input.company}`);
+  if (getJob(candidateId)) throw new Error("agent.jobs.create_existing.forbidden");
+  const job = upsertJob(input);
+  audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
+  return job;
+}
+
+export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId && item.enabled);
+  if (!agent || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
+  const current = getJob(jobId);
+  if (!current) throw new Error("job.not_found");
+  const entries = Object.entries(patch);
+  if (!entries.length || entries.some(([key]) => !agent.editable_fields.includes(key) || !agentEditableJobFields.has(key))) throw new Error("agent.job_field.forbidden");
+  assertAgentUrlAllowed(agent, evidenceSourceUrl);
+  const sourceUrl = canonicalizeJobUrl(evidenceSourceUrl);
+  const normalizedPatch = { ...patch };
+  for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) {
+    if (normalizedPatch[field]) {
+      assertAgentUrlAllowed(agent, normalizedPatch[field]);
+      normalizedPatch[field] = canonicalizeJobUrl(String(normalizedPatch[field]));
+    }
+  }
+  const salary = validateSalary({
+    min: normalizedPatch.salary_min === undefined ? current.salary_min : Number(normalizedPatch.salary_min),
+    max: normalizedPatch.salary_max === undefined ? current.salary_max : Number(normalizedPatch.salary_max),
+    currency: normalizedPatch.currency === undefined ? current.currency : String(normalizedPatch.currency)
+  });
+  if (salary.fieldErrors.length) throw new Error(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
+  const coordinates = validateCoordinates({
+    latitude: normalizedPatch.latitude === undefined ? current.latitude : normalizedPatch.latitude == null ? null : Number(normalizedPatch.latitude),
+    longitude: normalizedPatch.longitude === undefined ? current.longitude : normalizedPatch.longitude == null ? null : Number(normalizedPatch.longitude)
+  });
+  if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
+  const job = updateJob(jobId, normalizedPatch);
+  const eventId = idFor(`enrichment|${agentId}|${jobId}|${Date.now()}`);
+  db.prepare("INSERT INTO job_enrichment_events (id,job_id,agent_id,source_url,fields_changed,evidence_excerpt,created_at) VALUES (?,?,?,?,?,?,?)")
+    .run(eventId, jobId, agentId, sourceUrl, JSON.stringify(entries.map(([key]) => key)), evidenceExcerpt.slice(0, 500), now());
+  audit("job", jobId, "enriched_by_agent", { agent_id: agentId, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });
+  return { job, enrichment_event_id: eventId };
 }
 
 export function seedDemo() {

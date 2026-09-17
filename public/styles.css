@@ -237,6 +237,12 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
 .detail-box span { display: block; color: var(--muted); font-size: 10px; }
 .detail-box strong { display: block; margin-top: 4px; color: var(--ink); font-size: 13px; }
 .detail-description { padding: 14px; color: #596881; border-left: 3px solid var(--teal); border-radius: 3px 10px 10px 3px; background: #f7fbfb; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
+.detail-section { padding: 12px 0; border-bottom: 1px solid var(--border); white-space: normal; }
+.detail-section:last-child { border-bottom: 0; }
+.detail-section h3 { margin: 0 0 7px; color: var(--ink); font-size: 13px; }
+.detail-section p { margin: 7px 0; }
+.agent-grid { margin-top: 20px; }
+.agent-card p { margin: 8px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .modal-alert { padding: 11px 12px; margin-bottom: 13px; color: #8b6334; border-radius: 10px; background: #fff7e9; font-size: 11px; line-height: 1.45; }
 
 .toast-root { position: fixed; right: 20px; bottom: 20px; z-index: 20; display: grid; gap: 8px; }
