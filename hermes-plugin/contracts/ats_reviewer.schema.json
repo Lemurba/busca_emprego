@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["resume_id","verdict","checks","findings"],"properties":{"resume_id":{"type":"string"},"verdict":{"enum":["pass","fail"]},"checks":{"type":"object"},"findings":{"type":"array","maxItems":10}}}

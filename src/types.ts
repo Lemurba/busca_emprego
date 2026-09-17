@@ -9,6 +9,9 @@ export type JobStatus =
   | "ready_to_apply"
   | "applying"
   | "applied"
+  | "interview_scheduled"
+  | "interview_completed"
+  | "completed"
   | "discarded"
   | "expired";
 
@@ -25,12 +28,15 @@ export interface Job {
   salary_min: number | null;
   salary_max: number | null;
   currency: string;
+  salary_period: "hour" | "month" | "year" | null;
   salary_source: string;
   salary_source_url: string;
   salary_checked_at: string | null;
   salary_confidence: string;
   source: string;
   source_url: string;
+  linkedin_post_url: string;
+  job_url: string;
   application_url: string;
   opening_status: "open" | "closed" | "unknown";
   opening_checked_at: string | null;
@@ -39,9 +45,53 @@ export interface Job {
   decision: "pending" | "interested" | "not_interested" | "no_time" | "expired" | "applied";
   decision_at: string | null;
   description: string;
+  benefits: string;
+  requirements: string;
+  responsibilities: string;
+  additional_information: string;
   match_score: number;
   status: JobStatus;
+  version: number;
   posted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentConfig {
+  id: string;
+  project_id: string;
+  name: string;
+  role_type: "source_scout" | "job_enrichment" | "match_evaluator" | "resume_writer" | "ats_reviewer" | "custom";
+  enabled: boolean;
+  source_ids: string[];
+  allowed_domains: string[];
+  tool_scopes: string[];
+  browser_enabled: boolean;
+  can_create_jobs: boolean;
+  can_edit_jobs: boolean;
+  editable_fields: string[];
+  concurrency: number;
+  timeout_seconds: number;
+  prompt: string;
+  version: number;
+  published_version_id: string | null;
+  draft_version_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SourceConfigRecord {
+  id: string;
+  project_id: string;
+  name: string;
+  source_type: "linkedin" | "glassdoor" | "company_site" | "job_board" | "custom";
+  domain: string;
+  enabled: boolean;
+  auth_strategy: "none" | "bearer" | "basic" | "browser_profile";
+  secret_ref: string | null;
+  browser_profile_id: string | null;
+  terms_approved_at: string | null;
+  terms_approved_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -94,6 +144,9 @@ export interface AgentRun {
   finished_at: string | null;
   found_count: number;
   message: string;
+  agent_id?: string | null;
+  config_version_id?: string | null;
+  config_snapshot?: Record<string, unknown> | null;
 }
 
 export interface CompanySummary {

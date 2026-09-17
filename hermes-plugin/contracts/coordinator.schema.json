@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["run_id","status","source_results","totals"],"properties":{"run_id":{"type":"string"},"status":{"enum":["completed","partial","failed"]},"source_results":{"type":"array","items":{"type":"object"}},"totals":{"type":"object"}}}

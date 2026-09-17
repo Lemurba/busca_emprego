@@ -1,0 +1,17 @@
+; Exemplo para o supervisor que já existe no container Hermes.
+; Não cria outro container e não substitui o processo principal do Hermes.
+[program:busca-emprego-radar]
+command=/opt/hermes/plugins/busca-emprego/ops/hermes/radar-process.sh
+directory=/opt/hermes/plugins/busca-emprego
+autostart=true
+autorestart=unexpected
+startsecs=5
+startretries=3
+stopsignal=TERM
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
+environment=NODE_ENV="production",RADAR_ENVIRONMENT="production",RADAR_OPERATOR_ID="%(ENV_RADAR_OPERATOR_ID)s",PORT="8787",RADAR_APP_DIR="/opt/hermes/plugins/busca-emprego",RADAR_DB_PATH="/var/lib/hermes/busca-emprego/radar.sqlite",RADAR_TRUST_PROXY_TLS="true"

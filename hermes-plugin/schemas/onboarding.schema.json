@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://busca-emprego.local/schemas/onboarding.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "locale", "guide", "secretPolicy", "phases", "sourceAuthFlows", "prompts", "readiness"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "locale": { "const": "pt-BR" },
+    "guide": { "const": "ONBOARDING.md" },
+    "secretPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collection", "persistValuesInPlugin", "allowedReferences", "neverAskInChat"],
+      "properties": {
+        "collection": { "const": "host-secure-input" },
+        "persistValuesInPlugin": { "const": false },
+        "allowedReferences": { "type": "array", "const": ["hermes://", "vault://"] },
+        "neverAskInChat": { "const": true }
+      }
+    },
+    "phases": { "type": "array", "minItems": 10, "uniqueItems": true, "items": { "type": "string" } },
+    "sourceAuthFlows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["none", "bearer", "basic", "browser_profile"],
+      "properties": {
+        "none": { "$ref": "#/$defs/authFlow" },
+        "bearer": { "$ref": "#/$defs/authFlow" },
+        "basic": { "$ref": "#/$defs/authFlow" },
+        "browser_profile": { "$ref": "#/$defs/authFlow" }
+      }
+    },
+    "prompts": { "type": "object", "required": ["environment", "operator", "source", "terms", "secret", "glassdoor", "telegram", "schedule"], "additionalProperties": { "type": "string", "minLength": 1 } },
+    "readiness": { "type": "object", "required": ["healthPath", "readyPath", "bootstrapPath", "requireTlsOutsideLocalhost", "requireAuthenticatedBootstrap"], "additionalProperties": false, "properties": {
+      "healthPath": { "const": "/api/health" },
+      "readyPath": { "const": "/api/ready" },
+      "bootstrapPath": { "const": "/api/bootstrap" },
+      "requireTlsOutsideLocalhost": { "const": true },
+      "requireAuthenticatedBootstrap": { "const": true }
+    } }
+  },
+  "$defs": {
+    "authFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["securePrompt", "requiresSecretRef", "requiresBrowserProfile"],
+      "properties": {
+        "securePrompt": { "type": "boolean" },
+        "requiresSecretRef": { "type": "boolean" },
+        "requiresBrowserProfile": { "type": "boolean" }
+      }
+    }
+  }
+}

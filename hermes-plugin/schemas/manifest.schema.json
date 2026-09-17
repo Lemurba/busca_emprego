@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://busca-emprego.local/schemas/manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "version", "entrypoint", "configSchema", "onboarding", "roles", "integration", "security", "dashboard"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": { "const": "busca-emprego" },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "description": { "type": "string" },
+    "entrypoint": { "type": "string" },
+    "configSchema": { "type": "string" },
+    "onboarding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "guide", "mode", "secrets"],
+      "properties": {
+        "contract": { "type": "string", "const": "onboarding.json" },
+        "guide": { "type": "string", "const": "ONBOARDING.md" },
+        "mode": { "const": "interactive" },
+        "secrets": { "const": "host-secure-input" }
+      }
+    },
+    "roles": { "type": "array", "minItems": 9, "maxItems": 9, "uniqueItems": true, "items": { "type": "string" } },
+    "integration": { "type": "object" },
+    "security": { "type": "object" },
+    "dashboard": { "type": "object" }
+  }
+}

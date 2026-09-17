@@ -1,0 +1,47 @@
+{
+  "$schema": "./schemas/onboarding.schema.json",
+  "version": 1,
+  "locale": "pt-BR",
+  "guide": "ONBOARDING.md",
+  "secretPolicy": {
+    "collection": "host-secure-input",
+    "persistValuesInPlugin": false,
+    "allowedReferences": ["hermes://", "vault://"],
+    "neverAskInChat": true
+  },
+  "phases": [
+    "preflight",
+    "environment",
+    "api-credentials",
+    "gateways",
+    "sources",
+    "telegram",
+    "build-and-start",
+    "initial-agent",
+    "smoke-test",
+    "enable-schedule"
+  ],
+  "sourceAuthFlows": {
+    "none": { "securePrompt": false, "requiresSecretRef": false, "requiresBrowserProfile": false },
+    "bearer": { "securePrompt": true, "requiresSecretRef": true, "requiresBrowserProfile": false },
+    "basic": { "securePrompt": true, "requiresSecretRef": true, "requiresBrowserProfile": false },
+    "browser_profile": { "securePrompt": true, "requiresSecretRef": false, "requiresBrowserProfile": true }
+  },
+  "prompts": {
+    "environment": "Você quer configurar staging (recomendado) ou production?",
+    "operator": "Qual identificador do operador responsável por esta instalação?",
+    "source": "Qual fonte deseja adicionar e qual domínio está autorizado?",
+    "terms": "Você confirma que revisou e aceita os termos desta fonte para as operações selecionadas?",
+    "secret": "Não envie a credencial neste chat. Abra a entrada segura do cofre do Hermes; eu guardarei somente a referência.",
+    "glassdoor": "Para o Glassdoor, deseja criar/selecionar um perfil isolado do Browser Harness e autenticar-se na janela segura? Não informe senha no chat.",
+    "telegram": "Qual capability/destinatário autorizado do Telegram devo usar para perguntas humanas?",
+    "schedule": "O teste manual terminou sem erro. Deseja habilitar o agendamento deste agente agora?"
+  },
+  "readiness": {
+    "healthPath": "/api/health",
+    "readyPath": "/api/ready",
+    "bootstrapPath": "/api/bootstrap",
+    "requireTlsOutsideLocalhost": true,
+    "requireAuthenticatedBootstrap": true
+  }
+}
