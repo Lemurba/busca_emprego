@@ -28,6 +28,26 @@ export interface PluginConfig {
   timeoutMs: number;
   retry: { delaysMs: readonly [1000, 5000, 15000]; jitterRatio: number };
   questionReminderMs?: number;
+  integration?: IntegrationConfig;
+}
+
+export interface IntegrationConfig {
+  hermesBaseUrl: string;
+  browserHarnessBaseUrl: string;
+  telegramGatewayBaseUrl: string;
+  serviceTokenSecretRef: string;
+  requestTimeoutMs?: number;
+  allowInsecureLocalhost?: boolean;
+}
+
+export type SourceAuthStrategy = "none" | "bearer" | "basic" | "browser_profile";
+
+/** References only. Secret values remain in Hermes' secret store. */
+export interface SourceAuthorization {
+  sourceId: string;
+  strategy: SourceAuthStrategy;
+  secretRefs?: Readonly<Record<string, string>>;
+  browserProfileId?: string;
 }
 
 export interface SourceConfig {
@@ -75,11 +95,38 @@ export interface HermesRuntimeAdapter {
 
 /** Read-only Browser Harness boundary used only by scouting and enrichment. */
 export interface ReadonlyBrowserHarnessAdapter {
-  readPage(request: { url: string; purpose: "scouting" | "enrichment" }, signal: AbortSignal): Promise<{
+  readPage(request: { url: string; purpose: "scouting" | "enrichment"; sourceId?: string; authorization?: SourceAuthorization }, signal: AbortSignal): Promise<{
     finalUrl: string;
     text: string;
     links: readonly { text: string; url: string }[];
   }>;
+}
+
+export interface ApplicationAuthorizationEnvelope {
+  authorizationId: string;
+  applicationId: string;
+  jobId: string;
+  resumeId: string;
+  resumeVersion: number;
+  applicationUrl: string;
+  applicationUrlHash: string;
+}
+
+export interface BrowserApplicationResult {
+  status: "needs_review" | "submitted" | "failed";
+  currentStep: string;
+  evidenceRef?: string;
+  humanQuestion?: { fieldRef: string; question: string; required: boolean; choices?: readonly string[] };
+  errorCode?: string;
+}
+
+/** Separate write-capable Harness boundary, always bound to an explicit authorization envelope. */
+export interface ApplicationBrowserHarnessAdapter {
+  executeAuthorizedApplication(request: ApplicationAuthorizationEnvelope, signal: AbortSignal): Promise<BrowserApplicationResult>;
+}
+
+export interface SecretResolver {
+  resolve(secretRef: string): Promise<string>;
 }
 
 export interface IdempotencyStore {

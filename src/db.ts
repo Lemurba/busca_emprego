@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume } from "./types.js";
+import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, type TransitionInput } from "./workflow.js";
 import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "./domain.js";
 
@@ -11,6 +11,11 @@ mkdirSync(dirname(dbPath), { recursive: true });
 
 export const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
+
+export function databaseReadiness() {
+  const row = db.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
+  return { ok: row?.quick_check === "ok", check: row?.quick_check ?? "unknown" };
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS jobs (
@@ -102,7 +107,10 @@ db.exec(`
     started_at TEXT NOT NULL,
     finished_at TEXT,
     found_count INTEGER NOT NULL DEFAULT 0,
-    message TEXT NOT NULL DEFAULT ''
+    message TEXT NOT NULL DEFAULT '',
+    agent_id TEXT,
+    config_version_id TEXT,
+    config_snapshot TEXT
   );
 
   CREATE TABLE IF NOT EXISTS agent_configs (
@@ -121,8 +129,43 @@ db.exec(`
     concurrency INTEGER NOT NULL DEFAULT 1,
     timeout_seconds INTEGER NOT NULL DEFAULT 120,
     prompt TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    published_version_id TEXT,
+    draft_version_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS agent_config_versions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agent_configs(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('draft','published','retired')),
+    config_json TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    published_by TEXT,
+    published_at TEXT,
+    UNIQUE(agent_id, version)
+  );
+
+  CREATE TABLE IF NOT EXISTS source_configs (
+    storage_id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    auth_strategy TEXT NOT NULL DEFAULT 'none',
+    secret_ref TEXT,
+    browser_profile_id TEXT,
+    terms_approved_at TEXT,
+    terms_approved_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, id)
   );
 
   CREATE TABLE IF NOT EXISTS job_enrichment_events (
@@ -132,6 +175,47 @@ db.exec(`
     source_url TEXT NOT NULL,
     fields_changed TEXT NOT NULL,
     evidence_excerpt TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS evidence_records (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    agent_id TEXT REFERENCES agent_configs(id) ON DELETE SET NULL,
+    run_id TEXT,
+    source_id TEXT,
+    source_url TEXT NOT NULL,
+    field_path TEXT NOT NULL,
+    excerpt TEXT NOT NULL DEFAULT '',
+    observed_value_hash TEXT NOT NULL,
+    observed_value_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    origin TEXT NOT NULL CHECK(origin IN ('agent','human','legacy','calculated')),
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','stale','superseded')),
+    retrieved_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS job_field_provenance (
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    field_path TEXT NOT NULL,
+    evidence_id TEXT NOT NULL REFERENCES evidence_records(id) ON DELETE RESTRICT,
+    selected_by TEXT NOT NULL,
+    selected_at TEXT NOT NULL,
+    superseded_at TEXT,
+    PRIMARY KEY(job_id, field_path, evidence_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS field_conflicts (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    field_path TEXT NOT NULL,
+    current_evidence_id TEXT REFERENCES evidence_records(id) ON DELETE SET NULL,
+    candidate_evidence_id TEXT NOT NULL REFERENCES evidence_records(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','resolved_current','resolved_candidate')),
+    reason TEXT NOT NULL,
+    reviewed_by TEXT,
+    reviewed_at TEXT,
     created_at TEXT NOT NULL
   );
 
@@ -221,7 +305,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_resumes_job ON resumes(job_id, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_agent_configs_project ON agent_configs(project_id, enabled);
+  CREATE INDEX IF NOT EXISTS idx_agent_versions ON agent_config_versions(agent_id, version DESC);
+  CREATE INDEX IF NOT EXISTS idx_source_configs_project ON source_configs(project_id, enabled);
   CREATE INDEX IF NOT EXISTS idx_job_enrichment_job ON job_enrichment_events(job_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_evidence_job_field ON evidence_records(job_id, field_path, retrieved_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_conflicts_job_status ON field_conflicts(job_id, status);
   CREATE INDEX IF NOT EXISTS idx_feedback_job ON job_feedback_events(job_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_rules_project_state ON preference_rules(project_id, state);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_question ON human_questions(application_id) WHERE status IN ('pending','delivered');
@@ -253,6 +341,12 @@ ensureColumn("jobs", "requirements", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("jobs", "responsibilities", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("jobs", "additional_information", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("agent_configs", "allowed_domains", "TEXT NOT NULL DEFAULT '[]'");
+ensureColumn("agent_configs", "version", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("agent_configs", "published_version_id", "TEXT");
+ensureColumn("agent_configs", "draft_version_id", "TEXT");
+ensureColumn("agent_runs", "agent_id", "TEXT");
+ensureColumn("agent_runs", "config_version_id", "TEXT");
+ensureColumn("agent_runs", "config_snapshot", "TEXT");
 
 function now() {
   return new Date().toISOString();
@@ -303,6 +397,29 @@ function parseJsonArray(value: unknown): string[] {
   }
 }
 
+function migrateExistingAgentVersions() {
+  const rows = db.prepare("SELECT * FROM agent_configs WHERE published_version_id IS NULL").all() as Record<string, unknown>[];
+  for (const row of rows) {
+    const snapshot = {
+      name: String(row.name), role_type: String(row.role_type), enabled: Number(row.enabled) === 1,
+      source_ids: parseJsonArray(row.source_ids), allowed_domains: parseJsonArray(row.allowed_domains), tool_scopes: parseJsonArray(row.tool_scopes),
+      browser_enabled: Number(row.browser_enabled) === 1, can_create_jobs: Number(row.can_create_jobs) === 1, can_edit_jobs: Number(row.can_edit_jobs) === 1,
+      editable_fields: parseJsonArray(row.editable_fields), concurrency: Number(row.concurrency), timeout_seconds: Number(row.timeout_seconds), prompt: String(row.prompt ?? "")
+    };
+    const json = JSON.stringify(snapshot);
+    const checksum = createHash("sha256").update(json).digest("hex");
+    const version = Math.max(1, Number(row.version ?? 1));
+    const versionId = idFor(`agent-version|${row.id}|${version}|${checksum}`);
+    const timestamp = now();
+    db.prepare(`INSERT OR IGNORE INTO agent_config_versions
+      (id,agent_id,version,status,config_json,checksum,created_by,created_at,published_by,published_at)
+      VALUES (?,?,?,'published',?,?, 'migration',?,'migration',?)`).run(versionId, String(row.id), version, json, checksum, timestamp, timestamp);
+    db.prepare("UPDATE agent_configs SET version=?,published_version_id=? WHERE id=?").run(version, versionId, String(row.id));
+  }
+}
+
+migrateExistingAgentVersions();
+
 function mapJob(row: Record<string, unknown>): Job {
   return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0) } as Job;
 }
@@ -336,7 +453,7 @@ export function listApplications(): Application[] {
 }
 
 export function listAgentRuns(): AgentRun[] {
-  return db.prepare("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 20").all() as unknown as AgentRun[];
+  return (db.prepare("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 20").all() as Record<string, unknown>[]).map((row) => ({ ...row, config_snapshot: row.config_snapshot ? JSON.parse(String(row.config_snapshot)) : null } as unknown as AgentRun));
 }
 
 function mapAgentConfig(row: Record<string, unknown>): AgentConfig {
@@ -351,12 +468,39 @@ function mapAgentConfig(row: Record<string, unknown>): AgentConfig {
     tool_scopes: parseJsonArray(row.tool_scopes),
     editable_fields: parseJsonArray(row.editable_fields),
     concurrency: Number(row.concurrency),
-    timeout_seconds: Number(row.timeout_seconds)
+    timeout_seconds: Number(row.timeout_seconds),
+    version: Number(row.version ?? 1),
+    published_version_id: row.published_version_id == null ? null : String(row.published_version_id),
+    draft_version_id: row.draft_version_id == null ? null : String(row.draft_version_id)
   } as AgentConfig;
 }
 
 export function listAgentConfigs(projectId = "busca-emprego"): AgentConfig[] {
   return (db.prepare("SELECT * FROM agent_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapAgentConfig);
+}
+
+function mapSourceConfig(row: Record<string, unknown>): SourceConfigRecord {
+  return { ...row, enabled: Number(row.enabled) === 1 } as unknown as SourceConfigRecord;
+}
+
+export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigRecord[] {
+  return (db.prepare("SELECT * FROM source_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapSourceConfig);
+}
+
+export function listAgentConfigVersions(agentId: string, projectId = "busca-emprego") {
+  if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new Error("agent.not_found");
+  return (db.prepare("SELECT id,agent_id,version,status,checksum,created_by,created_at,published_by,published_at FROM agent_config_versions WHERE agent_id=? ORDER BY version DESC").all(agentId) as Record<string, unknown>[])
+    .map((row) => ({ ...row, version: Number(row.version) }));
+}
+
+export function listFieldProvenance(jobId: string) {
+  if (!getJob(jobId)) throw new Error("job.not_found");
+  const evidence = db.prepare(`SELECT e.*, p.selected_by, p.selected_at, p.superseded_at,
+      CASE WHEN p.superseded_at IS NULL THEN 1 ELSE 0 END AS selected
+    FROM evidence_records e JOIN job_field_provenance p ON p.evidence_id=e.id
+    WHERE e.job_id=? ORDER BY e.field_path,e.retrieved_at DESC`).all(jobId);
+  const conflicts = db.prepare("SELECT * FROM field_conflicts WHERE job_id=? ORDER BY created_at DESC").all(jobId);
+  return { evidence, conflicts };
 }
 
 export function listJobEnrichmentEvents(jobId?: string) {
@@ -413,6 +557,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     companies: listCompanies(),
     agentRuns: listAgentRuns(),
     agentConfigs: listAgentConfigs(projectId),
+    sourceConfigs: listSourceConfigs(projectId),
     enrichmentEvents: listJobEnrichmentEvents(),
     stats: {
       total: jobs.length,
@@ -501,13 +646,44 @@ export function getJob(id: string) {
 
 const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source", "source_url", "linkedin_post_url", "job_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities", "additional_information", "match_score", "status", "posted_at"]);
 
-export function updateJob(id: string, patch: Record<string, unknown>) {
+function evidenceIdFor(jobId: string, field: string, value: unknown, timestamp: string) {
+  return idFor(`evidence|${jobId}|${field}|${JSON.stringify(value)}|${timestamp}|${Math.random()}`);
+}
+
+function addEvidence(input: {
+  projectId: string; jobId: string; field: string; value: unknown; sourceUrl: string; excerpt?: string;
+  confidence: number; origin: "agent" | "human" | "legacy" | "calculated"; agentId?: string; runId?: string; sourceId?: string;
+}) {
+  const timestamp = now();
+  const valueJson = JSON.stringify(input.value ?? null);
+  const id = evidenceIdFor(input.jobId, input.field, input.value, timestamp);
+  db.prepare(`INSERT INTO evidence_records
+    (id,project_id,job_id,agent_id,run_id,source_id,source_url,field_path,excerpt,observed_value_hash,observed_value_json,confidence,origin,state,retrieved_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?)`).run(id, input.projectId, input.jobId, input.agentId ?? null, input.runId ?? null, input.sourceId ?? null,
+      input.sourceUrl, input.field, (input.excerpt ?? "").slice(0, 500), createHash("sha256").update(valueJson).digest("hex"), valueJson,
+      Math.max(0, Math.min(1, input.confidence)), input.origin, timestamp);
+  return { id, timestamp };
+}
+
+function selectEvidence(jobId: string, field: string, evidenceId: string, selectedBy: string, timestamp = now()) {
+  db.prepare("UPDATE job_field_provenance SET superseded_at=? WHERE job_id=? AND field_path=? AND superseded_at IS NULL").run(timestamp, jobId, field);
+  db.prepare("UPDATE evidence_records SET state='superseded' WHERE id IN (SELECT evidence_id FROM job_field_provenance WHERE job_id=? AND field_path=? AND superseded_at=?)").run(jobId, field, timestamp);
+  db.prepare("INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at) VALUES (?,?,?,?,?)").run(jobId, field, evidenceId, selectedBy, timestamp);
+}
+
+export function updateJob(id: string, patch: Record<string, unknown>, options: { origin?: "human" | "system"; actor?: string; projectId?: string } = {}) {
   if (patch.status !== undefined) throw new Error("workflow.status_requires_transition_command");
   const entries = Object.entries(patch).filter(([key]) => editableJobFields.has(key));
   if (!entries.length) return getJob(id);
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
   const values = entries.map(([, value]) => value ?? null);
   db.prepare(`UPDATE jobs SET ${set}, updated_at = ? WHERE id = ?`).run(...(values as any[]), now(), id);
+  if ((options.origin ?? "human") === "human") {
+    for (const [field, value] of entries) {
+      const evidence = addEvidence({ projectId: options.projectId ?? "busca-emprego", jobId: id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
+      selectEvidence(id, field, evidence.id, options.actor ?? "user", evidence.timestamp);
+    }
+  }
   audit("job", id, "updated", { changed_fields: Object.keys(patch) });
   return getJob(id);
 }
@@ -781,8 +957,18 @@ export function updateApplication(id: string, patch: Partial<Application>) {
 export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }) {
   const id = input.id || idFor(`run|${input.agent_name}|${Date.now()}`);
   const timestamp = now();
-  db.prepare("INSERT OR REPLACE INTO agent_runs (id,agent_name,status,started_at,finished_at,found_count,message) VALUES (?,?,?,?,?,?,?)").run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "");
-  audit("agent_run", id, "status", { status: input.status, found_count: input.found_count ?? 0 });
+  let versionId = input.config_version_id ?? null;
+  let snapshot = input.config_snapshot ?? null;
+  if (input.agent_id && (!versionId || !snapshot)) {
+    const agent = listAgentConfigs().find((item) => item.id === input.agent_id);
+    if (!agent?.published_version_id) throw new Error("agent.published_version.required");
+    const version = db.prepare("SELECT id,config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { id: string; config_json: string } | undefined;
+    if (!version) throw new Error("agent.published_version.required");
+    versionId = version.id;
+    snapshot = JSON.parse(version.config_json);
+  }
+  db.prepare("INSERT OR REPLACE INTO agent_runs (id,agent_name,status,started_at,finished_at,found_count,message,agent_id,config_version_id,config_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)").run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "", input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null);
+  audit("agent_run", id, "status", { status: input.status, found_count: input.found_count ?? 0, agent_id: input.agent_id ?? null, config_version_id: versionId });
   return listAgentRuns().find((run) => run.id === id) ?? null;
 }
 
@@ -988,13 +1174,50 @@ function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
   }
 }
 
+function configSnapshot(values: ReturnType<typeof validateAgentConfigInput>) {
+  return {
+    name: values.name, role_type: values.roleType, enabled: Boolean(values.enabled), source_ids: values.sourceIds,
+    allowed_domains: values.allowedDomains, tool_scopes: values.toolScopes, browser_enabled: values.browserEnabled,
+    can_create_jobs: values.canCreate, can_edit_jobs: values.canEdit, editable_fields: values.editableFields,
+    concurrency: values.concurrency, timeout_seconds: values.timeoutSeconds, prompt: values.prompt
+  };
+}
+
+function insertAgentVersion(agentId: string, version: number, status: "draft" | "published", values: ReturnType<typeof validateAgentConfigInput>, actor: string) {
+  const snapshot = configSnapshot(values);
+  const json = JSON.stringify(snapshot);
+  const checksum = createHash("sha256").update(json).digest("hex");
+  const id = idFor(`agent-version|${agentId}|${version}|${checksum}`);
+  const timestamp = now();
+  db.prepare(`INSERT INTO agent_config_versions
+    (id,agent_id,version,status,config_json,checksum,created_by,created_at,published_by,published_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, agentId, version, status, json, checksum, actor, timestamp, status === "published" ? actor : null, status === "published" ? timestamp : null);
+  return id;
+}
+
+function publishedAgentConfig(agentId: string, projectId: string): AgentConfig | null {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
+  if (!agent?.published_version_id) return null;
+  const row = db.prepare("SELECT config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { config_json: string } | undefined;
+  if (!row) return null;
+  const snapshot = JSON.parse(row.config_json) as ReturnType<typeof configSnapshot>;
+  return {
+    ...agent, name: snapshot.name, role_type: snapshot.role_type as AgentConfig["role_type"], enabled: snapshot.enabled,
+    source_ids: snapshot.source_ids, allowed_domains: snapshot.allowed_domains, tool_scopes: snapshot.tool_scopes,
+    browser_enabled: snapshot.browser_enabled, can_create_jobs: snapshot.can_create_jobs, can_edit_jobs: snapshot.can_edit_jobs,
+    editable_fields: snapshot.editable_fields, concurrency: snapshot.concurrency, timeout_seconds: snapshot.timeout_seconds, prompt: snapshot.prompt
+  };
+}
+
 export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const values = validateAgentConfigInput(input);
   const id = idFor(`agent|${projectId}|${Date.now()}|${values.name}`);
   const timestamp = now();
   db.prepare(`INSERT INTO agent_configs
-    (id,project_id,name,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, timestamp, timestamp);
+    (id,project_id,name,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,version,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, 1, timestamp, timestamp);
+  const versionId = insertAgentVersion(id, 1, "published", values, actor);
+  db.prepare("UPDATE agent_configs SET published_version_id=? WHERE id=?").run(versionId, id);
   audit("agent_config", id, "created", { actor, role_type: values.roleType, tool_scopes: values.toolScopes, editable_fields: values.editableFields });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
@@ -1004,10 +1227,43 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   if (!current) throw new Error("agent.not_found");
   const merged = { ...current, ...input } as unknown as Record<string, unknown>;
   const values = validateAgentConfigInput(merged);
-  db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,updated_at=? WHERE id=? AND project_id=?`)
-    .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, now(), id, projectId);
-  audit("agent_config", id, "updated", { actor, changed_fields: Object.keys(input) });
+  const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
+  const versionId = insertAgentVersion(id, nextVersion, "draft", values, actor);
+  db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
+    .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, nextVersion, versionId, now(), id, projectId);
+  audit("agent_config", id, "draft_created", { actor, version: nextVersion, version_id: versionId, changed_fields: Object.keys(input) });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
+}
+
+export function publishAgentConfigVersion(agentId: string, versionId: string, actor: string, projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
+  const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
+  if (!agent || !version) throw new Error("agent.version.not_found");
+  if (version.status !== "draft") throw new Error("agent.version.not_draft");
+  const snapshot = JSON.parse(String(version.config_json)) as Record<string, unknown>;
+  const values = validateAgentConfigInput(snapshot);
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE agent_config_versions SET status='retired' WHERE agent_id=? AND status='published'").run(agentId);
+    db.prepare("UPDATE agent_config_versions SET status='published',published_by=?,published_at=? WHERE id=?").run(actor, timestamp, versionId);
+    db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,version=?,published_version_id=?,draft_version_id=NULL,updated_at=? WHERE id=? AND project_id=?`)
+      .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, Number(version.version), versionId, timestamp, agentId, projectId);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  audit("agent_config", agentId, "published", { actor, version: Number(version.version), version_id: versionId });
+  return listAgentConfigs(projectId).find((item) => item.id === agentId) ?? null;
+}
+
+export function rollbackAgentConfig(agentId: string, targetVersionId: string, actor: string, projectId = "busca-emprego") {
+  const target = db.prepare("SELECT config_json,version FROM agent_config_versions WHERE id=? AND agent_id=?").get(targetVersionId, agentId) as { config_json: string; version: number } | undefined;
+  if (!target || !listAgentConfigs(projectId).some((item) => item.id === agentId)) throw new Error("agent.version.not_found");
+  const values = validateAgentConfigInput(JSON.parse(target.config_json));
+  const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(agentId) as { version: number }).version);
+  const versionId = insertAgentVersion(agentId, nextVersion, "draft", values, actor);
+  const result = publishAgentConfigVersion(agentId, versionId, actor, projectId);
+  audit("agent_config", agentId, "rolled_back", { actor, target_version_id: targetVersionId, target_version: target.version, published_as: nextVersion });
+  return result;
 }
 
 export function deleteAgentConfig(id: string, actor: string, projectId = "busca-emprego") {
@@ -1018,21 +1274,76 @@ export function deleteAgentConfig(id: string, actor: string, projectId = "busca-
   return { deleted: true };
 }
 
+const sourceTypes = new Set(["linkedin", "glassdoor", "company_site", "job_board", "custom"]);
+const sourceAuthStrategies = new Set(["none", "bearer", "basic", "browser_profile"]);
+
+function validateSourceConfig(input: Record<string, unknown>) {
+  const id = String(input.id ?? "").trim().toLowerCase();
+  const name = String(input.name ?? "").trim();
+  const sourceType = String(input.source_type ?? "");
+  const domain = String(input.domain ?? "").trim().toLowerCase();
+  const authStrategy = String(input.auth_strategy ?? "none");
+  const secretRef = input.secret_ref == null || input.secret_ref === "" ? null : String(input.secret_ref);
+  const browserProfileId = input.browser_profile_id == null || input.browser_profile_id === "" ? null : String(input.browser_profile_id);
+  if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id) || name.length < 2 || name.length > 100) throw new Error("source.identity.invalid");
+  if (!sourceTypes.has(sourceType) || !sourceAuthStrategies.has(authStrategy)) throw new Error("source.type.invalid");
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)) throw new Error("source.domain.invalid");
+  if (secretRef && !/^(?:hermes|vault):\/\/[A-Za-z0-9_.:/-]{1,150}$/.test(secretRef)) throw new Error("source.secret_ref.invalid");
+  if (["bearer", "basic"].includes(authStrategy) && !secretRef) throw new Error("source.secret_ref.required");
+  if (authStrategy === "browser_profile" && !browserProfileId) throw new Error("source.browser_profile.required");
+  return { id, name, sourceType, domain, authStrategy, secretRef, browserProfileId, enabled: input.enabled === false ? 0 : 1 };
+}
+
+export function upsertSourceConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
+  const value = validateSourceConfig(input);
+  const existing = db.prepare("SELECT id,terms_approved_at,terms_approved_by,created_at FROM source_configs WHERE id=? AND project_id=?").get(value.id, projectId) as Record<string, unknown> | undefined;
+  const approvalRequested = String(input.terms_confirmation ?? "") === "APROVO OS TERMOS DA FONTE";
+  const termsApprovedAt = approvalRequested ? now() : existing?.terms_approved_at == null ? null : String(existing.terms_approved_at);
+  const termsApprovedBy = approvalRequested ? actor : existing?.terms_approved_by == null ? null : String(existing.terms_approved_by);
+  if (value.enabled && !termsApprovedAt) throw new Error("source.terms_approval.required");
+  const timestamp = now();
+  db.prepare(`INSERT INTO source_configs
+    (storage_id,id,project_id,name,source_type,domain,enabled,auth_strategy,secret_ref,browser_profile_id,terms_approved_at,terms_approved_by,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(project_id,id) DO UPDATE SET name=excluded.name,source_type=excluded.source_type,domain=excluded.domain,enabled=excluded.enabled,
+      auth_strategy=excluded.auth_strategy,secret_ref=excluded.secret_ref,browser_profile_id=excluded.browser_profile_id,
+      terms_approved_at=excluded.terms_approved_at,terms_approved_by=excluded.terms_approved_by,updated_at=excluded.updated_at`)
+    .run(idFor(`source|${projectId}|${value.id}`), value.id, projectId, value.name, value.sourceType, value.domain, value.enabled, value.authStrategy, value.secretRef, value.browserProfileId, termsApprovedAt, termsApprovedBy, existing ? String((existing as any).created_at ?? timestamp) : timestamp, timestamp);
+  audit("source_config", value.id, existing ? "updated" : "created", { actor, project_id: projectId, source_type: value.sourceType, domain: value.domain, auth_strategy: value.authStrategy, secret_ref_configured: Boolean(value.secretRef) });
+  return listSourceConfigs(projectId).find((source) => source.id === value.id) ?? null;
+}
+
+export function deleteSourceConfig(id: string, actor: string, projectId = "busca-emprego") {
+  if (listAgentConfigs(projectId).some((agent) => agent.source_ids.includes(id))) throw new Error("source.in_use.disable_instead");
+  const result = db.prepare("DELETE FROM source_configs WHERE id=? AND project_id=?").run(id, projectId);
+  if (!result.changes) throw new Error("source.not_found");
+  audit("source_config", id, "deleted", { actor, project_id: projectId });
+  return { deleted: true };
+}
+
 export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
-  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId && item.enabled);
+  const agent = publishedAgentConfig(agentId, projectId);
   if (!agent || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
+  if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
   const identityUrl = input.job_url || input.linkedin_post_url || input.application_url || input.source_url;
   const canonicalIdentityUrl = identityUrl ? canonicalizeJobUrl(identityUrl) : "";
   const candidateId = input.id || idFor(`${input.source}|${canonicalIdentityUrl}|${input.title}|${input.company}`);
   if (getJob(candidateId)) throw new Error("agent.jobs.create_existing.forbidden");
   const job = upsertJob(input);
+  if (job) {
+    for (const [field, value] of Object.entries(input)) {
+      if (field === "id" || value == null || value === "") continue;
+      const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl: job.source_url, confidence: 0.8, origin: "agent", agentId, sourceId: input.source });
+      selectEvidence(job.id, field, evidence.id, agentId, evidence.timestamp);
+    }
+  }
   audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
   return job;
 }
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
-  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId && item.enabled);
+  const agent = publishedAgentConfig(agentId, projectId);
   if (!agent || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
   const current = getJob(jobId);
   if (!current) throw new Error("job.not_found");
@@ -1058,12 +1369,68 @@ export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record
     longitude: normalizedPatch.longitude === undefined ? current.longitude : normalizedPatch.longitude == null ? null : Number(normalizedPatch.longitude)
   });
   if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
-  const job = updateJob(jobId, normalizedPatch);
+  const acceptedPatch: Record<string, unknown> = {};
+  const conflicts: string[] = [];
+  const selectedEvidenceIds: string[] = [];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const [field, value] of Object.entries(normalizedPatch)) {
+      const candidate = addEvidence({ projectId, jobId, field, value, sourceUrl, excerpt: evidenceExcerpt, confidence: 0.8, origin: "agent", agentId, sourceId: current.source });
+      const selected = db.prepare(`SELECT e.id,e.confidence,e.origin,e.observed_value_json
+        FROM job_field_provenance p JOIN evidence_records e ON e.id=p.evidence_id
+        WHERE p.job_id=? AND p.field_path=? AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(jobId, field) as { id: string; confidence: number; origin: string; observed_value_json: string } | undefined;
+      const currentValue = (current as unknown as Record<string, unknown>)[field];
+      const emptyCurrent = currentValue == null || currentValue === "" || currentValue === "Não informado" || currentValue === "unknown";
+      const sameValue = JSON.stringify(currentValue ?? null) === JSON.stringify(value ?? null);
+      let currentEvidence = selected;
+      if (!currentEvidence && !emptyCurrent) {
+        const legacy = addEvidence({ projectId, jobId, field, value: currentValue, sourceUrl: "legacy://job", confidence: 0.75, origin: "legacy" });
+        selectEvidence(jobId, field, legacy.id, "migration", legacy.timestamp);
+        currentEvidence = { id: legacy.id, confidence: 0.75, origin: "legacy", observed_value_json: JSON.stringify(currentValue ?? null) };
+      }
+      if (sameValue && currentEvidence) {
+        db.prepare("INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at) VALUES (?,?,?,?,?)").run(jobId, field, candidate.id, agentId, candidate.timestamp);
+        selectedEvidenceIds.push(candidate.id);
+      } else if (!currentEvidence || emptyCurrent || (currentEvidence.origin !== "human" && 0.8 >= Number(currentEvidence.confidence) + 0.15)) {
+        acceptedPatch[field] = value;
+        selectEvidence(jobId, field, candidate.id, agentId, candidate.timestamp);
+        selectedEvidenceIds.push(candidate.id);
+      } else {
+        const conflictId = idFor(`conflict|${jobId}|${field}|${candidate.id}`);
+        db.prepare(`INSERT INTO field_conflicts (id,job_id,field_path,current_evidence_id,candidate_evidence_id,status,reason,created_at)
+          VALUES (?,?,?,?,?,'pending',?,?)`).run(conflictId, jobId, field, currentEvidence.id, candidate.id,
+            currentEvidence.origin === "human" ? "human_value_protected" : "source_disagreement", candidate.timestamp);
+        conflicts.push(conflictId);
+      }
+    }
+    if (Object.keys(acceptedPatch).length) updateJob(jobId, acceptedPatch, { origin: "system" });
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  const job = getJob(jobId);
   const eventId = idFor(`enrichment|${agentId}|${jobId}|${Date.now()}`);
   db.prepare("INSERT INTO job_enrichment_events (id,job_id,agent_id,source_url,fields_changed,evidence_excerpt,created_at) VALUES (?,?,?,?,?,?,?)")
     .run(eventId, jobId, agentId, sourceUrl, JSON.stringify(entries.map(([key]) => key)), evidenceExcerpt.slice(0, 500), now());
   audit("job", jobId, "enriched_by_agent", { agent_id: agentId, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });
-  return { job, enrichment_event_id: eventId };
+  return { job, enrichment_event_id: eventId, selected_evidence_ids: selectedEvidenceIds, conflict_ids: conflicts };
+}
+
+export function resolveFieldConflict(conflictId: string, choice: "current" | "candidate", actor: string) {
+  const conflict = db.prepare("SELECT * FROM field_conflicts WHERE id=? AND status='pending'").get(conflictId) as Record<string, unknown> | undefined;
+  if (!conflict) throw new Error("field_conflict.not_found");
+  const evidenceId = choice === "candidate" ? String(conflict.candidate_evidence_id) : String(conflict.current_evidence_id ?? "");
+  const evidence = db.prepare("SELECT * FROM evidence_records WHERE id=?").get(evidenceId) as Record<string, unknown> | undefined;
+  if (!evidence) throw new Error("field_conflict.evidence_not_found");
+  const value = JSON.parse(String(evidence.observed_value_json));
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (choice === "candidate") updateJob(String(conflict.job_id), { [String(conflict.field_path)]: value }, { origin: "system" });
+    selectEvidence(String(conflict.job_id), String(conflict.field_path), evidenceId, actor, timestamp);
+    db.prepare("UPDATE field_conflicts SET status=?,reviewed_by=?,reviewed_at=? WHERE id=?").run(choice === "candidate" ? "resolved_candidate" : "resolved_current", actor, timestamp, conflictId);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  audit("field_conflict", conflictId, "resolved", { actor, choice, evidence_id: evidenceId });
+  return db.prepare("SELECT * FROM field_conflicts WHERE id=?").get(conflictId);
 }
 
 export function seedDemo() {

@@ -2,7 +2,14 @@
 
 Este documento descreve a API do Radar para os agentes Hermes. A API usa JSON e persiste os dados em SQLite no mesmo ambiente Node.js do dashboard.
 
-Este documento descreve a API implementada. Requisitos-alvo ainda não entregues, como versionamento imutável de agentes e proveniência por campo, ficam no SDD e na checklist de release.
+Este documento descreve a API implementada, incluindo versões imutáveis de agentes, fontes com credenciais referenciadas no Hermes e proveniência por campo.
+
+## Configuração operacional v0.3
+
+- `GET/POST /api/sources` e `PUT/DELETE /api/sources/{id}` configuram fonte, domínio, aceite de termos e somente a referência de autenticação do Hermes. Para Glassdoor autenticado, prefira `auth_strategy=browser_profile` e `browser_profile_id`; nunca envie cookie, senha ou token.
+- `GET /api/agents/{id}/versions` lista snapshots. `POST /api/agents/{id}/publish` recebe `{"version_id":"..."}`; `POST /api/agents/{id}/rollback` recebe a versão histórica a republicar. `PATCH` cria um rascunho e não altera execuções presas ao snapshot publicado.
+- `GET /api/jobs/{id}/provenance` retorna evidências e conflitos por campo. `POST /api/field-conflicts/{id}/resolve` aceita `{"choice":"current"}` ou `{"choice":"candidate"}` e registra o revisor.
+- Eventos `agent.status` podem informar `agent_id`; o backend prende `config_version_id` e `config_snapshot` à execução. Versões em rascunho nunca governam uma execução.
 
 ## Conexão
 

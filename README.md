@@ -20,7 +20,7 @@ O banco inicia vazio. Dados demonstrativos só são criados com `RADAR_SEED_DEMO
 
 ## Agentes, permissões e navegação
 
-O dashboard atual permite criar, editar, habilitar, pausar e personalizar agentes. O usuário administrador precisa de `agents.manage`. Versionamento imutável, publicação e rollback de configurações ainda são gates de produção pendentes.
+O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. O usuário administrador precisa de `agents.manage`. Cada alteração gera uma versão imutável em rascunho; publicação e rollback são explícitos, e cada execução guarda a versão/snapshot publicado.
 
 As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. A credencial HTTP do Hermes usa o escopo externo `jobs.write`; o servidor ainda cruza esse escopo com a configuração persistida do agente.
 
@@ -36,7 +36,7 @@ As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs
 
 Aprovar um currículo não autoriza envio automático. A fila `GET /api/authorized-applications` só inclui autorizações atuais, para currículo ainda aprovado e na mesma versão autorizada. Alterar o currículo ou retirar o interesse invalida a autorização. Um executor Browser Harness do Hermes precisa consultar essa rota para realizar qualquer ação no portal; este repositório fornece o contrato e a fila, mas não executa candidaturas por conta própria. O app só registra uma candidatura enviada quando recebe a confirmação correspondente.
 
-No Kanban atual, os cartões permanecem compactos. Ao abrir um cartão, o usuário vê descrição completa, requisitos, responsabilidades, benefícios e o histórico de enriquecimentos. Há campos separados para o post do LinkedIn (`linkedin_post_url`), a página da vaga (`job_url`) e, quando diferente, o formulário de candidatura (`application_url`). A proveniência por campo ainda é um gate pendente; hoje a evidência é registrada por evento de enriquecimento.
+No Kanban atual, os cartões permanecem compactos. Ao abrir um cartão, o usuário vê descrição completa, requisitos, responsabilidades, benefícios e o histórico de enriquecimentos. Há campos separados para o post do LinkedIn (`linkedin_post_url`), a página da vaga (`job_url`) e, quando diferente, o formulário de candidatura (`application_url`). A API registra evidência por campo; divergências entre fontes ou contra um valor humano ficam pendentes para resolução, sem sobrescrita silenciosa.
 
 ## Currículos-base e mapa
 
@@ -51,6 +51,7 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | Método | Endpoint | Uso |
 | --- | --- | --- |
 | `GET` | `/api/health` | Verificar se o processo responde |
+| `GET` | `/api/ready` | Verificar banco, ambiente e operador |
 | `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, métricas e metadados dos PDFs |
 | `POST` | `/api/agent-events` | Registrar vaga descoberta/atualizada ou estado do agente |
 | `POST` | `/api/jobs/{id}/decision` | Registrar decisão explícita do usuário |
@@ -62,9 +63,14 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `GET` | `/api/authorized-applications` | Entregar ao executor apenas candidaturas explicitamente autorizadas |
 | `GET` | `/api/preferences` | Consultar regras, sinais e sugestões de preferências |
 | `POST` | `/api/applications/{id}/questions` | Pausar candidatura por dúvida humana correlacionada |
+| `GET` / `POST` | `/api/sources` | Configurar fontes e referências de credenciais do Hermes |
+| `GET` | `/api/agents/{id}/versions` | Consultar histórico imutável de configuração |
+| `POST` | `/api/agents/{id}/publish` | Publicar um rascunho para novas execuções |
+| `POST` | `/api/agents/{id}/rollback` | Republicar uma configuração anterior como nova versão |
+| `GET` | `/api/jobs/{id}/provenance` | Consultar evidências e conflitos por campo |
 
-Salários precisam de fonte e data verificáveis. Não faça scraping do LinkedIn ou Glassdoor; use integrações permitidas, APIs oficiais, alertas e links ou dados fornecidos.
+Salários precisam de fonte e data verificáveis. LinkedIn, Glassdoor e outras fontes só podem ser habilitados após aprovação dos termos e por integração permitida. Credenciais ficam no Hermes; o banco guarda apenas `secret_ref` ou `browser_profile_id`.
 
 ## Operação
 
-O projeto inclui CI e utilitários de backup, restore e health check para SQLite, sem criar um Docker separado. Consulte o [`runbook de staging/produção`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). Esses artefatos não tornam o protótipo pronto para produção: os adapters reais do Hermes/Browser Harness, Telegram, Geoapify e os demais gates do SDD ainda precisam de integração e validação no ambiente real.
+O projeto inclui CI, staging isolado, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar um Docker separado. `npm test` executa também E2E HTTP, segurança, carga de 10 fontes/500 resultados/20 workers e restore. Consulte o [`runbook de staging/produção`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A promoção continua bloqueada até conectar endpoints, perfis e secrets reais do Hermes e executar os mesmos testes no staging/produção.

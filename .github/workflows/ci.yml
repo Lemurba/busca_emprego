@@ -34,3 +34,9 @@ jobs:
           node scripts/ops/backup-sqlite.mjs --help
           node scripts/ops/restore-sqlite.mjs --help
           node scripts/ops/health-check.mjs --help
+      - name: Verificar ausência de secrets versionados
+        run: |
+          if git grep -nE '(TELEGRAM_BOT_TOKEN|GLASSDOOR_PASSWORD|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer [A-Za-z0-9_-]{24,})' -- ':!package-lock.json' ':!.github/workflows/ci.yml'; then
+            echo 'Possível secret versionado' >&2
+            exit 1
+          fi

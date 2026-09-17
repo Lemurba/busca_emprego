@@ -49,9 +49,10 @@ type BaseResume = { id: string; title: string; file_name: string; mime_type: "ap
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
 type AgentRun = { id: string; agent_name: string; status: string; started_at: string; finished_at: string | null; found_count: number; message: string };
-type AgentConfig = { id: string; name: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string };
+type AgentConfig = { id: string; name: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; version: number; published_version_id: string | null; draft_version_id: string | null };
+type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; enrichmentEvents: EnrichmentEvent[]; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; stats: Record<string, any> };
 
 const statusLabels: Record<string, string> = {
   found: "Encontrada", validation: "Validar", strong_match: "Match forte", review: "Em revisão", selected: "Selecionada", resume: "Currículo", resume_approved: "Currículo aprovado", ready_to_apply: "Pronta", applying: "Candidatando", applied: "Candidatado", discarded: "Descartada", expired: "Perdida"
@@ -301,7 +302,7 @@ function renderAgents(data: Data) {
     <div class="tag-list">${agent.browser_enabled ? `<span class="tag">Browser Harness: leitura</span>` : ""}${agent.can_create_jobs ? `<span class="tag">Cria vagas</span>` : ""}${agent.can_edit_jobs ? `<span class="tag">Enriquece vagas</span>` : ""}</div>
     <p><strong>Fontes:</strong> ${escapeHtml(agent.source_ids.join(", ") || "Não informadas")}</p><p><strong>Domínios permitidos:</strong> ${escapeHtml(agent.allowed_domains.join(", ") || "Nenhum")}</p>
     <p><strong>Campos editáveis:</strong> ${escapeHtml(agent.editable_fields.join(", ") || "Nenhum")}</p>
-    <div class="card-footer"><span>${agent.concurrency} trabalho(s) · ${agent.timeout_seconds}s</span><button class="secondary-button" data-edit-agent="${escapeHtml(agent.id)}">Editar</button></div>
+    <div class="card-footer"><span>v${agent.version} · ${agent.draft_version_id ? "Rascunho não publicado" : "Publicada"}</span><div class="button-row">${agent.draft_version_id ? `<button class="primary-button" data-publish-agent="${escapeHtml(agent.id)}" data-version-id="${escapeHtml(agent.draft_version_id)}">Publicar</button>` : ""}<button class="secondary-button" data-agent-history="${escapeHtml(agent.id)}">Histórico</button><button class="secondary-button" data-edit-agent="${escapeHtml(agent.id)}">Editar</button></div></div>
   </article>`).join("");
   return `${pageHeading("Orquestração Hermes", "Agentes configuráveis", "Crie agentes de coleta e enriquecimento com capacidades explícitas e campos editáveis limitados.", `<button class="primary-button" data-action="add-agent">＋ Novo agente</button>`)}
     <div class="notice warning"><span>!</span><div><strong>Browser Harness somente para leitura autorizada.</strong> O agente pode visitar fontes permitidas, extrair informações e enriquecer vagas. Isso não concede autorização de candidatura, não contorna login, CAPTCHA, paywall ou termos da fonte.</div></div>
@@ -309,9 +310,10 @@ function renderAgents(data: Data) {
 }
 
 function renderSettings(data: Data) {
+  const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(source.source_type)}</td><td>${escapeHtml(source.auth_strategy)}</td><td><span class="status-pill ${source.enabled ? "teal" : "red"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}">Editar</button></td></tr>`).join("");
   return `${pageHeading("Sistema", "Configurações", "Preferências do workspace e pontos de integração com o Hermes Agent.")}
     <div class="dashboard-grid equal"><section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Perfil de busca</h2><p>Configuração privada do workspace</p></div><span class="chip teal">Local</span></div><p>O perfil e os critérios de busca devem ser configurados no Hermes. Nenhum nome ou preferência pessoal fica embutido nesta aplicação.</p></section>
-      <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Fontes e limites</h2><p>Como os dados podem entrar no painel</p></div></div><table class="source-table"><tr><td>Portais</td><td>Ingestão por evento do Hermes, API oficial, alerta ou link fornecido.</td></tr><tr><td>LinkedIn</td><td>Use integrações autorizadas, alertas e links ou textos fornecidos.</td></tr><tr><td>Glassdoor</td><td>Registre salários somente com fonte, confiança e data verificáveis.</td></tr><tr><td>SQLite</td><td>Banco local persistido em <code>RADAR_DB_PATH</code>; vagas antigas são anonimizadas na primeira inicialização desta versão.</td></tr></table></section></div>
+      <section class="panel"><div class="section-head" style="margin-top:0"><div><h2>Fontes e credenciais</h2><p>Segredos permanecem no Hermes</p></div><button class="primary-button" data-action="add-source">＋ Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Autorização</th><th>Estado</th><th></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section></div>
     <div class="section-head"><div><h2>Contrato de eventos para o Hermes</h2><p>O dashboard recebe descobertas e enriquecimentos identificados; o executor consulta a fila autorizada separadamente.</p></div></div><section class="panel"><code class="code-note">POST /api/agent-events\n\n{\n  "event": "job.discovered",\n  "agent_id": "...",\n  "job": {\n    "title": "...", "company": "...",\n    "source": "portal autorizado",\n    "source_url": "https://...",\n    "linkedin_post_url": "https://...",\n    "job_url": "https://...",\n    "description": "...", "benefits": "..."\n  }\n}\n\njob.updated exige evidence_source_url e respeita os campos editáveis do agente.\nGET /api/authorized-applications — somente itens autorizados para candidatura</code></section>
     <div class="notice warning" style="margin-top:18px"><span>!</span><div><strong>Autorização separada por vaga.</strong> Aprovar o currículo não autoriza candidatura automática. O modo automático exige confirmação escrita para uma vaga e uma versão específica do currículo. A integração Hermes/Browser Harness consome a fila autorizada; sem um executor configurado, nenhum envio é realizado.</div></div>`;
 }
@@ -463,6 +465,27 @@ function showAgentModal(id?: string) {
     </div><div class="modal-actions">${agent ? `<button type="button" class="secondary-button" data-delete-agent="${escapeHtml(agent.id)}">Excluir</button>` : ""}<button type="button" class="secondary-button" data-close-modal>Cancelar</button><button class="primary-button" type="submit">Salvar agente</button></div></form>`);
 }
 
+function showSourceModal(id?: string) {
+  const source = id ? currentData().sourceConfigs.find((item) => item.id === id) : undefined;
+  openModal(source ? "Editar fonte" : "Configurar fonte", "A aplicação guarda somente referências de secrets ou perfis administrados pelo Hermes.", `
+    <form data-form="source" ${source ? `data-source-id="${escapeHtml(source.id)}"` : ""}><div class="form-grid">
+      <div class="form-field"><label for="source-id">Identificador</label><input class="input" id="source-id" name="id" required ${source ? "readonly" : ""} value="${escapeHtml(source?.id ?? "")}" placeholder="glassdoor" /></div>
+      <div class="form-field"><label for="source-name">Nome</label><input class="input" id="source-name" name="name" required value="${escapeHtml(source?.name ?? "")}" /></div>
+      <div class="form-field"><label for="source-type">Tipo</label><select class="select" id="source-type" name="source_type">${["linkedin", "glassdoor", "company_site", "job_board", "custom"].map((value) => `<option value="${value}" ${source?.source_type === value ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+      <div class="form-field"><label for="source-domain">Domínio permitido</label><input class="input" id="source-domain" name="domain" required value="${escapeHtml(source?.domain ?? "")}" placeholder="glassdoor.com" /></div>
+      <div class="form-field"><label for="source-auth">Autorização</label><select class="select" id="source-auth" name="auth_strategy">${["none", "bearer", "basic", "browser_profile"].map((value) => `<option value="${value}" ${source?.auth_strategy === value ? "selected" : ""}>${value}</option>`).join("")}</select></div>
+      <div class="form-field"><label for="source-secret-ref">Referência do secret</label><input class="input" id="source-secret-ref" name="secret_ref" value="${escapeHtml(source?.secret_ref ?? "")}" placeholder="hermes://sources/glassdoor" /></div>
+      <div class="form-field full"><label for="source-profile">Perfil autenticado do Browser Harness</label><input class="input" id="source-profile" name="browser_profile_id" value="${escapeHtml(source?.browser_profile_id ?? "")}" placeholder="hermes/glassdoor" /></div>
+      <div class="form-field"><label><input type="checkbox" name="enabled" ${source?.enabled === false ? "" : "checked"} /> Fonte ativa</label></div>
+      <div class="form-field full"><label for="source-terms">Confirmação dos termos</label><input class="input" id="source-terms" name="terms_confirmation" ${source?.terms_approved_at ? "" : "required"} placeholder="APROVO OS TERMOS DA FONTE" /></div>
+    </div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar fonte</button></div></form>`);
+}
+
+async function showAgentHistory(agentId: string) {
+  const versions = await fetchJson<Array<{ id: string; version: number; status: string; checksum: string; created_at: string }>>(`/api/agents/${encodeURIComponent(agentId)}/versions`);
+  openModal("Versões do agente", "Publicações e rollbacks preservam snapshots imutáveis.", `<div class="company-grid">${versions.map((version) => `<article class="company-card"><div class="company-top"><h3>Versão ${version.version}</h3><span class="status-pill ${version.status === "published" ? "teal" : "purple"}">${escapeHtml(version.status)}</span></div><p>${escapeHtml(formatDate(version.created_at))}</p><small>Checksum ${escapeHtml(version.checksum.slice(0, 12))}</small>${version.status !== "published" ? `<div class="modal-actions"><button class="secondary-button" data-rollback-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Restaurar esta versão</button></div>` : ""}</article>`).join("")}</div>`);
+}
+
 function showJobDetail(id: string) {
   const data = currentData();
   const job = data.jobs.find((item) => item.id === id);
@@ -509,6 +532,11 @@ function showJobDetail(id: string) {
       section("Outras informações", job.additional_information),
       enrichmentEvents.length ? `<section class="detail-section"><h3>Fontes e enriquecimentos</h3>${enrichmentEvents.map((event) => `<p><a href="${escapeHtml(event.source_url)}" target="_blank" rel="noreferrer">Fonte verificada ↗</a> · ${escapeHtml(formatDate(event.created_at))}<br><small>${escapeHtml(event.evidence_excerpt || "Campos atualizados pelo agente configurado.")}</small></p>`).join("")}</section>` : ""
     ].join("");
+    fetchJson<{ evidence: Array<{ id: string; field_path: string; source_url: string; confidence: number; origin: string; retrieved_at: string; selected: number }>; conflicts: Array<{ id: string; field_path: string; status: string; reason: string }> }>(`/api/jobs/${encodeURIComponent(job.id)}/provenance`).then((provenance) => {
+      if (!descriptionRoot.isConnected) return;
+      const active = provenance.evidence.filter((item) => item.selected);
+      descriptionRoot.insertAdjacentHTML("beforeend", `<section class="detail-section"><h3>Proveniência por campo</h3>${active.length ? active.map((item) => `<p><strong>${escapeHtml(item.field_path)}</strong> · ${escapeHtml(item.origin)} · ${Math.round(item.confidence * 100)}% · ${escapeHtml(formatDate(item.retrieved_at))}${item.source_url.startsWith("https://") ? ` · <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">evidência ↗</a>` : ""}</p>`).join("") : "<p>Nenhuma evidência por campo registrada.</p>"}${provenance.conflicts.filter((item) => item.status === "pending").map((item) => `<div class="notice warning"><span>!</span><div><strong>Conflito em ${escapeHtml(item.field_path)}</strong><br>${escapeHtml(item.reason)}<div class="button-row"><button class="secondary-button" data-resolve-conflict="${escapeHtml(item.id)}" data-choice="current">Manter atual</button><button class="primary-button" data-resolve-conflict="${escapeHtml(item.id)}" data-choice="candidate">Usar nova fonte</button></div></div></div>`).join("")}</section>`);
+    }).catch(() => { /* o detalhe principal continua disponível */ });
   }
 }
 
@@ -581,7 +609,13 @@ async function handleForm(form: HTMLFormElement) {
     };
     const id = form.dataset.agentId;
     await fetchJson(id ? `/api/agents/${encodeURIComponent(id)}` : "/api/agents", { method: id ? "PATCH" : "POST", body: JSON.stringify(body) });
-    closeModal(); await loadData(); state.page = "agents"; render(); toast(id ? "Agente atualizado." : "Agente criado."); return;
+    closeModal(); await loadData(); state.page = "agents"; render(); toast(id ? "Rascunho criado. Publique quando concluir a revisão." : "Agente criado e versão inicial publicada."); return;
+  }
+  if (form.dataset.form === "source") {
+    const id = form.dataset.sourceId || get("id");
+    const body = { id, name: get("name"), source_type: get("source_type"), domain: get("domain"), enabled: formData.has("enabled"), auth_strategy: get("auth_strategy"), secret_ref: get("secret_ref") || null, browser_profile_id: get("browser_profile_id") || null, terms_confirmation: get("terms_confirmation") };
+    await fetchJson(form.dataset.sourceId ? `/api/sources/${encodeURIComponent(id)}` : "/api/sources", { method: form.dataset.sourceId ? "PUT" : "POST", body: JSON.stringify(body) });
+    closeModal(); await loadData(); state.page = "settings"; render(); toast("Fonte configurada; nenhum valor secreto foi salvo."); return;
   }
   if (form.dataset.form === "resume") {
     const body = { base_resume_id: get("base_resume_id") || null, title: get("title"), status: get("status"), content: get("content"), keywords: get("keywords").split(",").map((item) => item.trim()).filter(Boolean), changes: get("changes").split("\n").map((item) => item.trim()).filter(Boolean) };
@@ -713,6 +747,7 @@ function bindViewEvents() {
     const action = target.closest<HTMLElement>("[data-action]");
     if (action?.dataset.action === "add-job") { showAddJobModal(); return; }
     if (action?.dataset.action === "add-agent") { showAgentModal(); return; }
+    if (action?.dataset.action === "add-source") { showSourceModal(); return; }
     if (action?.dataset.action === "mark-applied" && action.dataset.jobId) { await markApplied(action.dataset.jobId); return; }
     if (action?.dataset.action === "mark-interested" && action.dataset.jobId) { await markInterested(action.dataset.jobId); return; }
     if (action?.dataset.action === "not-interested" && action.dataset.jobId) { await markNotInterested(action.dataset.jobId); return; }
@@ -728,6 +763,12 @@ function bindViewEvents() {
     if (editResume) { showResumeModal(editResume); return; }
     const editAgent = target.closest<HTMLElement>("[data-edit-agent]")?.dataset.editAgent;
     if (editAgent) { showAgentModal(editAgent); return; }
+    const editSource = target.closest<HTMLElement>("[data-edit-source]")?.dataset.editSource;
+    if (editSource) { showSourceModal(editSource); return; }
+    const publish = target.closest<HTMLElement>("[data-publish-agent]");
+    if (publish?.dataset.publishAgent && publish.dataset.versionId) { await fetchJson(`/api/agents/${encodeURIComponent(publish.dataset.publishAgent)}/publish`, { method: "POST", body: JSON.stringify({ version_id: publish.dataset.versionId }) }); await loadData(); toast("Versão do agente publicada."); return; }
+    const history = target.closest<HTMLElement>("[data-agent-history]")?.dataset.agentHistory;
+    if (history) { await showAgentHistory(history); return; }
     } catch (error) {
       toast(error instanceof Error ? error.message : "Falha na operação", true);
     }
@@ -764,6 +805,19 @@ document.addEventListener("DOMContentLoaded", () => {
     if (approveButton?.dataset.approveResume) {
       try { await confirmResumeApproval(approveButton.dataset.approveResume); }
       catch (error) { toast(error instanceof Error ? error.message : "Falha ao aprovar currículo", true); }
+      return;
+    }
+    const rollback = target.closest<HTMLElement>("[data-rollback-agent]");
+    if (rollback?.dataset.rollbackAgent && rollback.dataset.versionId) {
+      if (!window.confirm("Restaurar esta configuração como uma nova versão publicada?")) return;
+      try { await fetchJson(`/api/agents/${encodeURIComponent(rollback.dataset.rollbackAgent)}/rollback`, { method: "POST", body: JSON.stringify({ version_id: rollback.dataset.versionId }) }); closeModal(); await loadData(); state.page = "agents"; render(); toast("Rollback publicado como nova versão."); }
+      catch (error) { toast(error instanceof Error ? error.message : "Falha no rollback", true); }
+      return;
+    }
+    const conflict = target.closest<HTMLElement>("[data-resolve-conflict]");
+    if (conflict?.dataset.resolveConflict && (conflict.dataset.choice === "current" || conflict.dataset.choice === "candidate")) {
+      try { await fetchJson(`/api/field-conflicts/${encodeURIComponent(conflict.dataset.resolveConflict)}/resolve`, { method: "POST", body: JSON.stringify({ choice: conflict.dataset.choice }) }); const jobId = state.selectedJobId; closeModal(); await loadData(); if (jobId) showJobDetail(jobId); toast("Conflito de fonte resolvido e auditado."); }
+      catch (error) { toast(error instanceof Error ? error.message : "Falha ao resolver conflito", true); }
       return;
     }
     const deleteAgent = target.closest<HTMLElement>("[data-delete-agent]")?.dataset.deleteAgent;

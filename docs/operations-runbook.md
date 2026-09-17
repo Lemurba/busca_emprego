@@ -32,6 +32,8 @@ Arquivos `.env` não são artefatos de deploy e já são ignorados pelo Git. Use
 
 ## 3. Deploy em staging
 
+Use `ops/hermes/staging.env.example`, `supervisord-radar-staging.conf.example` e `nginx-radar-staging.conf.example`. Staging usa release, banco, backup, porta e credenciais próprios; não reutilize perfil autenticado, destinatário Telegram ou token de produção. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela janela e é obrigatório em staging/produção.
+
 1. Criar release imutável a partir de commit identificado; registrar o SHA.
 2. Dentro do release, executar `npm ci`, `npm test` e `node test/ops.test.mjs`.
 3. Parar somente o processo Radar em staging.
@@ -54,6 +56,15 @@ Arquivos `.env` não são artefatos de deploy e já são ignorados pelo Git. Use
 
 7. Fazer smoke test autenticado pelo caminho real do Hermes: abrir dashboard, carregar `/api/bootstrap`, criar uma vaga sintética e conferir que ela não aparece em produção.
 8. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não promover com falhas, skips ou gates “não aplicáveis” sem aprovação registrada.
+9. Pelo endpoint TLS publicado, executar `RADAR_PUBLIC_URL=https://... RADAR_VERIFY_TOKEN=... node scripts/ops/verify-environment.mjs --environment staging`. O verificador exige health, readiness, operador, HSTS, bloqueio sem autenticação e bootstrap autenticado.
+
+### Publicação e rollback de agentes
+
+Editar um agente cria uma versão `draft`; a versão publicada continua governando novas execuções. Publique com `POST /api/agents/{id}/publish` e `version_id`. Rollback usa `POST /api/agents/{id}/rollback`, clona o snapshot escolhido como uma nova versão monotônica e a publica, preservando toda a auditoria. Nunca altere `config_json` diretamente no SQLite.
+
+### Fontes e credenciais
+
+Cadastre fontes em `/api/sources`. `auth_strategy` aceita `none`, `bearer`, `basic` ou `browser_profile`. Para `bearer/basic`, `secret_ref` é um identificador do secret store; para sessões como Glassdoor, use `browser_profile_id`. A API recusa fonte habilitada sem confirmação literal dos termos e recusa valores que aparentem ser segredo embutido. Rotação ocorre no Hermes sem regravar o segredo neste banco.
 
 ## 4. Promoção para produção
 
@@ -117,7 +128,7 @@ Não fazer downgrade de código sobre schema incompatível. Cada futura migraç�
 ## 8. Limitações operacionais conhecidas
 
 - `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume, mas ainda não mede filas/dependências.
-- O servidor atual não possui endpoint de readiness separado nem encerramento gracioso explícito.
+- `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
 - A API autentica e confere escopos por projeto/ferramenta; o rate limit ainda é local ao processo e SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
 - Não há migração versionada/rollback de schema, alertas, retenção automática ou teste de carga dos gates.

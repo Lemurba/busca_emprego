@@ -1,6 +1,6 @@
 # Plugin Busca Emprego para Hermes
 
-Scaffold portátil do runtime descrito em `docs/production-sdd-bdd-tdd.md`. Ele não presume uma API privada do Hermes: o host implementa `HermesRuntimeAdapter` para executar agentes, `ReadonlyBrowserHarnessAdapter` para leitura e `HermesTelegramCapability` para dúvidas de preparação. Tokens e destinatários não entram na configuração, banco ou logs deste plugin. Candidatura automática não é uma capability deste plugin.
+Runtime portátil descrito em `docs/production-sdd-bdd-tdd.md`. A versão 0.3 inclui adapters HTTPS concretos para Hermes, Browser Harness e o gateway Telegram. Tokens e destinatários não entram na configuração, banco ou logs: os adapters recebem apenas referências resolvidas pelo secret store do Hermes.
 
 ## Conteúdo
 
@@ -12,7 +12,7 @@ Scaffold portátil do runtime descrito em `docs/production-sdd-bdd-tdd.md`. Ele 
 - idempotência por rodada/fonte e interface substituível para armazenamento durável;
 - até três retentativas, com atrasos 1 s, 5 s e 15 s mais jitter; 401/403, schema inválido e bloqueio contratual são permanentes;
 - gate Telegram que mantém a preparação bloqueada diante de dúvida sem capacidade/destinatário do Hermes, limita uma pergunta ativa por candidatura e valida correlação e remetente;
-- Browser Harness somente leitura, disponível exclusivamente para scouting/enrichment; o plugin não abre, preenche ou envia candidaturas;
+- Browser Harness de leitura disponível exclusivamente para scouting/enrichment e adapter de candidatura separado, que exige autorização por vaga, currículo/versão e hash da URL; submissão sem evidência observável é rejeitada;
 - agentes configuráveis pelo dashboard, com capabilities fixadas por papel: prompt e customização nunca ampliam ferramentas;
 - testes isolados sem rede.
 
@@ -21,14 +21,13 @@ Scaffold portátil do runtime descrito em `docs/production-sdd-bdd-tdd.md`. Ele 
 ```ts
 import { Coordinator, TelegramQuestionGate } from "@busca-emprego/hermes-plugin";
 
-// Adapte a chamada real do Hermes a HermesRuntimeAdapter.
-// Não passe token Telegram: injete a capacidade segura já configurada no Hermes.
-// Para coleta/enriquecimento, adapte somente ReadonlyBrowserHarnessAdapter.readPage.
+// Os adapters concretos usam gateways HTTPS provisionados pelo Hermes.
+// Não passe bot token ou credencial da fonte: use referências/perfis do Hermes.
 const coordinator = new Coordinator({ runtime, idempotency, config, promptVersionId });
 const telegramGate = new TelegramQuestionGate(hermesTelegramCapability);
 ```
 
-Antes de produção, substitua `MemoryIdempotencyStore` por um adapter transacional/durável. Em mais de uma instância, a fila também precisa de backend compartilhado. A camada host deve validar os JSON Schemas, persistir snapshots/versões/auditoria e integrar a API documentada do dashboard. Este scaffold não inventa endpoints Hermes. Seu adapter de Browser Harness expõe apenas leitura e não oferece operações de clique, preenchimento, bypass ou submissão.
+Antes de produção, substitua `MemoryIdempotencyStore` por um adapter transacional/durável. Em mais de uma instância, a fila também precisa de backend compartilhado. Os caminhos de gateway são `v1/plugin-agents/invoke`, `v1/read`, `v1/applications/execute` e `v1/telegram/questions`; o proxy do Hermes deve mapeá-los às capacidades correspondentes. O executor nunca contorna CAPTCHA e só aceita `submitted` quando o Harness devolve `evidenceRef`.
 
 ## Verificação
 
