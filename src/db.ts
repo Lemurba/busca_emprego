@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, type TransitionInput } from "./workflow.js";
 import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "./domain.js";
+import { DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_AGENT_ALLOWED_DOMAINS } from "./agent-defaults.js";
 
 const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -117,6 +118,7 @@ db.exec(`
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL DEFAULT 'busca-emprego',
     name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     role_type TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     source_ids TEXT NOT NULL DEFAULT '[]',
@@ -348,6 +350,7 @@ ensureColumn("agent_configs", "published_version_id", "TEXT");
 ensureColumn("agent_configs", "draft_version_id", "TEXT");
 ensureColumn("agent_configs", "memory_enabled", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("agent_configs", "hermes_prompt_optimization", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("agent_configs", "description", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("agent_runs", "agent_id", "TEXT");
 ensureColumn("agent_runs", "config_version_id", "TEXT");
 ensureColumn("agent_runs", "config_snapshot", "TEXT");
@@ -405,7 +408,7 @@ function migrateExistingAgentVersions() {
   const rows = db.prepare("SELECT * FROM agent_configs WHERE published_version_id IS NULL").all() as Record<string, unknown>[];
   for (const row of rows) {
     const snapshot = {
-      name: String(row.name), role_type: String(row.role_type), enabled: Number(row.enabled) === 1,
+      name: String(row.name), description: String(row.description ?? ""), role_type: String(row.role_type), enabled: Number(row.enabled) === 1,
       source_ids: parseJsonArray(row.source_ids), allowed_domains: parseJsonArray(row.allowed_domains), tool_scopes: parseJsonArray(row.tool_scopes),
       browser_enabled: Number(row.browser_enabled) === 1, can_create_jobs: Number(row.can_create_jobs) === 1, can_edit_jobs: Number(row.can_edit_jobs) === 1,
       editable_fields: parseJsonArray(row.editable_fields), concurrency: Number(row.concurrency), timeout_seconds: Number(row.timeout_seconds), prompt: String(row.prompt ?? ""),
@@ -1150,8 +1153,10 @@ function validatedStringArray(value: unknown, allowed: Set<string>, field: strin
 
 function validateAgentConfigInput(input: Record<string, unknown>) {
   const name = String(input.name ?? "").trim();
+  const description = String(input.description ?? "").trim();
   const roleType = String(input.role_type ?? "");
   if (name.length < 3 || name.length > 100) throw new Error("agent.name.invalid");
+  if (description.length > 500) throw new Error("agent.description.too_long");
   if (!agentRoles.has(roleType)) throw new Error("agent.role_type.invalid");
   const toolScopes = validatedStringArray(input.tool_scopes ?? [], safeAgentTools, "tool_scopes");
   const editableFields = validatedStringArray(input.editable_fields ?? [], agentEditableJobFields, "editable_fields");
@@ -1174,7 +1179,7 @@ function validateAgentConfigInput(input: Record<string, unknown>) {
   const memoryEnabled = input.memory_enabled !== false;
   const hermesPromptOptimization = Boolean(input.hermes_prompt_optimization);
   if (hermesPromptOptimization && !memoryEnabled) throw new Error("agent.prompt_optimization.requires_memory");
-  return { name, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, memoryEnabled, hermesPromptOptimization, enabled: input.enabled === false ? 0 : 1 };
+  return { name, description, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, memoryEnabled, hermesPromptOptimization, enabled: input.enabled === false ? 0 : 1 };
 }
 
 function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
@@ -1188,7 +1193,7 @@ function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
 
 function configSnapshot(values: ReturnType<typeof validateAgentConfigInput>) {
   return {
-    name: values.name, role_type: values.roleType, enabled: Boolean(values.enabled), source_ids: values.sourceIds,
+    name: values.name, description: values.description, role_type: values.roleType, enabled: Boolean(values.enabled), source_ids: values.sourceIds,
     allowed_domains: values.allowedDomains, tool_scopes: values.toolScopes, browser_enabled: values.browserEnabled,
     can_create_jobs: values.canCreate, can_edit_jobs: values.canEdit, editable_fields: values.editableFields,
     concurrency: values.concurrency, timeout_seconds: values.timeoutSeconds, prompt: values.prompt,
@@ -1215,7 +1220,7 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
   if (!row) return null;
   const snapshot = JSON.parse(row.config_json) as ReturnType<typeof configSnapshot>;
   return {
-    ...agent, name: snapshot.name, role_type: snapshot.role_type as AgentConfig["role_type"], enabled: snapshot.enabled,
+    ...agent, name: snapshot.name, description: snapshot.description ?? "", role_type: snapshot.role_type as AgentConfig["role_type"], enabled: snapshot.enabled,
     source_ids: snapshot.source_ids, allowed_domains: snapshot.allowed_domains, tool_scopes: snapshot.tool_scopes,
     browser_enabled: snapshot.browser_enabled, can_create_jobs: snapshot.can_create_jobs, can_edit_jobs: snapshot.can_edit_jobs,
     editable_fields: snapshot.editable_fields, concurrency: snapshot.concurrency, timeout_seconds: snapshot.timeout_seconds, prompt: snapshot.prompt,
@@ -1224,12 +1229,19 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
 }
 
 export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
-  const values = validateAgentConfigInput(input);
+  const isScout = String(input.role_type ?? "source_scout") === "source_scout";
+  const values = validateAgentConfigInput({
+    ...input,
+    prompt: String(input.prompt ?? "").trim() || DEFAULT_AGENT_PROMPT,
+    source_ids: input.source_ids ?? (isScout ? DEFAULT_AGENT_SOURCE_IDS : []),
+    allowed_domains: input.allowed_domains ?? (isScout ? DEFAULT_AGENT_ALLOWED_DOMAINS : []),
+    hermes_prompt_optimization: input.hermes_prompt_optimization ?? true
+  });
   const id = idFor(`agent|${projectId}|${Date.now()}|${values.name}`);
   const timestamp = now();
   db.prepare(`INSERT INTO agent_configs
-    (id,project_id,name,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,memory_enabled,hermes_prompt_optimization,version,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, 1, timestamp, timestamp);
+    (id,project_id,name,description,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,memory_enabled,hermes_prompt_optimization,version,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, 1, timestamp, timestamp);
   const versionId = insertAgentVersion(id, 1, "published", values, actor);
   db.prepare("UPDATE agent_configs SET published_version_id=? WHERE id=?").run(versionId, id);
   audit("agent_config", id, "created", { actor, role_type: values.roleType, tool_scopes: values.toolScopes, editable_fields: values.editableFields });
@@ -1243,8 +1255,8 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   const values = validateAgentConfigInput(merged);
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
   const versionId = insertAgentVersion(id, nextVersion, "draft", values, actor);
-  db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
-    .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, nextVersion, versionId, now(), id, projectId);
+  db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
+    .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, nextVersion, versionId, now(), id, projectId);
   audit("agent_config", id, "draft_created", { actor, version: nextVersion, version_id: versionId, changed_fields: Object.keys(input) });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
@@ -1261,8 +1273,8 @@ export function publishAgentConfigVersion(agentId: string, versionId: string, ac
   try {
     db.prepare("UPDATE agent_config_versions SET status='retired' WHERE agent_id=? AND status='published'").run(agentId);
     db.prepare("UPDATE agent_config_versions SET status='published',published_by=?,published_at=? WHERE id=?").run(actor, timestamp, versionId);
-    db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,version=?,published_version_id=?,draft_version_id=NULL,updated_at=? WHERE id=? AND project_id=?`)
-      .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, Number(version.version), versionId, timestamp, agentId, projectId);
+    db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,version=?,published_version_id=?,draft_version_id=NULL,updated_at=? WHERE id=? AND project_id=?`)
+      .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, Number(version.version), versionId, timestamp, agentId, projectId);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   audit("agent_config", agentId, "published", { actor, version: Number(version.version), version_id: versionId });

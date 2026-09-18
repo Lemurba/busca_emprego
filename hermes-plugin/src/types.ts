@@ -69,6 +69,7 @@ export interface AgentConfiguration {
   id: string;
   projectId: string;
   name: string;
+  description?: string;
   role: RoleType;
   enabled: boolean;
   promptVersionId: string;

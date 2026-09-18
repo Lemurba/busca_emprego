@@ -78,6 +78,9 @@ try {
     tool_scopes: ["browser.read", "jobs.read", "jobs.create"], browser_enabled: true, can_create_jobs: true,
     can_edit_jobs: false, editable_fields: [], concurrency: 2, timeout_seconds: 120
   }, "tester");
+  assert.match(scout.prompt, /uma pergunta por vez/i);
+  assert.match(scout.prompt, /“Outro”/);
+  assert.equal(scout.hermes_prompt_optimization, true);
   const discovered = store.createJobFromAgent(scout.id, {
     title: "Analista EHS", company: "Empresa", source: "site autorizado", source_url: "https://company.example.test/jobs/1",
     job_url: "https://company.example.test/jobs/1", linkedin_post_url: "https://www.linkedin.com/posts/example-1",

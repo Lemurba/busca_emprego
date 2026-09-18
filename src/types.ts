@@ -61,6 +61,7 @@ export interface AgentConfig {
   id: string;
   project_id: string;
   name: string;
+  description: string;
   role_type: "source_scout" | "job_enrichment" | "match_evaluator" | "resume_writer" | "ats_reviewer" | "custom";
   enabled: boolean;
   source_ids: string[];

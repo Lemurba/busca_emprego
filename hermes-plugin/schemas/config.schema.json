@@ -53,6 +53,7 @@
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "name": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "maxLength": 500 },
           "role": { "enum": ["coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator", "preference_learner", "resume_writer", "ats_reviewer", "application_assistant"] },
           "enabled": { "type": "boolean" },
           "promptVersionId": { "type": "string", "minLength": 1 },

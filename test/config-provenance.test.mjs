@@ -14,11 +14,12 @@ try {
   assert.equal(source.secret_ref, null);
 
   const agent = store.createAgentConfig({
-    name: "Enriquecedor versionado", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"],
+    name: "Enriquecedor versionado", description: "Completa benefícios usando evidências confiáveis.", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"],
     allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"],
     browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["benefits", "description"],
     concurrency: 1, timeout_seconds: 120, prompt: "v1", memory_enabled: true, hermes_prompt_optimization: true
   }, "operator");
+  assert.equal(agent.description, "Completa benefícios usando evidências confiáveis.");
   const firstVersions = store.listAgentConfigVersions(agent.id);
   assert.equal(firstVersions[0].status, "published");
 
