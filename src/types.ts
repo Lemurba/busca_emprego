@@ -62,7 +62,7 @@ export interface AgentConfig {
   project_id: string;
   name: string;
   description: string;
-  role_type: "source_scout" | "job_enrichment" | "match_evaluator" | "resume_writer" | "ats_reviewer" | "custom";
+  role_type: "coordinator" | "source_scout" | "job_enrichment" | "normalizer_deduper" | "match_evaluator" | "preference_learner" | "resume_writer" | "ats_reviewer" | "application_assistant" | "custom";
   enabled: boolean;
   source_ids: string[];
   allowed_domains: string[];

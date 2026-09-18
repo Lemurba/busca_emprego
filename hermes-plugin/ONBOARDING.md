@@ -1,13 +1,13 @@
 # Onboarding do Busca Emprego no Hermes
 
-Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigurar o plugin. Existe **uma única aplicação**, instalada com configuração de produção; o usuário não escolhe entre staging e production. O mesmo artefato pode ser testado isoladamente antes do start, sem criar outra variante do aplicativo. O contrato legível por máquina está em `onboarding.json`. O fluxo é **fail closed**: se uma credencial, autorização ou teste estiver ausente, o Hermes não habilita a fonte, o agente ou o agendamento correspondente.
+Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigurar o plugin. Existe **uma única aplicação**, instalada com configuração de produção; o usuário não escolhe entre staging e production. O mesmo artefato pode ser testado isoladamente antes do start, sem criar outra variante do aplicativo. O contrato legível por máquina está em `onboarding.json`. Os 16 portais e 24 agentes padrão começam ativos. Falta de credencial, login ou teste pausa somente a execução dependente.
 
 ## 1. Regras que o Hermes deve obedecer
 
 1. Nunca pedir senha, cookie, token ou chave em chat, formulário comum, log ou configuração do plugin.
 2. Para um segredo novo, abrir a entrada segura do secret store do Hermes. Depois, passar ao plugin somente uma referência `hermes://...` ou `vault://...`.
 3. Para login por navegador, abrir uma sessão de autenticação do Browser Harness e deixar o usuário digitar a credencial diretamente na janela segura. Guardar apenas `browser_profile_id`.
-4. Só habilitar uma fonte após o usuário confirmar os termos, o domínio e as operações permitidas.
+4. Manter todos os portais padrão habilitados e registrar domínio, autenticação e operações configuradas.
 5. Manter leitura/enriquecimento separados da sessão de candidatura. CAPTCHA, MFA ou dúvida interrompem o fluxo; nunca são contornados.
 6. `APROVO` aprova uma versão de currículo. Somente `AUTORIZO` permite uma candidatura automática para a vaga, currículo, versão e URL exatos.
 7. Usar exclusivamente a integração Telegram já vinculada ao Hermes. Não pedir bot token, chat ID, destinatário ou criação de outro bot.
@@ -20,7 +20,7 @@ O Hermes usa os padrões `/opt/hermes/plugins/busca-emprego`, `/var/lib/hermes/b
 
 > Qual identificador do operador responsável por esta instalação? Ele será usado em `RADAR_OPERATOR_ID` e na auditoria.
 
-> Quais fontes deseja ativar agora? Para cada uma, vou confirmar domínio, estratégia de autenticação, termos e operações permitidas.
+> Os 16 portais e 24 agentes padrão começarão ativos. Deseja configurar agora alguma credencial ou perfil de navegador exigido por uma fonte?
 
 O Hermes não faz pergunta de configuração do Telegram. Ele apenas verifica silenciosamente se a capability `telegram.question` já vinculada responde. Ao final, mostra um resumo sem valores secretos e pede confirmação para construir e iniciar. O agendamento permanece desligado até o smoke test manual passar.
 
@@ -35,22 +35,19 @@ O Hermes não faz pergunta de configuração do Telegram. Ele apenas verifica si
 | `basic` | “Abra o cofre e informe usuário/senha desta fonte.” | uma referência ao conjunto seguro, nunca usuário/senha |
 | `browser_profile` | “Deseja criar ou selecionar um perfil isolado e autenticar-se na janela segura?” | `browser_profile_id` |
 
-Para toda fonte, o Hermes ainda pergunta:
+Para uma fonte adicional, o Hermes pergunta somente:
 
 - nome e domínio exato;
 - operações desejadas: descoberta, enriquecimento e/ou consulta salarial;
-- se os termos foram revisados e aceitos para essas operações;
 - quais agentes podem usar a fonte e quais domínios entram em `allowed_domains`.
-
-Se a resposta aos termos não for uma confirmação literal, a fonte deve ser salva desabilitada.
 
 ### Glassdoor
 
-O padrão recomendado é `browser_profile`; token/cookie manual não deve ser solicitado. O diálogo é:
+Quando a consulta exigir sessão autenticada, use `browser_profile`; token/cookie manual não deve ser solicitado. O diálogo é:
 
 > Para o Glassdoor, vou usar um perfil isolado do Browser Harness. Não informe sua senha no chat. Posso abrir a janela segura para você entrar e concluir MFA, se houver?
 
-Depois do login, o Hermes valida o perfil com uma navegação somente leitura, registra o `browser_profile_id`, confirma o domínio permitido e testa uma consulta sem candidatura. Sessão de Glassdoor não é reutilizada pelo executor de candidaturas. CAPTCHA ou bloqueio encerra o teste e mantém a fonte desabilitada.
+Depois do login, o Hermes valida o perfil com uma navegação somente leitura, registra o `browser_profile_id`, confirma o domínio permitido e testa uma consulta sem candidatura. Sessão de descoberta não é reutilizada pelo executor de candidaturas. CAPTCHA ou bloqueio pausa a execução para ação humana; o conector permanece ativo.
 
 ## 4. Gateways internos
 
@@ -103,13 +100,13 @@ Ordem de verificação:
 3. `GET /api/bootstrap` funciona sem token ou login a partir de outro dispositivo da LAN.
 4. `scripts/ops/verify-environment.mjs` confirma que a URL é HTTPS ou HTTP em endereço privado da LAN.
 
-Falha em qualquer item faz o Hermes parar o processo ou mantê-lo fora do tráfego; agentes e cron continuam desabilitados.
+Falha em qualquer item faz o Hermes parar o processo ou mantê-lo fora do tráfego; agentes continuam configurados e o cron não inicia até correção.
 
-## 6. Primeiro agente e primeira fonte
+## 6. Primeiro teste de agente e fonte
 
-O Hermes cadastra a fonte por `/api/sources` usando somente `secret_ref` ou `browser_profile_id`. Em seguida, cria um agente `source_scout` com:
+O aplicativo já cadastra os 16 portais e publica um `source_scout` separado para cada um. Para fonte adicional, o Hermes usa `/api/sources` com somente `secret_ref` ou `browser_profile_id` e cria um coletor com:
 
-- `source_ids` contendo somente a fonte validada;
+- `source_ids` contendo somente a fonte configurada;
 - `allowed_domains` com o domínio confirmado;
 - `browser.read`, `jobs.read` e `jobs.create`, sem capability de candidatura;
 - concorrência 1 no primeiro teste;
@@ -128,9 +125,9 @@ O executor de candidatura usa o Browser Harness separado e chama `v1/application
 ## 8. Reconfiguração, rotação e recuperação
 
 - Rotação: atualizar o valor no cofre mantendo a referência quando possível; testar o gateway e revogar o valor antigo.
-- Fonte bloqueada: desabilitar, preservar auditoria e pedir revisão de termos/perfil; não tentar contornar o bloqueio.
+- Fonte bloqueada: pausar a execução afetada, preservar auditoria e pedir ação sobre login, MFA ou CAPTCHA; manter o conector configurado.
 - Telegram indisponível: manter a candidatura em `needs_review`.
 - Nova configuração de agente: criar draft, testar, publicar; nunca editar snapshot publicado no banco.
 - Falha de release: seguir `docs/operations-runbook.md`, incluindo backup, restore testado e rollback do release.
 
-O onboarding está concluído apenas quando health, readiness, acesso sem login pela LAN, autenticação das fontes que precisarem, um agente publicado, proveniência/conflito e a capability Telegram vinculada tiverem evidências de teste. Se o Telegram do Hermes estiver indisponível, a busca continua, mas qualquer candidatura com dúvida permanece em `needs_review`.
+O onboarding está concluído quando health, readiness, acesso sem login pela LAN, autenticação das fontes que precisarem, agentes padrão publicados, proveniência/conflito e capability Telegram vinculada tiverem evidências de teste. Se Telegram do Hermes estiver indisponível, busca continua, mas candidatura com dúvida permanece em `needs_review`.

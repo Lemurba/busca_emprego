@@ -57,6 +57,7 @@ old.close();
 process.env.RADAR_DB_PATH = dbPath;
 process.env.RADAR_RUN_LEGACY_ANONYMIZATION = "true";
 const store = await import(`../dist/src/db.js?test=${Date.now()}`);
+const { renderResumeFile } = await import(`../dist/src/resume-files.js?test=${Date.now()}`);
 const first = store.getBootstrap();
 assert.equal(first.jobs.length, 1);
 assert.equal(first.jobs[0].id, "legacy-job", "job ID remains stable through anonymization");
@@ -90,6 +91,10 @@ assert.throws(() => store.recordJobDecision(job.id, "interested", ""), /confirme
 store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
 const draft = store.createResume({ job_id: job.id, base_resume_id: uploaded.id, title: "ATS", status: "approved", content: "Reviewed content" });
 assert.equal(draft.status, "draft", "agent-created resumes cannot self-approve");
+const generatedPdf = await renderResumeFile(draft, "pdf");
+const generatedDocx = await renderResumeFile(draft, "docx");
+assert.equal(generatedPdf.data.subarray(0, 5).toString("ascii"), "%PDF-");
+assert.equal(generatedDocx.data.subarray(0, 2).toString("ascii"), "PK");
 assert.throws(() => store.approveResume(draft.id, ""), /APROVO/);
 store.approveResume(draft.id, "APROVO");
 assert.equal(store.getJob(job.id).status, "resume_approved");

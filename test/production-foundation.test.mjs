@@ -9,6 +9,14 @@ delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 
 const store = await import(`../dist/src/db.js?production=${Date.now()}`);
 try {
+  const defaultAgents = store.listAgentConfigs();
+  const portalAgents = defaultAgents.filter((agent) => agent.role_type === "source_scout" && agent.name.startsWith("Coletor — "));
+  assert.equal(defaultAgents.length, 24);
+  assert.equal(portalAgents.length, 16);
+  assert.ok(portalAgents.every((agent) => agent.source_ids.length === 1 && agent.allowed_domains.length === 1 && agent.memory_enabled === false && agent.hermes_prompt_optimization === true));
+  assert.equal(store.listSourceConfigs().length, 16);
+  assert.ok(store.listSourceConfigs().every((source) => source.enabled === true));
+
   const first = store.upsertJob({
     id: "feedback-partial", title: "Analista de Dados", company: "Exemplo Ltda", source: "fixture",
     source_url: "https://example.test/jobs/1?utm_source=test&id=1", work_model: "Híbrido"

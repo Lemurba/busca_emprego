@@ -71,7 +71,25 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `POST` | `/api/agents/{id}/rollback` | Republicar uma configuração anterior como nova versão |
 | `GET` | `/api/jobs/{id}/provenance` | Consultar evidências e conflitos por campo |
 
-Salários precisam de fonte e data verificáveis. LinkedIn, Glassdoor e outras fontes só podem ser habilitados após aprovação dos termos e por integração permitida. Credenciais ficam no Hermes; o banco guarda apenas `secret_ref` ou `browser_profile_id`.
+Salários precisam de fonte e data verificáveis. Os 16 portais padrão começam ativos; credenciais ficam no Hermes e o banco guarda apenas `secret_ref` ou `browser_profile_id`. Login, MFA ou CAPTCHA pausam somente a execução afetada para ação humana.
+
+## Hermes via MCP
+
+O dashboard é a fonte de verdade. O Hermes usa o servidor MCP oficial deste projeto e a skill local, sem carregar todas as vagas no contexto de um único agente:
+
+```sh
+npm ci
+npm run build
+RADAR_ROOT="$(pwd)"
+hermes skills trust "$RADAR_ROOT"
+hermes mcp add radar-vagas \
+  --command node \
+  --env RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
+  --args "$RADAR_ROOT/dist/src/mcp-server.js"
+hermes mcp test radar-vagas
+```
+
+Cada coletor usa contexto novo e uma única fonte. Normalizador, pesquisa salarial, avaliação, entrevista, currículo ATS, revisão e candidatura permanecem papéis separados. A entrevista faz uma pergunta por mensagem, oferece alternativas e inclui `Outro` para resposta livre.
 
 ## Operação
 

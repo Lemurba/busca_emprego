@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, getResume, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { isWorkflowError } from "./workflow.js";
 
 const port = Number(process.env.PORT ?? 8787);
@@ -110,6 +111,16 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
     if (req.method === "GET" && pathname.startsWith("/api/jobs/")) return sendJson(res, 200, getJob(idFromPath(pathname, "/api/jobs/")));
 
     if (req.method === "POST" && pathname === "/api/resumes") return sendJson(res, 201, createResume(await readBody(req) as never));
+    if (req.method === "GET" && pathname.startsWith("/api/resumes/") && (pathname.endsWith("/files/pdf") || pathname.endsWith("/files/docx"))) {
+      const resume = getResume(idFromPath(pathname, "/api/resumes/"));
+      if (!resume) return sendJson(res, 404, { error: "resume not found" });
+      const format = pathname.endsWith("/pdf") ? "pdf" : "docx" as ResumeFileFormat;
+      const file = await renderResumeFile(resume, format);
+      const filename = encodeURIComponent(file.fileName).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16).toUpperCase());
+      res.writeHead(200, { "content-type": file.mimeType, "content-disposition": `attachment; filename*=UTF-8''${filename}`, "content-length": file.data.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(file.data);
+      return;
+    }
     if (req.method === "POST" && pathname.startsWith("/api/resumes/") && pathname.endsWith("/approve")) {
       const body = await readBody(req);
       return sendJson(res, 200, approveResume(idFromPath(pathname, "/api/resumes/"), String(body.confirmation ?? "")));

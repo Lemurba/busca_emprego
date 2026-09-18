@@ -42,10 +42,9 @@
     "browser_profile": { "securePrompt": true, "requiresSecretRef": false, "requiresBrowserProfile": true }
   },
   "prompts": {
-    "start": "Vou instalar a única versão de produção do Busca Emprego com os padrões do Hermes.",
+    "start": "Vou instalar a única versão de produção do Busca Emprego com os 16 portais e 24 agentes padrão ativos.",
     "operator": "Qual identificador do operador responsável por esta instalação?",
-    "source": "Qual fonte deseja adicionar e qual domínio está autorizado?",
-    "terms": "Você confirma que revisou e aceita os termos desta fonte para as operações selecionadas?",
+    "source": "Qual fonte adicional deseja configurar e qual é seu domínio?",
     "secret": "Não envie a credencial neste chat. Abra a entrada segura do cofre do Hermes; eu guardarei somente a referência.",
     "glassdoor": "Para o Glassdoor, deseja criar/selecionar um perfil isolado do Browser Harness e autenticar-se na janela segura? Não informe senha no chat.",
     "schedule": "O teste manual terminou sem erro. Deseja habilitar o agendamento deste agente agora?"

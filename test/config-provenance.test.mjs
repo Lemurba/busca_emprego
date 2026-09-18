@@ -8,8 +8,7 @@ process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
 const store = await import(`../dist/src/db.js?config=${Date.now()}`);
 
 try {
-  assert.throws(() => store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator"), /terms_approval/);
-  const source = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor", terms_confirmation: "APROVO OS TERMOS DA FONTE" }, "operator");
+  const source = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator");
   assert.equal(source.browser_profile_id, "hermes/glassdoor");
   assert.equal(source.secret_ref, null);
 
@@ -55,7 +54,7 @@ try {
   assert.ok(provenance.evidence.some((item) => item.field_path === "benefits" && item.origin === "human"));
   assert.ok(provenance.conflicts.length >= 2);
 
-  console.log("Source authorization, agent publication/rollback, and field provenance checks passed.");
+  console.log("Source configuration, agent publication/rollback, and field provenance checks passed.");
 } finally {
   store.db.close();
   rmSync(directory, { recursive: true, force: true });

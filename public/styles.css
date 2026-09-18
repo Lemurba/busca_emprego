@@ -334,6 +334,8 @@ body.map-expanded { overflow: hidden; }
 .detail-section p { margin: 7px 0; }
 .agent-grid { margin-top: 20px; }
 .agent-card p { margin: 8px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.resume-download-row { margin-top: 12px; }
+.resume-download-row .secondary-button { min-height: 30px; padding-inline: 10px; font-size: 10px; }
 .agent-settings-panel { padding: 0; margin-bottom: 18px; overflow: hidden; }
 .agent-settings-panel > .section-head { padding: 22px 24px 18px; margin: 0; border-bottom: 1px solid var(--line); }
 .agent-settings-list { display: grid; }

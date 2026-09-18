@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, type TransitionInput } from "./workflow.js";
 import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "./domain.js";
-import { DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_AGENT_ALLOWED_DOMAINS } from "./agent-defaults.js";
+import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "./agent-defaults.js";
 
 const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -450,6 +450,11 @@ export function listJobs(): Job[] {
 
 export function listResumes(): Resume[] {
   return (db.prepare("SELECT * FROM resumes ORDER BY updated_at DESC").all() as Record<string, unknown>[]).map(mapResume);
+}
+
+export function getResume(id: string): Resume | null {
+  const row = db.prepare("SELECT * FROM resumes WHERE id=?").get(id) as Record<string, unknown> | undefined;
+  return row ? mapResume(row) : null;
 }
 
 export function listBaseResumes(): BaseResume[] {
@@ -1135,8 +1140,8 @@ export function listHumanQuestions(applicationId?: string) {
     : db.prepare("SELECT * FROM human_questions ORDER BY asked_at DESC").all();
 }
 
-const agentRoles = new Set(["source_scout", "job_enrichment", "match_evaluator", "resume_writer", "ats_reviewer", "custom"]);
-const safeAgentTools = new Set(["browser.read", "jobs.create", "jobs.enrich", "jobs.read", "salary.lookup"]);
+const agentRoles = new Set(["coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator", "preference_learner", "resume_writer", "ats_reviewer", "application_assistant", "custom"]);
+const safeAgentTools = new Set(["agent.invoke", "browser.read", "jobs.read", "jobs.write", "jobs.create", "jobs.enrich", "salary.lookup", "resume.read", "resume.write", "preferences.write", "application.prepare", "telegram.question"]);
 const agentEditableJobFields = new Set([
   "title", "company", "location", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period",
   "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url",
@@ -1178,7 +1183,6 @@ function validateAgentConfigInput(input: Record<string, unknown>) {
   if (prompt.length > 12_000) throw new Error("agent.prompt.too_long");
   const memoryEnabled = input.memory_enabled !== false;
   const hermesPromptOptimization = Boolean(input.hermes_prompt_optimization);
-  if (hermesPromptOptimization && !memoryEnabled) throw new Error("agent.prompt_optimization.requires_memory");
   return { name, description, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, memoryEnabled, hermesPromptOptimization, enabled: input.enabled === false ? 0 : 1 };
 }
 
@@ -1229,12 +1233,11 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
 }
 
 export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
-  const isScout = String(input.role_type ?? "source_scout") === "source_scout";
   const values = validateAgentConfigInput({
     ...input,
     prompt: String(input.prompt ?? "").trim() || DEFAULT_AGENT_PROMPT,
-    source_ids: input.source_ids ?? (isScout ? DEFAULT_AGENT_SOURCE_IDS : []),
-    allowed_domains: input.allowed_domains ?? (isScout ? DEFAULT_AGENT_ALLOWED_DOMAINS : []),
+    source_ids: input.source_ids ?? [],
+    allowed_domains: input.allowed_domains ?? [],
     hermes_prompt_optimization: input.hermes_prompt_optimization ?? true
   });
   const id = idFor(`agent|${projectId}|${Date.now()}|${values.name}`);
@@ -1247,6 +1250,61 @@ export function createAgentConfig(input: Record<string, unknown>, actor: string,
   audit("agent_config", id, "created", { actor, role_type: values.roleType, tool_scopes: values.toolScopes, editable_fields: values.editableFields });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
+
+function installDefaultAgentsOnce(projectId = "busca-emprego") {
+  const migration = "install_default_agent_presets_v1";
+  if (db.prepare("SELECT name FROM schema_migrations WHERE name=?").get(migration)) return;
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const portal of DEFAULT_JOB_PORTALS) {
+      db.prepare(`INSERT OR IGNORE INTO source_configs
+        (storage_id,id,project_id,name,source_type,domain,enabled,auth_strategy,secret_ref,browser_profile_id,terms_approved_at,terms_approved_by,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,1,'none',NULL,NULL,NULL,NULL,?,?)`)
+        .run(idFor(`source|${projectId}|${portal.id}`), portal.id, projectId, portal.name, portal.id === "linkedin-jobs" ? "linkedin" : portal.id === "glassdoor" ? "glassdoor" : "job_board", portal.domain, timestamp, timestamp);
+    }
+    for (const preset of DEFAULT_AGENT_PRESETS) {
+      if (db.prepare("SELECT id FROM agent_configs WHERE project_id=? AND name=?").get(projectId, preset.name)) continue;
+      createAgentConfig({
+        ...preset,
+        enabled: true,
+        browser_enabled: preset.browser_enabled ?? false,
+        can_create_jobs: preset.can_create_jobs ?? false,
+        can_edit_jobs: preset.can_edit_jobs ?? false,
+        editable_fields: preset.editable_fields ?? [],
+        concurrency: 1,
+        timeout_seconds: 120,
+        memory_enabled: preset.memory_enabled ?? false,
+        hermes_prompt_optimization: true
+      }, "system-default", projectId);
+    }
+    db.prepare("INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)").run(migration, timestamp);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+installDefaultAgentsOnce();
+
+function activateDefaultSourcesOnce(projectId = "busca-emprego") {
+  const migration = "activate_default_sources_v2";
+  if (db.prepare("SELECT name FROM schema_migrations WHERE name=?").get(migration)) return;
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const enable = db.prepare("UPDATE source_configs SET enabled=1,updated_at=? WHERE project_id=? AND id=?");
+    for (const sourceId of DEFAULT_AGENT_SOURCE_IDS) enable.run(timestamp, projectId, sourceId);
+    db.prepare("INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)").run(migration, timestamp);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+activateDefaultSourcesOnce();
 
 export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
@@ -1295,7 +1353,7 @@ export function rollbackAgentConfig(agentId: string, targetVersionId: string, ac
 export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = "busca-emprego") {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   if (!agent) throw new Error("agent.not_found");
-  if (!agent.memory_enabled || !agent.hermes_prompt_optimization) throw new Error("agent.prompt_optimization.disabled");
+  if (!agent.hermes_prompt_optimization) throw new Error("agent.prompt_optimization.disabled");
   const reason = String(input.reason ?? "").trim();
   if (reason.length < 10 || reason.length > 1000) throw new Error("agent.prompt_optimization.reason.invalid");
   const prompt = String(input.prompt ?? "").trim();
@@ -1336,10 +1394,8 @@ function validateSourceConfig(input: Record<string, unknown>) {
 export function upsertSourceConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const value = validateSourceConfig(input);
   const existing = db.prepare("SELECT id,terms_approved_at,terms_approved_by,created_at FROM source_configs WHERE id=? AND project_id=?").get(value.id, projectId) as Record<string, unknown> | undefined;
-  const approvalRequested = String(input.terms_confirmation ?? "") === "APROVO OS TERMOS DA FONTE";
-  const termsApprovedAt = approvalRequested ? now() : existing?.terms_approved_at == null ? null : String(existing.terms_approved_at);
-  const termsApprovedBy = approvalRequested ? actor : existing?.terms_approved_by == null ? null : String(existing.terms_approved_by);
-  if (value.enabled && !termsApprovedAt) throw new Error("source.terms_approval.required");
+  const termsApprovedAt = existing?.terms_approved_at == null ? null : String(existing.terms_approved_at);
+  const termsApprovedBy = existing?.terms_approved_by == null ? null : String(existing.terms_approved_by);
   const timestamp = now();
   db.prepare(`INSERT INTO source_configs
     (storage_id,id,project_id,name,source_type,domain,enabled,auth_strategy,secret_ref,browser_profile_id,terms_approved_at,terms_approved_by,created_at,updated_at)
