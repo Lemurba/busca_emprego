@@ -451,10 +451,16 @@ function render() {
   document.body.classList.toggle("map-expanded", state.mapExpanded && Boolean(mapShell));
   initializeMap(data);
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.classList.toggle("active", element.dataset.page === state.page));
+  const secondaryPage = ["applications", "resumes", "companies", "analytics", "agents", "settings"].includes(state.page);
+  const moreButton = document.querySelector<HTMLElement>("[data-mobile-more]");
+  moreButton?.classList.toggle("active", secondaryPage);
+  moreButton?.setAttribute("aria-current", secondaryPage ? "page" : "false");
   const pageTitle = document.getElementById("page-title");
   if (pageTitle) pageTitle.textContent = ({ overview: "Visão geral", board: "Kanban", jobs: "Vagas", applications: "Candidaturas", resumes: "Currículos ATS", companies: "Empresas", analytics: "Análises", agents: "Agentes", settings: "Configurações" } as Record<string, string>)[state.page] ?? "Visão geral";
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
+  const addJobButton = document.getElementById("top-add-job") as HTMLButtonElement | null;
+  if (addJobButton) addJobButton.hidden = !["overview", "board", "jobs"].includes(state.page);
   bindViewEvents();
 }
 
@@ -934,7 +940,21 @@ document.addEventListener("DOMContentLoaded", () => {
   } catch { /* default to light */ }
   setTheme(savedTheme);
   document.getElementById("theme-toggle")?.addEventListener("click", () => setTheme(document.body.dataset.theme === "dark" ? "light" : "dark"));
-  document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => { state.mapExpanded = false; state.page = element.dataset.page ?? "overview"; document.body.classList.remove("menu-open", "map-expanded"); render(); }));
+  const closeMobileMore = () => {
+    document.body.classList.remove("mobile-more-open");
+    document.querySelector<HTMLElement>(".mobile-more-sheet")!.hidden = true;
+    document.querySelector<HTMLElement>(".mobile-sheet-backdrop")!.hidden = true;
+    document.querySelector<HTMLElement>("[data-mobile-more]")?.setAttribute("aria-expanded", "false");
+  };
+  document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => { state.mapExpanded = false; state.page = element.dataset.page ?? "overview"; document.body.classList.remove("menu-open", "map-expanded"); closeMobileMore(); render(); }));
+  document.querySelector<HTMLElement>("[data-mobile-more]")?.addEventListener("click", () => {
+    const open = !document.body.classList.contains("mobile-more-open");
+    document.body.classList.toggle("mobile-more-open", open);
+    document.querySelector<HTMLElement>(".mobile-more-sheet")!.hidden = !open;
+    document.querySelector<HTMLElement>(".mobile-sheet-backdrop")!.hidden = !open;
+    document.querySelector<HTMLElement>("[data-mobile-more]")?.setAttribute("aria-expanded", String(open));
+  });
+  document.querySelectorAll<HTMLElement>("[data-close-mobile-more]").forEach((element) => element.addEventListener("click", closeMobileMore));
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.mapExpanded) setMapExpanded(false); });
   document.getElementById("top-add-job")?.addEventListener("click", showAddJobModal);
   document.getElementById("refresh-button")?.addEventListener("click", () => loadData(true));
