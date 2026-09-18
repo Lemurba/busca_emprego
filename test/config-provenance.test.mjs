@@ -8,19 +8,24 @@ process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
 const store = await import(`../dist/src/db.js?config=${Date.now()}`);
 
 try {
-  assert.throws(() => store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator"), /terms_approval/);
-  const source = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor", terms_confirmation: "APROVO OS TERMOS DA FONTE" }, "operator");
+  const source = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator");
   assert.equal(source.browser_profile_id, "hermes/glassdoor");
   assert.equal(source.secret_ref, null);
 
   const agent = store.createAgentConfig({
-    name: "Enriquecedor versionado", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"],
+    name: "Enriquecedor versionado", description: "Completa benefícios usando evidências confiáveis.", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"],
     allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"],
     browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["benefits", "description"],
-    concurrency: 1, timeout_seconds: 120, prompt: "v1"
+    concurrency: 1, timeout_seconds: 120, prompt: "v1", memory_enabled: true, hermes_prompt_optimization: true
   }, "operator");
+  assert.equal(agent.description, "Completa benefícios usando evidências confiáveis.");
   const firstVersions = store.listAgentConfigVersions(agent.id);
   assert.equal(firstVersions[0].status, "published");
+
+  const proposedAgent = store.proposeAgentPrompt(agent.id, { prompt: "v1 com aprendizado explícito", reason: "Uso recente mostrou respostas sem contexto suficiente." });
+  assert.ok(proposedAgent.draft_version_id);
+  assert.equal(store.listAgentConfigVersions(agent.id)[0].created_by, "hermes-memory");
+  store.publishAgentConfigVersion(agent.id, proposedAgent.draft_version_id, "operator");
 
   const draftAgent = store.updateAgentConfig(agent.id, { prompt: "v2", editable_fields: ["benefits"] }, "operator");
   assert.ok(draftAgent.draft_version_id);
@@ -29,7 +34,7 @@ try {
   store.publishAgentConfigVersion(agent.id, versions[0].id, "operator");
   assert.equal(store.listAgentConfigVersions(agent.id)[0].status, "published");
   store.rollbackAgentConfig(agent.id, firstVersions[0].id, "operator");
-  assert.equal(store.listAgentConfigVersions(agent.id)[0].version, 3);
+  assert.equal(store.listAgentConfigVersions(agent.id)[0].version, 4);
 
   const job = store.upsertJob({ id: "prov-job", title: "Analista", company: "Empresa", source: "manual", source_url: "https://glassdoor.com/job/1" });
   const first = store.enrichJobFromAgent(agent.id, job.id, { benefits: "Plano de saúde" }, "https://glassdoor.com/job/1", "Benefício publicado");
@@ -49,7 +54,7 @@ try {
   assert.ok(provenance.evidence.some((item) => item.field_path === "benefits" && item.origin === "human"));
   assert.ok(provenance.conflicts.length >= 2);
 
-  console.log("Source authorization, agent publication/rollback, and field provenance checks passed.");
+  console.log("Source configuration, agent publication/rollback, and field provenance checks passed.");
 } finally {
   store.db.close();
   rmSync(directory, { recursive: true, force: true });

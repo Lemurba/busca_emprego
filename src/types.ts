@@ -61,7 +61,8 @@ export interface AgentConfig {
   id: string;
   project_id: string;
   name: string;
-  role_type: "source_scout" | "job_enrichment" | "match_evaluator" | "resume_writer" | "ats_reviewer" | "custom";
+  description: string;
+  role_type: "coordinator" | "source_scout" | "job_enrichment" | "normalizer_deduper" | "match_evaluator" | "preference_learner" | "resume_writer" | "ats_reviewer" | "application_assistant" | "custom";
   enabled: boolean;
   source_ids: string[];
   allowed_domains: string[];
@@ -73,6 +74,8 @@ export interface AgentConfig {
   concurrency: number;
   timeout_seconds: number;
   prompt: string;
+  memory_enabled: boolean;
+  hermes_prompt_optimization: boolean;
   version: number;
   published_version_id: string | null;
   draft_version_id: string | null;

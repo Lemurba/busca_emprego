@@ -23,6 +23,7 @@ test("manifesto aponta para onboarding seguro e legível pelo Hermes", () => {
   assert.equal(onboarding.installation.networkScope, "private-lan");
   assert.equal(onboarding.installation.listenAddress, "0.0.0.0");
   assert.equal(onboarding.prompts.environment, undefined);
+  assert.equal(onboarding.prompts.terms, undefined);
   assert.equal(onboarding.telegramIntegration.source, "hermes-linked-capability");
   assert.equal(onboarding.telegramIntegration.requestBotToken, false);
   assert.equal(onboarding.telegramIntegration.requestRecipient, false);

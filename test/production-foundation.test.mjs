@@ -9,6 +9,14 @@ delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 
 const store = await import(`../dist/src/db.js?production=${Date.now()}`);
 try {
+  const defaultAgents = store.listAgentConfigs();
+  const portalAgents = defaultAgents.filter((agent) => agent.role_type === "source_scout" && agent.name.startsWith("Coletor — "));
+  assert.equal(defaultAgents.length, 24);
+  assert.equal(portalAgents.length, 16);
+  assert.ok(portalAgents.every((agent) => agent.source_ids.length === 1 && agent.allowed_domains.length === 1 && agent.memory_enabled === false && agent.hermes_prompt_optimization === true));
+  assert.equal(store.listSourceConfigs().length, 16);
+  assert.ok(store.listSourceConfigs().every((source) => source.enabled === true));
+
   const first = store.upsertJob({
     id: "feedback-partial", title: "Analista de Dados", company: "Exemplo Ltda", source: "fixture",
     source_url: "https://example.test/jobs/1?utm_source=test&id=1", work_model: "Híbrido"
@@ -78,6 +86,9 @@ try {
     tool_scopes: ["browser.read", "jobs.read", "jobs.create"], browser_enabled: true, can_create_jobs: true,
     can_edit_jobs: false, editable_fields: [], concurrency: 2, timeout_seconds: 120
   }, "tester");
+  assert.match(scout.prompt, /uma pergunta por vez/i);
+  assert.match(scout.prompt, /“Outro”/);
+  assert.equal(scout.hermes_prompt_optimization, true);
   const discovered = store.createJobFromAgent(scout.id, {
     title: "Analista EHS", company: "Empresa", source: "site autorizado", source_url: "https://company.example.test/jobs/1",
     job_url: "https://company.example.test/jobs/1", linkedin_post_url: "https://www.linkedin.com/posts/example-1",

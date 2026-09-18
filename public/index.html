@@ -49,6 +49,26 @@
       </main>
     </div>
 
+    <nav class="mobile-tabbar" aria-label="Navegação móvel">
+      <button class="mobile-tab active" data-page="overview" aria-label="Visão geral"><span aria-hidden="true">⌂</span></button>
+      <button class="mobile-tab" data-page="board" aria-label="Kanban"><span aria-hidden="true">▦</span></button>
+      <button class="mobile-tab" data-page="jobs" aria-label="Vagas"><span aria-hidden="true">⌕</span></button>
+      <button class="mobile-tab" data-mobile-more aria-label="Mais opções" aria-expanded="false"><span aria-hidden="true">•••</span></button>
+    </nav>
+    <div class="mobile-more-sheet" role="dialog" aria-modal="true" aria-label="Mais opções" hidden>
+      <div class="mobile-sheet-handle" aria-hidden="true"></div>
+      <div class="mobile-sheet-head"><strong>Mais opções</strong><button class="modal-close" data-close-mobile-more aria-label="Fechar">×</button></div>
+      <nav class="mobile-more-grid" aria-label="Outras áreas">
+        <button data-page="applications"><span aria-hidden="true">✓</span>Candidaturas</button>
+        <button data-page="resumes"><span aria-hidden="true">▤</span>Currículos</button>
+        <button data-page="companies"><span aria-hidden="true">▥</span>Empresas</button>
+        <button data-page="analytics"><span aria-hidden="true">◒</span>Análises</button>
+        <button data-page="agents"><span aria-hidden="true">⚙</span>Agentes</button>
+        <button data-page="settings"><span aria-hidden="true">⚙</span>Configurações</button>
+      </nav>
+    </div>
+    <button class="mobile-sheet-backdrop" data-close-mobile-more aria-label="Fechar mais opções" hidden></button>
+
     <div id="modal-root" class="modal-root" hidden></div>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>

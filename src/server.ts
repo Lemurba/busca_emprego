@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { approveResume, answerHumanQuestion, authorizeAutoApplication, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, getBaseResumeFile, getBootstrap, getJob, getResume, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listPreferenceState, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, resolveFieldConflict, revokeAutoApplication, rollbackAgentConfig, seedDemo, selectBaseResume, selectManualApplication, setPreferenceRuleState, transitionJob, updateAgentConfig, updateApplication, updateJob, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { isWorkflowError } from "./workflow.js";
 
 const port = Number(process.env.PORT ?? 8787);
@@ -76,6 +77,9 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
       const body = await readBody(req);
       return sendJson(res, 200, rollbackAgentConfig(idFromPath(pathname, "/api/agents/"), String(body.version_id ?? ""), actor, projectId));
     }
+    if (req.method === "POST" && pathname.startsWith("/api/agents/") && pathname.endsWith("/prompt-proposals")) {
+      return sendJson(res, 201, proposeAgentPrompt(idFromPath(pathname, "/api/agents/"), await readBody(req), projectId));
+    }
     if (req.method === "PATCH" && pathname.startsWith("/api/agents/")) return sendJson(res, 200, updateAgentConfig(idFromPath(pathname, "/api/agents/"), await readBody(req), actor, projectId));
     if (req.method === "DELETE" && pathname.startsWith("/api/agents/")) return sendJson(res, 200, deleteAgentConfig(idFromPath(pathname, "/api/agents/"), actor, projectId));
 
@@ -107,6 +111,16 @@ async function api(req: import("node:http").IncomingMessage, res: import("node:h
     if (req.method === "GET" && pathname.startsWith("/api/jobs/")) return sendJson(res, 200, getJob(idFromPath(pathname, "/api/jobs/")));
 
     if (req.method === "POST" && pathname === "/api/resumes") return sendJson(res, 201, createResume(await readBody(req) as never));
+    if (req.method === "GET" && pathname.startsWith("/api/resumes/") && (pathname.endsWith("/files/pdf") || pathname.endsWith("/files/docx"))) {
+      const resume = getResume(idFromPath(pathname, "/api/resumes/"));
+      if (!resume) return sendJson(res, 404, { error: "resume not found" });
+      const format = pathname.endsWith("/pdf") ? "pdf" : "docx" as ResumeFileFormat;
+      const file = await renderResumeFile(resume, format);
+      const filename = encodeURIComponent(file.fileName).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16).toUpperCase());
+      res.writeHead(200, { "content-type": file.mimeType, "content-disposition": `attachment; filename*=UTF-8''${filename}`, "content-length": file.data.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(file.data);
+      return;
+    }
     if (req.method === "POST" && pathname.startsWith("/api/resumes/") && pathname.endsWith("/approve")) {
       const body = await readBody(req);
       return sendJson(res, 200, approveResume(idFromPath(pathname, "/api/resumes/"), String(body.confirmation ?? "")));
@@ -197,7 +211,7 @@ const server = createServer(async (req, res) => {
   res.setHeader("x-frame-options", "DENY");
   res.setHeader("referrer-policy", "no-referrer");
   res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
-  res.setHeader("content-security-policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader("content-security-policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de; style-src 'self' https://unpkg.com; script-src 'self' https://unpkg.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   if (process.env.RADAR_TRUST_PROXY_TLS === "true" && req.url !== "/api/health" && req.url !== "/api/ready" && req.headers["x-forwarded-proto"] !== "https") {
     return sendJson(res, 426, { error: "TLS_REQUIRED" });
   }

@@ -34,8 +34,13 @@ try {
   await waitReady();
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 426, "proxy TLS gate must fail closed");
   assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 200, "LAN API must not require login or token");
+  const dashboardResponse = await fetch(`${base}/`, { headers: { "x-forwarded-proto": "https" } });
+  const csp = dashboardResponse.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /script-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet script host");
+  assert.match(csp, /style-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet stylesheet host");
+  assert.match(csp, /img-src 'self' data: https:\/\/tile\.openstreetmap\.de/, "CSP must allow map tiles");
 
-  const sourceResponse = await request("/api/sources", { method: "POST", body: JSON.stringify({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor", terms_confirmation: "APROVO OS TERMOS DA FONTE" }) });
+  const sourceResponse = await request("/api/sources", { method: "POST", body: JSON.stringify({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }) });
   const sourceBody = await sourceResponse.json();
   assert.equal(sourceResponse.status, 201, JSON.stringify(sourceBody));
 
@@ -61,6 +66,16 @@ try {
     }
   }));
   assert.equal(failures, 0);
+  assert.equal((await request("/api/jobs/load-0/decision", { method: "POST", body: JSON.stringify({ decision: "interested", confirmation: "TENHO INTERESSE" }) })).status, 200);
+  const resumeResponse = await request("/api/resumes", { method: "POST", body: JSON.stringify({ job_id: "load-0", title: "Currículo ATS", content: "RESUMO\nExperiência confirmada." }) });
+  const generatedResume = await resumeResponse.json();
+  assert.equal(resumeResponse.status, 201, JSON.stringify(generatedResume));
+  const pdfResponse = await request(`/api/resumes/${generatedResume.id}/files/pdf`);
+  const docxResponse = await request(`/api/resumes/${generatedResume.id}/files/docx`);
+  assert.equal(pdfResponse.headers.get("content-type"), "application/pdf");
+  assert.equal(docxResponse.headers.get("content-type"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  assert.equal(Buffer.from(await pdfResponse.arrayBuffer()).subarray(0, 5).toString("ascii"), "%PDF-");
+  assert.equal(Buffer.from(await docxResponse.arrayBuffer()).subarray(0, 2).toString("ascii"), "PK");
   const bootstrap = await (await request("/api/bootstrap")).json();
   assert.equal(bootstrap.stats.total, total);
   assert.equal(new Set(bootstrap.jobs.map((job) => job.source)).size, 10);

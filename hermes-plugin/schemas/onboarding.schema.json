@@ -58,7 +58,7 @@
         "browser_profile": { "$ref": "#/$defs/authFlow" }
       }
     },
-    "prompts": { "type": "object", "required": ["start", "operator", "source", "terms", "secret", "glassdoor", "schedule"], "additionalProperties": { "type": "string", "minLength": 1 } },
+    "prompts": { "type": "object", "required": ["start", "operator", "source", "secret", "glassdoor", "schedule"], "additionalProperties": { "type": "string", "minLength": 1 } },
     "readiness": { "type": "object", "required": ["healthPath", "readyPath", "bootstrapPath", "allowPrivateLanHttp", "requireBootstrapWithoutLogin"], "additionalProperties": false, "properties": {
       "healthPath": { "const": "/api/health" },
       "readyPath": { "const": "/api/ready" },

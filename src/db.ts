@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, type TransitionInput } from "./workflow.js";
 import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "./domain.js";
+import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "./agent-defaults.js";
 
 const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -117,6 +118,7 @@ db.exec(`
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL DEFAULT 'busca-emprego',
     name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     role_type TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     source_ids TEXT NOT NULL DEFAULT '[]',
@@ -129,6 +131,8 @@ db.exec(`
     concurrency INTEGER NOT NULL DEFAULT 1,
     timeout_seconds INTEGER NOT NULL DEFAULT 120,
     prompt TEXT NOT NULL DEFAULT '',
+    memory_enabled INTEGER NOT NULL DEFAULT 1,
+    hermes_prompt_optimization INTEGER NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 1,
     published_version_id TEXT,
     draft_version_id TEXT,
@@ -344,6 +348,9 @@ ensureColumn("agent_configs", "allowed_domains", "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn("agent_configs", "version", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("agent_configs", "published_version_id", "TEXT");
 ensureColumn("agent_configs", "draft_version_id", "TEXT");
+ensureColumn("agent_configs", "memory_enabled", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("agent_configs", "hermes_prompt_optimization", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("agent_configs", "description", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("agent_runs", "agent_id", "TEXT");
 ensureColumn("agent_runs", "config_version_id", "TEXT");
 ensureColumn("agent_runs", "config_snapshot", "TEXT");
@@ -401,10 +408,11 @@ function migrateExistingAgentVersions() {
   const rows = db.prepare("SELECT * FROM agent_configs WHERE published_version_id IS NULL").all() as Record<string, unknown>[];
   for (const row of rows) {
     const snapshot = {
-      name: String(row.name), role_type: String(row.role_type), enabled: Number(row.enabled) === 1,
+      name: String(row.name), description: String(row.description ?? ""), role_type: String(row.role_type), enabled: Number(row.enabled) === 1,
       source_ids: parseJsonArray(row.source_ids), allowed_domains: parseJsonArray(row.allowed_domains), tool_scopes: parseJsonArray(row.tool_scopes),
       browser_enabled: Number(row.browser_enabled) === 1, can_create_jobs: Number(row.can_create_jobs) === 1, can_edit_jobs: Number(row.can_edit_jobs) === 1,
-      editable_fields: parseJsonArray(row.editable_fields), concurrency: Number(row.concurrency), timeout_seconds: Number(row.timeout_seconds), prompt: String(row.prompt ?? "")
+      editable_fields: parseJsonArray(row.editable_fields), concurrency: Number(row.concurrency), timeout_seconds: Number(row.timeout_seconds), prompt: String(row.prompt ?? ""),
+      memory_enabled: Number(row.memory_enabled ?? 1) === 1, hermes_prompt_optimization: Number(row.hermes_prompt_optimization ?? 0) === 1
     };
     const json = JSON.stringify(snapshot);
     const checksum = createHash("sha256").update(json).digest("hex");
@@ -444,6 +452,11 @@ export function listResumes(): Resume[] {
   return (db.prepare("SELECT * FROM resumes ORDER BY updated_at DESC").all() as Record<string, unknown>[]).map(mapResume);
 }
 
+export function getResume(id: string): Resume | null {
+  const row = db.prepare("SELECT * FROM resumes WHERE id=?").get(id) as Record<string, unknown> | undefined;
+  return row ? mapResume(row) : null;
+}
+
 export function listBaseResumes(): BaseResume[] {
   return (db.prepare("SELECT id,title,file_name,mime_type,is_base,created_at,updated_at FROM base_resumes ORDER BY is_base DESC, updated_at DESC").all() as Record<string, unknown>[]).map(mapBaseResume);
 }
@@ -463,6 +476,8 @@ function mapAgentConfig(row: Record<string, unknown>): AgentConfig {
     browser_enabled: Number(row.browser_enabled) === 1,
     can_create_jobs: Number(row.can_create_jobs) === 1,
     can_edit_jobs: Number(row.can_edit_jobs) === 1,
+    memory_enabled: Number(row.memory_enabled ?? 1) === 1,
+    hermes_prompt_optimization: Number(row.hermes_prompt_optimization ?? 0) === 1,
     source_ids: parseJsonArray(row.source_ids),
     allowed_domains: parseJsonArray(row.allowed_domains),
     tool_scopes: parseJsonArray(row.tool_scopes),
@@ -510,20 +525,22 @@ export function listJobEnrichmentEvents(jobId?: string) {
 }
 
 export function listCompanies(): CompanySummary[] {
-  const rows = db.prepare(`
-    SELECT company, COUNT(*) AS jobs,
-      AVG(CASE WHEN salary_min IS NOT NULL THEN salary_min ELSE NULL END) AS average_salary,
-      GROUP_CONCAT(DISTINCT location) AS locations,
-      GROUP_CONCAT(DISTINCT source) AS sources
-    FROM jobs GROUP BY company ORDER BY jobs DESC, company ASC
-  `).all() as Record<string, unknown>[];
-  return rows.map((row) => ({
-    name: String(row.company),
-    jobs: Number(row.jobs),
-    average_salary: row.average_salary == null ? null : Number(row.average_salary),
-    locations: String(row.locations ?? "").split(",").filter(Boolean),
-    sources: String(row.sources ?? "").split(",").filter(Boolean)
-  }));
+  const companies = new Map<string, { jobs: number; salaries: number[]; locations: Set<string>; sources: Set<string> }>();
+  for (const job of listJobs()) {
+    const company = companies.get(job.company) ?? { jobs: 0, salaries: [], locations: new Set<string>(), sources: new Set<string>() };
+    company.jobs += 1;
+    if (job.salary_min != null) company.salaries.push(job.salary_min);
+    if (job.location) company.locations.add(job.location);
+    if (job.source) company.sources.add(job.source);
+    companies.set(job.company, company);
+  }
+  return [...companies.entries()].map(([name, company]) => ({
+    name,
+    jobs: company.jobs,
+    average_salary: company.salaries.length ? company.salaries.reduce((sum, salary) => sum + salary, 0) / company.salaries.length : null,
+    locations: [...company.locations],
+    sources: [...company.sources]
+  })).sort((left, right) => right.jobs - left.jobs || left.name.localeCompare(right.name));
 }
 
 export function getBootstrap(projectId = "busca-emprego") {
@@ -1123,8 +1140,8 @@ export function listHumanQuestions(applicationId?: string) {
     : db.prepare("SELECT * FROM human_questions ORDER BY asked_at DESC").all();
 }
 
-const agentRoles = new Set(["source_scout", "job_enrichment", "match_evaluator", "resume_writer", "ats_reviewer", "custom"]);
-const safeAgentTools = new Set(["browser.read", "jobs.create", "jobs.enrich", "jobs.read", "salary.lookup"]);
+const agentRoles = new Set(["coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator", "preference_learner", "resume_writer", "ats_reviewer", "application_assistant", "custom"]);
+const safeAgentTools = new Set(["agent.invoke", "browser.read", "jobs.read", "jobs.write", "jobs.create", "jobs.enrich", "salary.lookup", "resume.read", "resume.write", "preferences.write", "application.prepare", "telegram.question"]);
 const agentEditableJobFields = new Set([
   "title", "company", "location", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period",
   "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url",
@@ -1141,8 +1158,10 @@ function validatedStringArray(value: unknown, allowed: Set<string>, field: strin
 
 function validateAgentConfigInput(input: Record<string, unknown>) {
   const name = String(input.name ?? "").trim();
+  const description = String(input.description ?? "").trim();
   const roleType = String(input.role_type ?? "");
   if (name.length < 3 || name.length > 100) throw new Error("agent.name.invalid");
+  if (description.length > 500) throw new Error("agent.description.too_long");
   if (!agentRoles.has(roleType)) throw new Error("agent.role_type.invalid");
   const toolScopes = validatedStringArray(input.tool_scopes ?? [], safeAgentTools, "tool_scopes");
   const editableFields = validatedStringArray(input.editable_fields ?? [], agentEditableJobFields, "editable_fields");
@@ -1162,7 +1181,9 @@ function validateAgentConfigInput(input: Record<string, unknown>) {
   if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 1800) throw new Error("agent.timeout.invalid");
   const prompt = String(input.prompt ?? "").trim();
   if (prompt.length > 12_000) throw new Error("agent.prompt.too_long");
-  return { name, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, enabled: input.enabled === false ? 0 : 1 };
+  const memoryEnabled = input.memory_enabled !== false;
+  const hermesPromptOptimization = Boolean(input.hermes_prompt_optimization);
+  return { name, description, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, memoryEnabled, hermesPromptOptimization, enabled: input.enabled === false ? 0 : 1 };
 }
 
 function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
@@ -1176,10 +1197,11 @@ function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
 
 function configSnapshot(values: ReturnType<typeof validateAgentConfigInput>) {
   return {
-    name: values.name, role_type: values.roleType, enabled: Boolean(values.enabled), source_ids: values.sourceIds,
+    name: values.name, description: values.description, role_type: values.roleType, enabled: Boolean(values.enabled), source_ids: values.sourceIds,
     allowed_domains: values.allowedDomains, tool_scopes: values.toolScopes, browser_enabled: values.browserEnabled,
     can_create_jobs: values.canCreate, can_edit_jobs: values.canEdit, editable_fields: values.editableFields,
-    concurrency: values.concurrency, timeout_seconds: values.timeoutSeconds, prompt: values.prompt
+    concurrency: values.concurrency, timeout_seconds: values.timeoutSeconds, prompt: values.prompt,
+    memory_enabled: values.memoryEnabled, hermes_prompt_optimization: values.hermesPromptOptimization
   };
 }
 
@@ -1202,25 +1224,87 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
   if (!row) return null;
   const snapshot = JSON.parse(row.config_json) as ReturnType<typeof configSnapshot>;
   return {
-    ...agent, name: snapshot.name, role_type: snapshot.role_type as AgentConfig["role_type"], enabled: snapshot.enabled,
+    ...agent, name: snapshot.name, description: snapshot.description ?? "", role_type: snapshot.role_type as AgentConfig["role_type"], enabled: snapshot.enabled,
     source_ids: snapshot.source_ids, allowed_domains: snapshot.allowed_domains, tool_scopes: snapshot.tool_scopes,
     browser_enabled: snapshot.browser_enabled, can_create_jobs: snapshot.can_create_jobs, can_edit_jobs: snapshot.can_edit_jobs,
-    editable_fields: snapshot.editable_fields, concurrency: snapshot.concurrency, timeout_seconds: snapshot.timeout_seconds, prompt: snapshot.prompt
+    editable_fields: snapshot.editable_fields, concurrency: snapshot.concurrency, timeout_seconds: snapshot.timeout_seconds, prompt: snapshot.prompt,
+    memory_enabled: snapshot.memory_enabled ?? true, hermes_prompt_optimization: snapshot.hermes_prompt_optimization ?? false
   };
 }
 
 export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
-  const values = validateAgentConfigInput(input);
+  const values = validateAgentConfigInput({
+    ...input,
+    prompt: String(input.prompt ?? "").trim() || DEFAULT_AGENT_PROMPT,
+    source_ids: input.source_ids ?? [],
+    allowed_domains: input.allowed_domains ?? [],
+    hermes_prompt_optimization: input.hermes_prompt_optimization ?? true
+  });
   const id = idFor(`agent|${projectId}|${Date.now()}|${values.name}`);
   const timestamp = now();
   db.prepare(`INSERT INTO agent_configs
-    (id,project_id,name,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,version,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, 1, timestamp, timestamp);
+    (id,project_id,name,description,role_type,enabled,source_ids,allowed_domains,tool_scopes,browser_enabled,can_create_jobs,can_edit_jobs,editable_fields,concurrency,timeout_seconds,prompt,memory_enabled,hermes_prompt_optimization,version,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, 1, timestamp, timestamp);
   const versionId = insertAgentVersion(id, 1, "published", values, actor);
   db.prepare("UPDATE agent_configs SET published_version_id=? WHERE id=?").run(versionId, id);
   audit("agent_config", id, "created", { actor, role_type: values.roleType, tool_scopes: values.toolScopes, editable_fields: values.editableFields });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
+
+function installDefaultAgentsOnce(projectId = "busca-emprego") {
+  const migration = "install_default_agent_presets_v1";
+  if (db.prepare("SELECT name FROM schema_migrations WHERE name=?").get(migration)) return;
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const portal of DEFAULT_JOB_PORTALS) {
+      db.prepare(`INSERT OR IGNORE INTO source_configs
+        (storage_id,id,project_id,name,source_type,domain,enabled,auth_strategy,secret_ref,browser_profile_id,terms_approved_at,terms_approved_by,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,1,'none',NULL,NULL,NULL,NULL,?,?)`)
+        .run(idFor(`source|${projectId}|${portal.id}`), portal.id, projectId, portal.name, portal.id === "linkedin-jobs" ? "linkedin" : portal.id === "glassdoor" ? "glassdoor" : "job_board", portal.domain, timestamp, timestamp);
+    }
+    for (const preset of DEFAULT_AGENT_PRESETS) {
+      if (db.prepare("SELECT id FROM agent_configs WHERE project_id=? AND name=?").get(projectId, preset.name)) continue;
+      createAgentConfig({
+        ...preset,
+        enabled: true,
+        browser_enabled: preset.browser_enabled ?? false,
+        can_create_jobs: preset.can_create_jobs ?? false,
+        can_edit_jobs: preset.can_edit_jobs ?? false,
+        editable_fields: preset.editable_fields ?? [],
+        concurrency: 1,
+        timeout_seconds: 120,
+        memory_enabled: preset.memory_enabled ?? false,
+        hermes_prompt_optimization: true
+      }, "system-default", projectId);
+    }
+    db.prepare("INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)").run(migration, timestamp);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+installDefaultAgentsOnce();
+
+function activateDefaultSourcesOnce(projectId = "busca-emprego") {
+  const migration = "activate_default_sources_v2";
+  if (db.prepare("SELECT name FROM schema_migrations WHERE name=?").get(migration)) return;
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const enable = db.prepare("UPDATE source_configs SET enabled=1,updated_at=? WHERE project_id=? AND id=?");
+    for (const sourceId of DEFAULT_AGENT_SOURCE_IDS) enable.run(timestamp, projectId, sourceId);
+    db.prepare("INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)").run(migration, timestamp);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+activateDefaultSourcesOnce();
 
 export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
@@ -1229,8 +1313,8 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   const values = validateAgentConfigInput(merged);
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
   const versionId = insertAgentVersion(id, nextVersion, "draft", values, actor);
-  db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
-    .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, nextVersion, versionId, now(), id, projectId);
+  db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
+    .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, nextVersion, versionId, now(), id, projectId);
   audit("agent_config", id, "draft_created", { actor, version: nextVersion, version_id: versionId, changed_fields: Object.keys(input) });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
@@ -1247,8 +1331,8 @@ export function publishAgentConfigVersion(agentId: string, versionId: string, ac
   try {
     db.prepare("UPDATE agent_config_versions SET status='retired' WHERE agent_id=? AND status='published'").run(agentId);
     db.prepare("UPDATE agent_config_versions SET status='published',published_by=?,published_at=? WHERE id=?").run(actor, timestamp, versionId);
-    db.prepare(`UPDATE agent_configs SET name=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,version=?,published_version_id=?,draft_version_id=NULL,updated_at=? WHERE id=? AND project_id=?`)
-      .run(values.name, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, Number(version.version), versionId, timestamp, agentId, projectId);
+    db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,version=?,published_version_id=?,draft_version_id=NULL,updated_at=? WHERE id=? AND project_id=?`)
+      .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, Number(version.version), versionId, timestamp, agentId, projectId);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   audit("agent_config", agentId, "published", { actor, version: Number(version.version), version_id: versionId });
@@ -1263,6 +1347,19 @@ export function rollbackAgentConfig(agentId: string, targetVersionId: string, ac
   const versionId = insertAgentVersion(agentId, nextVersion, "draft", values, actor);
   const result = publishAgentConfigVersion(agentId, versionId, actor, projectId);
   audit("agent_config", agentId, "rolled_back", { actor, target_version_id: targetVersionId, target_version: target.version, published_as: nextVersion });
+  return result;
+}
+
+export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
+  if (!agent) throw new Error("agent.not_found");
+  if (!agent.hermes_prompt_optimization) throw new Error("agent.prompt_optimization.disabled");
+  const reason = String(input.reason ?? "").trim();
+  if (reason.length < 10 || reason.length > 1000) throw new Error("agent.prompt_optimization.reason.invalid");
+  const prompt = String(input.prompt ?? "").trim();
+  if (!prompt || prompt === agent.prompt) throw new Error("agent.prompt_optimization.prompt.invalid");
+  const result = updateAgentConfig(agentId, { prompt }, "hermes-memory", projectId);
+  audit("agent_config", agentId, "prompt_proposed", { actor: "hermes-memory", reason, version: result?.version });
   return result;
 }
 
@@ -1297,10 +1394,8 @@ function validateSourceConfig(input: Record<string, unknown>) {
 export function upsertSourceConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const value = validateSourceConfig(input);
   const existing = db.prepare("SELECT id,terms_approved_at,terms_approved_by,created_at FROM source_configs WHERE id=? AND project_id=?").get(value.id, projectId) as Record<string, unknown> | undefined;
-  const approvalRequested = String(input.terms_confirmation ?? "") === "APROVO OS TERMOS DA FONTE";
-  const termsApprovedAt = approvalRequested ? now() : existing?.terms_approved_at == null ? null : String(existing.terms_approved_at);
-  const termsApprovedBy = approvalRequested ? actor : existing?.terms_approved_by == null ? null : String(existing.terms_approved_by);
-  if (value.enabled && !termsApprovedAt) throw new Error("source.terms_approval.required");
+  const termsApprovedAt = existing?.terms_approved_at == null ? null : String(existing.terms_approved_at);
+  const termsApprovedBy = existing?.terms_approved_by == null ? null : String(existing.terms_approved_by);
   const timestamp = now();
   db.prepare(`INSERT INTO source_configs
     (storage_id,id,project_id,name,source_type,domain,enabled,auth_strategy,secret_ref,browser_profile_id,terms_approved_at,terms_approved_by,created_at,updated_at)
@@ -1436,18 +1531,22 @@ export function resolveFieldConflict(conflictId: string, choice: "current" | "ca
 export function seedDemo() {
   const count = Number((db.prepare("SELECT COUNT(*) AS count FROM jobs").get() as { count: number }).count);
   if (count > 0) return;
+  const timestamp = now();
   const demo = [
-    { id: "demo-01", title: "Vaga demonstrativa 01", company: "Empresa confidencial", location: "Brasil", work_model: "Não informado", seniority: "Não informado", source: "Demonstração", match_score: 0, status: "found" as JobStatus, opening_status: "unknown" as const, description: "Registro fictício usado apenas para demonstrar a interface." },
-    { id: "demo-02", title: "Vaga demonstrativa 02", company: "Empresa confidencial", location: "Brasil", work_model: "Não informado", seniority: "Não informado", source: "Demonstração", match_score: 0, status: "validation" as JobStatus, opening_status: "unknown" as const, description: "Registro fictício usado apenas para demonstrar a interface." },
-    { id: "demo-03", title: "Vaga demonstrativa 03", company: "Empresa confidencial", location: "Brasil", work_model: "Não informado", seniority: "Não informado", source: "Demonstração", match_score: 0, status: "review" as JobStatus, opening_status: "unknown" as const, description: "Registro fictício usado apenas para demonstrar a interface." }
+    { id: "demo-01", title: "Analista de dados", company: "Empresa confidencial A", location: "São Paulo, SP", latitude: -23.5505, longitude: -46.6333, work_model: "Híbrido", seniority: "Pleno", source: "Portal demonstrativo", salary_min: 9_000, salary_max: 12_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-01", salary_checked_at: timestamp, match_score: 88, status: "resume_approved" as JobStatus, opening_status: "open" as const, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." },
+    { id: "demo-02", title: "Especialista em operações", company: "Empresa confidencial B", location: "Rio de Janeiro, RJ", latitude: -22.9068, longitude: -43.1729, work_model: "Remoto", seniority: "Sênior", source: "Site demonstrativo", salary_min: 11_000, salary_max: 15_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-02", salary_checked_at: timestamp, match_score: 84, status: "strong_match" as JobStatus, opening_status: "open" as const, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." },
+    { id: "demo-03", title: "Coordenador de projetos", company: "Empresa confidencial C", location: "Curitiba, PR", latitude: -25.4284, longitude: -49.2733, work_model: "Presencial", seniority: "Sênior", source: "Agregador demonstrativo", salary_min: 8_000, salary_max: 10_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-03", salary_checked_at: timestamp, match_score: 71, status: "review" as JobStatus, opening_status: "closed" as const, closed_at: timestamp, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." }
   ];
   for (const job of demo) {
-    upsertJob({ ...job, country: "Brasil", salary_source_url: "", source_url: "", application_url: "", currency: "BRL", posted_at: null });
+    upsertJob({ ...job, country: "Brasil", source_url: `https://example.invalid/${job.id}`, application_url: "", currency: "BRL", posted_at: null });
+    db.prepare("UPDATE jobs SET status=? WHERE id=?").run(job.status, job.id);
   }
   db.prepare("UPDATE jobs SET decision = 'interested', status = 'selected' WHERE id = 'demo-01'").run();
   createResume({ id: "demo-resume", job_id: "demo-01", title: "Currículo demonstrativo", status: "draft", content: "Conteúdo fictício para demonstração.", keywords: [], changes: [] });
   db.prepare("UPDATE resumes SET status = 'approved' WHERE id = 'demo-resume'").run();
   db.prepare("UPDATE jobs SET decision = 'interested', status = 'resume_approved' WHERE id = 'demo-01'").run();
   createApplication({ id: "demo-application", job_id: "demo-01", resume_id: "demo-resume", status: "queued", automation_mode: "manual", current_step: "Exemplo do fluxo manual", notes: "Registro fictício." });
+  selectManualApplication("demo-application");
+  updateApplication("demo-application", { status: "submitted", submitted_at: timestamp });
   recordAgentRun({ id: "demo-run", agent_name: "Radar de demonstração", status: "completed", started_at: new Date(Date.now() - 3600_000).toISOString(), found_count: 5, message: "Dados locais demonstrativos carregados." });
 }

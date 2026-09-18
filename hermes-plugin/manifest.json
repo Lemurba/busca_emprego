@@ -33,7 +33,7 @@
   },
   "dashboard": {
     "agentConfiguration": true,
-    "editableFields": ["name", "enabled", "promptVersionId", "customInstructions", "sourceIds", "allowedDomains", "requestedCapabilities", "concurrency", "timeoutMs"],
+    "editableFields": ["name", "description", "enabled", "promptVersionId", "customInstructions", "sourceIds", "allowedDomains", "requestedCapabilities", "concurrency", "timeoutMs"],
     "capabilities": "role-bounded"
   }
 }
