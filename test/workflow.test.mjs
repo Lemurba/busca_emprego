@@ -81,7 +81,7 @@ assert.equal(store.getBaseResumeFile(uploaded.id).data.subarray(0, 5).toString("
 const baseAudit = store.db.prepare("SELECT payload FROM audit_events WHERE entity_id = ? AND event_type = 'uploaded'").get(uploaded.id).payload;
 assert.equal(baseAudit.includes("base.pdf"), false, "audit events do not store the uploaded file name");
 
-const job = store.upsertJob({ id: "new-job", title: "Analyst", company: "Example Co", source: "Test", source_url: "https://example.test/job" });
+const job = store.upsertJob({ id: "new-job", title: "Analyst", company: "Example Co", source: "Test", source_url: "https://example.test/job", application_url: "https://example.test/job/apply" });
 assert.equal(job.status, "found");
 assert.equal(job.decision, "pending");
 const jobAudit = store.db.prepare("SELECT payload FROM audit_events WHERE entity_id = ? AND event_type = 'discovered'").get(job.id).payload;
@@ -103,7 +103,7 @@ assert.equal(automatic.automation_mode, "assisted", "creation cannot self-author
 assert.equal(automatic.status, "queued", "creation cannot register an unconfirmed submission");
 assert.equal(store.listAuthorizedApplications().length, 0);
 assert.throws(() => store.updateApplication(automatic.id, { status: "not_a_status" }), /inválido/i);
-assert.throws(() => store.updateApplication(automatic.id, { status: "in_progress" }), /autorização automática vigente/i);
+assert.throws(() => store.updateApplication(automatic.id, { status: "in_progress" }), /claim/i);
 assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, ""), /AUTORIZO/);
 store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO");
 assert.equal(store.listAuthorizedApplications().length, 1);
@@ -127,18 +127,18 @@ store.updateResume(draft.id, { status: "review", content: "changed" });
 assert.equal(store.listAuthorizedApplications().length, 0, "editing the approved version removes it from the authorized queue");
 assert.equal(store.listApplications().find((item) => item.id === automatic.id).automation_mode, "assisted");
 
-const runningJob = store.upsertJob({ id: "running-job", title: "Coordinator", company: "Example Co", source: "Test", source_url: "https://example.test/running" });
+const runningJob = store.upsertJob({ id: "running-job", title: "Coordinator", company: "Example Co", source: "Test", source_url: "https://example.test/running", application_url: "https://example.test/running/apply" });
 store.recordJobDecision(runningJob.id, "interested", "TENHO INTERESSE");
 const runningResume = store.createResume({ job_id: runningJob.id, title: "Running ATS" });
 store.approveResume(runningResume.id, "APROVO");
 const runningApplication = store.createApplication({ job_id: runningJob.id, resume_id: runningResume.id });
 store.authorizeAutoApplication(runningApplication.id, runningResume.id, "AUTORIZO");
-store.updateApplication(runningApplication.id, { status: "in_progress" });
+store.claimAuthorizedApplication(runningApplication.id, "test-worker", store.listAuthorizedApplications().find((item) => item.id === runningApplication.id).nonce);
 assert.throws(() => store.updateResume(runningResume.id, { status: "review" }), /em andamento/i);
 assert.throws(() => store.recordJobFeedback(runningJob.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" }), /em andamento/i);
 assert.throws(() => store.revokeAutoApplication(runningApplication.id), /após o início/i);
 assert.throws(() => store.updateApplication(runningApplication.id, { status: "queued" }), /recolocada na fila/i);
-store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp });
+store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp, evidence_ref: "portal:confirmation:running" });
 assert.equal(store.getJob(runningJob.id).decision, "applied", "an authorized in-progress application can record a confirmed submission");
 
 const manualJob = store.upsertJob({ id: "manual-job", title: "Specialist", company: "Example Co", source: "Test", source_url: "https://example.test/manual" });

@@ -11,6 +11,11 @@ try {
   const source = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator");
   assert.equal(source.browser_profile_id, "hermes/glassdoor");
   assert.equal(source.secret_ref, null);
+  store.approveSourceTerms(source.id, "operator");
+  store.setSourceReadiness(source.id, "ready", "smoke.ok", "operator");
+  const changedSource = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "jobs.glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator");
+  assert.equal(changedSource.readiness_status, "configured", "material source change must invalidate smoke readiness");
+  assert.equal(changedSource.terms_approved_at, null, "domain change must require new terms approval");
 
   const agent = store.createAgentConfig({
     name: "Enriquecedor versionado", description: "Completa benefícios usando evidências confiáveis.", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"],

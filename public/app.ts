@@ -54,7 +54,7 @@ type AgentRun = { id: string; agent_name: string; status: string; started_at: st
 type AgentConfig = { id: string; name: string; description: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; memory_enabled: boolean; hermes_prompt_optimization: boolean; version: number; published_version_id: string | null; draft_version_id: string | null };
 type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; stats: Record<string, any> };
 
 const statusLabels: Record<string, string> = {
   found: "Encontrada", validation: "Validar", strong_match: "Match forte", review: "Em revisão", selected: "Selecionada", resume: "Currículo", resume_approved: "Currículo aprovado", ready_to_apply: "Pronta", applying: "Candidatando", applied: "Candidatado", discarded: "Descartada", expired: "Perdida"
@@ -437,6 +437,30 @@ function renderAgents(data: Data) {
     <div class="company-grid agent-grid">${cards || `<div class="empty-state"><div><strong>Nenhum agente configurado</strong><span>Crie um coletor ou agente de enriquecimento.</span></div></div>`}</div>`;
 }
 
+function renderOperations(data: Data) {
+  const profile = data.activeProfile;
+  const facts = profile?.facts ?? [];
+  const jobName = (id: string) => {
+    const job = data.jobs.find((item) => item.id === id);
+    return job ? `${job.title} · ${job.company}` : id;
+  };
+  const rounds = data.rounds.map((round) => {
+    const counters = round.counters ?? {};
+    return `<tr><td><strong>${escapeHtml(String(round.id).slice(0, 12))}</strong><br><small>${escapeHtml(formatDate(round.started_at))}</small></td><td><span class="status-pill ${round.status === "completed" ? "teal" : round.status === "failed" ? "red" : "orange"}">${escapeHtml(round.status)}</span></td><td>${escapeHtml((round.source_ids ?? []).length)}</td><td>${escapeHtml(counters.received ?? 0)} recebidas · ${escapeHtml(counters.accepted ?? 0)} aceitas</td><td><code>${escapeHtml(String(round.profile_snapshot_id).slice(0, 12))}</code></td></tr>`;
+  }).join("");
+  const duplicates = data.possibleDuplicates.map((duplicate) => `<article class="ops-item"><div><strong>${escapeHtml(jobName(duplicate.job_id))}</strong><span>Possível duplicata de ${escapeHtml(jobName(duplicate.candidate_job_id))} · ${Math.round(Number(duplicate.similarity) * 100)}%</span></div><div class="button-row"><button class="primary-button" data-resolve-duplicate="${escapeHtml(duplicate.id)}" data-resolution="merged">Mesclar</button><button class="secondary-button" data-resolve-duplicate="${escapeHtml(duplicate.id)}" data-resolution="distinct">Manter distintas</button></div></article>`).join("");
+  const rules = data.preferences.rules.map((rule) => `<article class="ops-item"><div><strong>${escapeHtml(rule.reason || rule.action)}</strong><span>${escapeHtml(JSON.stringify(rule.match_json))} · ${escapeHtml(rule.suppressed_count ?? 0)} suprimidas</span></div><button class="secondary-button" data-preference-rule="${escapeHtml(rule.id)}" data-next-state="${rule.state === "active" ? "paused" : "active"}">${rule.state === "active" ? "Pausar" : "Ativar"}</button></article>`).join("");
+  const questions = data.humanQuestions.filter((question) => ["pending", "delivered", "delivery_failed"].includes(question.status)).map((question) => `<article class="ops-item"><div><strong>${escapeHtml(question.question)}</strong><span>${escapeHtml(question.field_ref)} · ${escapeHtml(question.status)} · candidatura ${escapeHtml(String(question.application_id).slice(0, 12))}</span></div><span class="status-pill orange">Ação humana</span></article>`).join("");
+  const sourceRows = data.sourceConfigs.map((source: any) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td><span class="status-pill ${source.readiness_status === "ready" ? "teal" : source.readiness_status === "blocked" ? "red" : "orange"}">${escapeHtml(source.readiness_status ?? "configured")}</span></td><td>${escapeHtml(source.readiness_reason || "Smoke test pendente")}</td><td>${escapeHtml(formatDate(source.last_smoke_test_at))}</td></tr>`).join("");
+  return `${pageHeading("SDD v2", "Operação verificável", "Perfil confirmado, execução por rodadas e decisões humanas num único painel.", `<button class="secondary-button" data-page="agents">Configurar agentes</button>`)}
+    <div class="metric-grid"><article class="metric-card"><div class="metric-top"><span>Perfil ativo</span><span class="metric-icon">◎</span></div><strong class="metric-value">${profile ? `v${escapeHtml(profile.version)}` : "—"}</strong><span class="metric-note">${profile ? `${facts.length} fatos rastreáveis` : "Confirmação necessária"}</span></article><article class="metric-card"><div class="metric-top"><span>Rodadas</span><span class="metric-icon">↻</span></div><strong class="metric-value">${data.rounds.length}</strong><span class="metric-note">${data.rounds.filter((round) => round.status === "running").length} em execução</span></article><article class="metric-card"><div class="metric-top"><span>Duplicatas</span><span class="metric-icon">≋</span></div><strong class="metric-value">${data.possibleDuplicates.length}</strong><span class="metric-note">aguardando decisão</span></article><article class="metric-card"><div class="metric-top"><span>Perguntas</span><span class="metric-icon">?</span></div><strong class="metric-value">${data.humanQuestions.filter((question) => ["pending", "delivered", "delivery_failed"].includes(question.status)).length}</strong><span class="metric-note">bloqueios humanos ativos</span></article></div>
+    <div class="dashboard-grid equal"><section class="panel"><div class="section-head flush"><div><h2>Perfil profissional</h2><p>Somente fatos confirmados entram no snapshot.</p></div>${profile ? `<span class="status-pill teal">${escapeHtml(profile.status)}</span>` : `<span class="status-pill red">Ausente</span>`}</div><div class="ops-list">${facts.map((fact: any) => `<article class="ops-item"><div><strong>${escapeHtml(fact.type)}</strong><span>${escapeHtml(Array.isArray(fact.value) ? fact.value.join(", ") : fact.value)} · ${escapeHtml(fact.origin)}${fact.evidence_page ? ` · página ${escapeHtml(fact.evidence_page)}` : ""}</span></div><span class="status-pill ${fact.state === "confirmed" ? "teal" : "orange"}">${Math.round(Number(fact.confidence) * 100)}%</span></article>`).join("") || `<div class="empty-state"><div><strong>Nenhum perfil confirmado</strong><span>Crie o perfil a partir do currículo-base antes da busca.</span></div></div>`}</div></section>
+    <section class="panel"><div class="section-head flush"><div><h2>Perguntas humanas</h2><p>Respostas continuam vinculadas à identidade e mensagem do Telegram.</p></div></div><div class="ops-list">${questions || `<div class="empty-state"><div><strong>Nenhuma pergunta pendente</strong><span>Automações não estão bloqueadas por resposta humana.</span></div></div>`}</div></section></div>
+    <section class="panel"><div class="section-head flush"><div><h2>Prontidão das fontes</h2><p>Rodadas incluem somente fontes aprovadas por smoke test.</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Fonte</th><th>Prontidão</th><th>Motivo</th><th>Último teste</th></tr></thead><tbody>${sourceRows || `<tr><td colspan="4">Nenhuma fonte configurada.</td></tr>`}</tbody></table></div></section>
+    <section class="panel"><div class="section-head flush"><div><h2>Rodadas de busca</h2><p>Snapshot de perfil e contadores preservados por execução.</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Rodada</th><th>Estado</th><th>Fontes</th><th>Contadores</th><th>Snapshot</th></tr></thead><tbody>${rounds || `<tr><td colspan="5">Nenhuma rodada registrada.</td></tr>`}</tbody></table></div></section>
+    <div class="dashboard-grid equal"><section class="panel"><div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Casos ambíguos exigem decisão explícita.</p></div></div><div class="ops-list">${duplicates || `<div class="empty-state"><div><strong>Fila limpa</strong><span>Nenhuma possível duplicata pendente.</span></div></div>`}</div></section><section class="panel"><div class="section-head flush"><div><h2>Preferências aprendidas</h2><p>Regras podem ser pausadas sem apagar histórico.</p></div></div><div class="ops-list">${rules || `<div class="empty-state"><div><strong>Sem regras</strong><span>Feedback explícito criará preferências auditáveis.</span></div></div>`}</div></section></div>`;
+}
+
 function renderSettings(data: Data) {
   const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(source.source_type)}</td><td>${escapeHtml(source.auth_strategy)}</td><td><span class="status-pill ${source.enabled ? "teal" : "red"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}">Editar</button></td></tr>`).join("");
   const activeAgents = data.agentConfigs.filter((agent) => agent.enabled);
@@ -454,7 +478,7 @@ function renderSettings(data: Data) {
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, () => string> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), agents: () => renderAgents(data), settings: () => renderSettings(data) };
+  const pages: Record<string, () => string> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: () => renderAgents(data), settings: () => renderSettings(data) };
   activeMap?.remove();
   activeMap = null;
   activeMapMarkers.clear();
@@ -465,12 +489,12 @@ function render() {
   document.body.classList.toggle("map-expanded", state.mapExpanded && Boolean(mapShell));
   initializeMap(data);
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.classList.toggle("active", element.dataset.page === state.page));
-  const secondaryPage = ["applications", "resumes", "companies", "analytics", "agents", "settings"].includes(state.page);
+  const secondaryPage = ["applications", "resumes", "companies", "analytics", "operations", "agents", "settings"].includes(state.page);
   const moreButton = document.querySelector<HTMLElement>("[data-mobile-more]");
   moreButton?.classList.toggle("active", secondaryPage);
   moreButton?.setAttribute("aria-current", secondaryPage ? "page" : "false");
   const pageTitle = document.getElementById("page-title");
-  if (pageTitle) pageTitle.textContent = ({ overview: "Visão geral", board: "Kanban", jobs: "Vagas", applications: "Candidaturas", resumes: "Currículos ATS", companies: "Empresas", analytics: "Análises", agents: "Agentes", settings: "Configurações" } as Record<string, string>)[state.page] ?? "Visão geral";
+  if (pageTitle) pageTitle.textContent = ({ overview: "Visão geral", board: "Kanban", jobs: "Vagas", applications: "Candidaturas", resumes: "Currículos ATS", companies: "Empresas", analytics: "Análises", operations: "Operação v2", agents: "Agentes", settings: "Configurações" } as Record<string, string>)[state.page] ?? "Visão geral";
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
   const addJobButton = document.getElementById("top-add-job") as HTMLButtonElement | null;
@@ -934,6 +958,10 @@ function bindViewEvents() {
     if (publish?.dataset.publishAgent && publish.dataset.versionId) { await fetchJson(`/api/agents/${encodeURIComponent(publish.dataset.publishAgent)}/publish`, { method: "POST", body: JSON.stringify({ version_id: publish.dataset.versionId }) }); await loadData(); toast("Versão do agente publicada."); return; }
     const history = target.closest<HTMLElement>("[data-agent-history]")?.dataset.agentHistory;
     if (history) { await showAgentHistory(history); return; }
+    const duplicate = target.closest<HTMLElement>("[data-resolve-duplicate]");
+    if (duplicate?.dataset.resolveDuplicate && duplicate.dataset.resolution) { await fetchJson(`/api/possible-duplicates/${encodeURIComponent(duplicate.dataset.resolveDuplicate)}/resolve`, { method: "POST", body: JSON.stringify({ status: duplicate.dataset.resolution }) }); await loadData(); toast("Decisão de duplicidade registrada."); return; }
+    const rule = target.closest<HTMLElement>("[data-preference-rule]");
+    if (rule?.dataset.preferenceRule && rule.dataset.nextState) { await fetchJson(`/api/preference-rules/${encodeURIComponent(rule.dataset.preferenceRule)}`, { method: "PATCH", body: JSON.stringify({ state: rule.dataset.nextState }) }); await loadData(); toast("Regra de preferência atualizada."); return; }
     } catch (error) {
       toast(error instanceof Error ? error.message : "Falha na operação", true);
     }

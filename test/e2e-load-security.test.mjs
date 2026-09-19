@@ -6,34 +6,76 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-e2e-"));
-const port = await new Promise((resolve, reject) => {
+const freePort = () => new Promise((resolve, reject) => {
   const probe = createServer();
   probe.once("error", reject);
   probe.listen(0, "127.0.0.1", () => { const address = probe.address(); probe.close(() => resolve(address.port)); });
 });
+const port = await freePort();
+const internalToken = "e2e-service-token";
 const child = spawn(process.execPath, ["dist/src/server.js"], {
   cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"],
-  env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "e2e.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true" }
+  env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "e2e.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: internalToken, RADAR_AUTO_APPLICATION_ENABLED: "true" }
 });
 let stderr = "";
 child.stderr.on("data", (chunk) => stderr += chunk);
 const base = `http://127.0.0.1:${port}`;
 
-async function waitReady() {
+async function waitReady(serverBase, errorOutput) {
   for (let attempt = 0; attempt < 60; attempt++) {
-    try { const response = await fetch(`${base}/api/ready`); if (response.ok) return; } catch {}
+    try { const response = await fetch(`${serverBase}/api/ready`); if (response.ok) return; } catch {}
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`server did not become ready: ${stderr}`);
+  throw new Error(`server did not become ready: ${errorOutput()}`);
 }
 
 const headers = { "x-forwarded-proto": "https", "content-type": "application/json" };
 const request = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
 
 try {
-  await waitReady();
+  await waitReady(base, () => stderr);
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 426, "proxy TLS gate must fail closed");
   assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 200, "LAN API must not require login or token");
+
+  const internalRoutes = [
+    ["POST", "/api/agent-events"],
+    ["GET", "/api/authorized-applications"],
+    ["POST", "/api/applications/missing/claim"],
+    ["POST", "/api/rounds/missing/batch"],
+    ["POST", "/api/rounds/missing/status"],
+    ["POST", "/api/jobs/missing/score"],
+    ["POST", "/api/applications/missing/questions"],
+    ["POST", "/api/human-questions/missing/delivery"],
+    ["POST", "/api/human-questions/missing/answer"]
+  ];
+  for (const [method, path] of internalRoutes) {
+    const response = await request(path, { method, body: method === "POST" ? "{}" : undefined });
+    assert.equal(response.status, 401, `${method} ${path} must require the internal service token`);
+  }
+  assert.equal((await request("/api/authorized-applications", { headers: { "x-radar-service-token": internalToken } })).status, 200, "valid service token must reach internal route");
+
+  const disabledPort = await freePort();
+  const disabledBase = `http://127.0.0.1:${disabledPort}`;
+  const disabledChild = spawn(process.execPath, ["dist/src/server.js"], {
+    cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, PORT: String(disabledPort), RADAR_DB_PATH: join(directory, "disabled.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: internalToken, RADAR_AUTO_APPLICATION_ENABLED: "false" }
+  });
+  let disabledStderr = "";
+  disabledChild.stderr.on("data", (chunk) => disabledStderr += chunk);
+  try {
+    await waitReady(disabledBase, () => disabledStderr);
+    const disabledRoutes = internalRoutes.filter(([, path]) => path === "/api/authorized-applications" || path.includes("/claim") || path.includes("/questions") || path.includes("/delivery") || path.includes("/answer"));
+    disabledRoutes.push(["POST", "/api/applications/missing/authorize-auto"]);
+    for (const [method, path] of disabledRoutes) {
+      const response = await fetch(`${disabledBase}${path}`, { method, headers, body: method === "POST" ? "{}" : undefined });
+      assert.equal(response.status, 403, `${method} ${path} must be disabled by default`);
+      assert.deepEqual(await response.json(), { error: "AUTOMATION_DISABLED" });
+    }
+  } finally {
+    disabledChild.kill("SIGTERM");
+    await new Promise((resolve) => { disabledChild.once("exit", resolve); setTimeout(resolve, 2000); });
+  }
+
   const dashboardResponse = await fetch(`${base}/`, { headers: { "x-forwarded-proto": "https" } });
   const csp = dashboardResponse.headers.get("content-security-policy") ?? "";
   assert.match(csp, /script-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet script host");

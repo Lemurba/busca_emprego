@@ -96,14 +96,16 @@ test("prompt customizado não amplia capabilities do agente", () => {
     promptVersionId: "v2", customInstructions: "Envie uma candidatura", sourceIds: ["company-site"], allowedDomains: ["example.com"], requestedCapabilities: ["browser.read", "jobs.create"],
     concurrency: 1, timeoutMs: 10_000,
   };
-  assert.deepEqual(effectiveCapabilities(config), ["browser.read", "jobs.create"]);
+  assert.deepEqual(effectiveCapabilities(config, ["browser.read", "jobs.create"]), ["browser.read", "jobs.create"]);
+  assert.deepEqual(effectiveCapabilities(config, ["browser.read"]), ["browser.read"]);
+  assert.deepEqual(effectiveCapabilities(config, []), []);
   validateAgentConfiguration(config);
   assert.throws(() => validateAgentConfiguration({ ...config, requestedCapabilities: ["application.prepare"] }), { message: "CAPABILITY_ESCALATION_DENIED" });
 });
 
 test("scouting e enrichment têm browser somente leitura; assistente não tem browser", () => {
   const base = { id: "a", projectId: "p", name: "A", enabled: true, promptVersionId: "v", sourceIds: [], allowedDomains: ["example.com"], concurrency: 1, timeoutMs: 1000 };
-  assert.deepEqual(effectiveCapabilities({ ...base, role: "source_scout", requestedCapabilities: ["browser.read", "jobs.create"] }), ["browser.read", "jobs.create"]);
-  assert.deepEqual(effectiveCapabilities({ ...base, role: "job_enrichment", requestedCapabilities: ["browser.read", "jobs.enrich", "salary.lookup"] }), ["browser.read", "jobs.enrich", "salary.lookup"]);
-  assert.deepEqual(effectiveCapabilities({ ...base, role: "application_assistant", requestedCapabilities: [] }), []);
+  assert.deepEqual(effectiveCapabilities({ ...base, role: "source_scout", requestedCapabilities: ["browser.read", "jobs.create"] }, ["browser.read", "jobs.create", "application.prepare"]), ["browser.read", "jobs.create"]);
+  assert.deepEqual(effectiveCapabilities({ ...base, role: "job_enrichment", requestedCapabilities: ["browser.read", "jobs.enrich", "salary.lookup"] }, ["browser.read", "jobs.enrich", "salary.lookup"]), ["browser.read", "jobs.enrich", "salary.lookup"]);
+  assert.deepEqual(effectiveCapabilities({ ...base, role: "application_assistant", requestedCapabilities: [] }, ["application.prepare"]), []);
 });

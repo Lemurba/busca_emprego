@@ -17,6 +17,9 @@ export type JobStatus =
 
 export interface Job {
   id: string;
+  project_id?: string;
+  source_job_id?: string | null;
+  canonical_url?: string;
   title: string;
   company: string;
   location: string;
@@ -50,6 +53,9 @@ export interface Job {
   responsibilities: string;
   additional_information: string;
   match_score: number;
+  role_family?: string | null;
+  role_family_confidence?: number | null;
+  suppressed?: boolean;
   status: JobStatus;
   version: number;
   posted_at: string | null;
@@ -76,6 +82,13 @@ export interface AgentConfig {
   prompt: string;
   memory_enabled: boolean;
   hermes_prompt_optimization: boolean;
+  model_id?: string | null;
+  reasoning_effort?: string | null;
+  max_input_tokens?: number | null;
+  max_output_tokens?: number | null;
+  max_cost_per_run?: number | null;
+  fallback_policy?: string;
+  structured_output_required?: boolean;
   version: number;
   published_version_id: string | null;
   draft_version_id: string | null;
@@ -95,6 +108,9 @@ export interface SourceConfigRecord {
   browser_profile_id: string | null;
   terms_approved_at: string | null;
   terms_approved_by: string | null;
+  readiness_status?: "configured" | "not_ready" | "ready" | "paused" | "blocked";
+  readiness_reason?: string;
+  last_smoke_test_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -109,6 +125,12 @@ export interface Resume {
   content: string;
   keywords: string[];
   changes: string[];
+  profile_snapshot_id?: string | null;
+  generation_source?: "manual" | "writer";
+  facts_used?: string[];
+  gaps?: string[];
+  review_status?: "not_run" | "pass" | "fail" | "override";
+  review_findings?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -121,6 +143,10 @@ export interface BaseResume {
   is_base: boolean;
   created_at: string;
   updated_at: string;
+  sha256?: string;
+  extraction_status?: "extracted" | "needs_review";
+  extraction_error?: string | null;
+  page_count?: number;
 }
 
 export interface Application {
@@ -137,6 +163,11 @@ export interface Application {
   notes: string;
   created_at: string;
   updated_at: string;
+  authorization_id?: string | null;
+  evidence_ref?: string | null;
+  claimed_by?: string | null;
+  claimed_at?: string | null;
+  expires_at?: string | null;
 }
 
 export interface AgentRun {
@@ -150,6 +181,11 @@ export interface AgentRun {
   agent_id?: string | null;
   config_version_id?: string | null;
   config_snapshot?: Record<string, unknown> | null;
+  model_effective?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost?: number | null;
+  latency_ms?: number | null;
 }
 
 export interface CompanySummary {

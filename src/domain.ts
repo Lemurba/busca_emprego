@@ -1,5 +1,8 @@
 /** Deterministic domain rules from the production SDD. No persistence or I/O. */
 
+import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
+
 export class DomainValidationError extends Error {
   constructor(
     message: string,
@@ -55,17 +58,52 @@ export function companyKey(company: string, legalSuffixes: readonly string[] = D
 
 const TRACKING_PARAMETERS = new Set(["gclid", "fbclid"]);
 
+/** Blocks literal private/link-local destinations before any connector fetches them. */
+export function isPrivateDestination(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (["localhost", "localhost.localdomain", "broadcasthost"].includes(host) || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  const version = isIP(host);
+  if (version === 4) {
+    const octets = host.split(".").map(Number);
+    const [a, b] = octets;
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  if (version === 6) {
+    const normalized = host.replace(/^0:0:0:0:0:ffff:/u, "::ffff:");
+    return normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd")
+      || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")
+      || normalized.startsWith("::ffff:");
+  }
+  return false;
+}
+
+export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly string[]): URL {
+  let url: URL;
+  try { url = new URL(normalizeUnicode(input)); } catch { throw new DomainValidationError("URL inválida", "url"); }
+  if (url.protocol !== "https:") throw new DomainValidationError("A URL deve usar HTTPS", "url");
+  if (url.username || url.password) throw new DomainValidationError("URL não pode conter credenciais", "url");
+  const hostname = url.hostname.toLowerCase();
+  if (isPrivateDestination(hostname)) throw new DomainValidationError("Destino privado não permitido", "url");
+  if (allowedDomains?.length && !allowedDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) {
+    throw new DomainValidationError("Domínio não permitido", "url");
+  }
+  return url;
+}
+
+/** Resolves every address to avoid accepting a public hostname that points at LAN. */
+export async function assertResolvablePublicHttpsUrl(input: string, allowedDomains?: readonly string[]): Promise<URL> {
+  const url = assertPublicHttpsUrl(input, allowedDomains);
+  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => isPrivateDestination(address))) {
+    throw new DomainValidationError("Destino DNS privado não permitido", "url");
+  }
+  return url;
+}
+
 /** Canonical form used for identity. The original URL should still be stored separately. */
 export function canonicalizeJobUrl(input: string): string {
-  let url: URL;
-  try {
-    url = new URL(normalizeUnicode(input));
-  } catch {
-    throw new DomainValidationError("URL inválida", "url");
-  }
-  if (url.protocol !== "https:") {
-    throw new DomainValidationError("A URL deve usar HTTPS", "url");
-  }
+  const url = assertPublicHttpsUrl(input);
 
   url.hash = "";
   for (const key of [...url.searchParams.keys()]) {

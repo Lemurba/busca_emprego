@@ -1,4 +1,4 @@
-import type { AgentConfiguration, RoleType, ToolCapability } from "./types.js";
+import type { AgentConfiguration, CredentialCapabilities, RoleType, ToolCapability } from "./types.js";
 
 const ROLE_CAPABILITIES: Readonly<Record<RoleType, readonly ToolCapability[]>> = Object.freeze({
   coordinator: ["agent.invoke", "jobs.read"],
@@ -17,9 +17,10 @@ export function allowedCapabilities(role: RoleType): readonly ToolCapability[] {
 }
 
 /** Prompt/customization text is deliberately not an input to this calculation. */
-export function effectiveCapabilities(config: AgentConfiguration): readonly ToolCapability[] {
+export function effectiveCapabilities(config: AgentConfiguration, credentialCapabilities: CredentialCapabilities): readonly ToolCapability[] {
   const allowed = new Set(allowedCapabilities(config.role));
-  return config.requestedCapabilities.filter((capability, index, all) => allowed.has(capability) && all.indexOf(capability) === index);
+  const credential = new Set(credentialCapabilities);
+  return config.requestedCapabilities.filter((capability, index, all) => allowed.has(capability) && credential.has(capability) && all.indexOf(capability) === index);
 }
 
 export function validateAgentConfiguration(config: AgentConfiguration): void {
@@ -28,6 +29,6 @@ export function validateAgentConfiguration(config: AgentConfiguration): void {
   if (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 1_000) throw new Error("INVALID_AGENT_TIMEOUT");
   if (config.requestedCapabilities.includes("browser.read") && config.allowedDomains.length === 0) throw new Error("ALLOWED_DOMAINS_REQUIRED");
   if (config.allowedDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(domain))) throw new Error("INVALID_ALLOWED_DOMAIN");
-  const effective = new Set(effectiveCapabilities(config));
-  if (config.requestedCapabilities.some((capability) => !effective.has(capability))) throw new Error("CAPABILITY_ESCALATION_DENIED");
+  const allowed = new Set(allowedCapabilities(config.role));
+  if (config.requestedCapabilities.some((capability) => !allowed.has(capability))) throw new Error("CAPABILITY_ESCALATION_DENIED");
 }
