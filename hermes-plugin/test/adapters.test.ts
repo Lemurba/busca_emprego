@@ -15,7 +15,7 @@ test("adapters concretos usam gateway autenticado, isolam operações e exigem e
       received.push({ path: req.url!, auth: req.headers.authorization, body });
       res.setHeader("content-type", "application/json");
       if (req.url === "/v1/plugin-agents/invoke") return res.end(JSON.stringify({ output: { ok: true } }));
-      if (req.url === "/v1/read") return res.end(JSON.stringify({ finalUrl: body.url, text: "vaga", links: [] }));
+      if (req.url === "/v1/read") return res.end(JSON.stringify({ finalUrl: body.url.endsWith("/private-redirect") ? "https://127.0.0.1/internal" : body.url, text: "vaga", links: [] }));
       if (req.url === "/v1/applications/execute") return res.end(JSON.stringify({ status: "submitted", currentStep: "confirmado", evidenceRef: "portal:confirmation:1" }));
       if (req.url === "/v1/telegram/questions") return res.end(JSON.stringify({ messageId: "tg-1" }));
       res.statusCode = 404; res.end("{}");
@@ -36,12 +36,13 @@ test("adapters concretos usam gateway autenticado, isolam operações e exigem e
   const runtime = new HermesHttpRuntimeAdapter(config, secrets);
   assert.deepEqual((await runtime.invokeAgent({ invocationId: "i", runId: "r", role: "source_scout", promptVersionId: "v", input: {}, timeoutMs: 1000 }, new AbortController().signal)).output, { ok: true });
 
-  const browser = new BrowserHarnessHttpAdapter(config, secrets, ["jobs.example.com"]);
-  const page = await browser.readPage({ url: "https://jobs.example.com/1", purpose: "scouting", sourceId: "company" }, new AbortController().signal);
+  const browser = new BrowserHarnessHttpAdapter(config, secrets, ["203.0.113.1", "127.0.0.1"]);
+  const page = await browser.readPage({ url: "https://203.0.113.1/1", purpose: "scouting", sourceId: "company" }, new AbortController().signal);
   assert.equal(page.text, "vaga");
   await assert.rejects(browser.readPage({ url: "https://evil.example/1", purpose: "scouting" }, new AbortController().signal), /DOMAIN_FORBIDDEN/);
+  await assert.rejects(browser.readPage({ url: "https://203.0.113.1/private-redirect", purpose: "scouting" }, new AbortController().signal), /PRIVATE_DESTINATION_FORBIDDEN/);
 
-  const applicationUrl = "https://jobs.example.com/apply/1";
+  const applicationUrl = "https://203.0.113.1/apply/1";
   const result = await browser.executeAuthorizedApplication({ authorizationId: "auth-1", applicationId: "app-1", jobId: "job-1", resumeId: "cv-1", resumeVersion: 2, applicationUrl, applicationUrlHash: createHash("sha256").update(applicationUrl).digest("hex") }, new AbortController().signal);
   assert.equal(result.status, "submitted");
   await assert.rejects(browser.executeAuthorizedApplication({ authorizationId: "auth-1", applicationId: "app-1", jobId: "job-1", resumeId: "cv-1", resumeVersion: 2, applicationUrl, applicationUrlHash: "wrong" }, new AbortController().signal), /AUTHORIZATION_INVALID/);
@@ -53,6 +54,20 @@ test("adapters concretos usam gateway autenticado, isolam operações e exigem e
   const telegramRequest = received.find((item) => item.path === "/v1/telegram/questions");
   assert.ok(telegramRequest);
   assert.equal(telegramRequest.body.recipientId, undefined, "Hermes escolhe o Telegram já vinculado; o plugin não configura destinatário");
+});
+
+test("Browser Harness rejeita destinos privados e URLs inseguras antes da chamada", async () => {
+  const config = { hermesBaseUrl: "https://hermes.example", browserHarnessBaseUrl: "https://browser.example", serviceTokenSecretRef: "x" };
+  const browser = new BrowserHarnessHttpAdapter(config, { async resolve() { throw new Error("não deve resolver segredo"); } }, [
+    "10.0.0.1", "127.0.0.1", "169.254.1.1", "::1", "fc00::1", "fe80::1", "localhost", "203.0.113.1",
+  ]);
+  const signal = new AbortController().signal;
+  for (const url of [
+    "https://10.0.0.1/", "https://127.0.0.1/", "https://169.254.1.1/",
+    "https://[::1]/", "https://[fc00::1]/", "https://[fe80::1]/", "https://localhost/",
+  ]) await assert.rejects(browser.readPage({ url, purpose: "scouting" }, signal), /PRIVATE_DESTINATION_FORBIDDEN/);
+  await assert.rejects(browser.readPage({ url: "http://203.0.113.1/", purpose: "scouting" }, signal), /UNSAFE_URL/);
+  await assert.rejects(browser.readPage({ url: "https://user:pass@203.0.113.1/", purpose: "scouting" }, signal), /UNSAFE_URL/);
 });
 
 test("endpoints externos sem TLS são recusados", async () => {

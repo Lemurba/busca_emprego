@@ -109,6 +109,13 @@ h3 { margin-bottom: 5px; color: var(--navy); font-size: 14px; }
 .highlight .metric-note { color: #9db0d9; }
 
 .panel { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--white); }
+.ops-list { display: grid; gap: 10px; }
+.ops-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.ops-item:last-child { border-bottom: 0; }
+.ops-item > div:first-child { min-width: 0; }
+.ops-item strong, .ops-item span { display: block; }
+.ops-item span { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.ops-item .button-row { flex: 0 0 auto; margin-top: 0; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, .7fr); gap: 15px; }
 .dashboard-grid.equal { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .analytics-content { display: grid; gap: 20px; }

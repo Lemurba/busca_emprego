@@ -17,6 +17,7 @@ export type ToolCapability =
   | "preferences.write"
   | "application.prepare"
   | "telegram.question";
+export type CredentialCapabilities = readonly ToolCapability[];
 export type RunStatus = "running" | "completed" | "partial" | "failed";
 
 export interface PluginConfig {
@@ -76,7 +77,7 @@ export interface AgentConfiguration {
   customInstructions?: string;
   sourceIds: readonly string[];
   allowedDomains: readonly string[];
-  /** Requested scopes are intersected with immutable role capabilities. */
+  /** Capabilities saved in the published configuration. */
   requestedCapabilities: readonly ToolCapability[];
   concurrency: number;
   timeoutMs: number;

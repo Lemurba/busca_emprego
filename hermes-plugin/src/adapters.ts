@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 import type {
   AgentInvocation, AgentResult, ApplicationAuthorizationEnvelope, ApplicationBrowserHarnessAdapter,
   BrowserApplicationResult, HermesRuntimeAdapter, IntegrationConfig, ReadonlyBrowserHarnessAdapter,
@@ -8,6 +10,17 @@ import type { HermesTelegramCapability, TelegramQuestionMessage } from "./telegr
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
+const PRIVATE_DESTINATIONS = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
+  ["172.16.0.0", 12], ["192.168.0.0", 16], ["224.0.0.0", 4],
+] as const) PRIVATE_DESTINATIONS.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [["fc00::", 7], ["fe80::", 10], ["ff00::", 8]] as const) {
+  PRIVATE_DESTINATIONS.addSubnet(network, prefix, "ipv6");
+}
+PRIVATE_DESTINATIONS.addAddress("::", "ipv6");
+PRIVATE_DESTINATIONS.addAddress("::1", "ipv6");
+
 function endpoint(base: string, path: string, allowInsecureLocalhost = false): URL {
   const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
   const localHttp = url.protocol === "http:" && LOCAL_HOSTS.has(url.hostname) && allowInsecureLocalhost;
@@ -16,14 +29,23 @@ function endpoint(base: string, path: string, allowInsecureLocalhost = false): U
   return url;
 }
 
-function assertPublicHttps(value: string, allowedDomains?: readonly string[]): URL {
+async function assertPublicHttps(value: string, allowedDomains?: readonly string[]): Promise<URL> {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("UNSAFE_URL");
-  const hostname = url.hostname.toLowerCase();
-  if (LOCAL_HOSTS.has(hostname) || hostname.endsWith(".local")) throw new Error("PRIVATE_DESTINATION_FORBIDDEN");
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (allowedDomains?.length && !allowedDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) {
     throw new Error("DOMAIN_FORBIDDEN");
   }
+  let addresses: string[];
+  try {
+    addresses = isIP(hostname) ? [hostname] : (await lookup(hostname, { all: true, verbatim: true })).map(({ address }) => address);
+  } catch {
+    throw new Error("DNS_RESOLUTION_FAILED");
+  }
+  if (!addresses.length || addresses.some((address) => {
+    const family = isIP(address);
+    return !family || PRIVATE_DESTINATIONS.check(address, family === 4 ? "ipv4" : "ipv6");
+  })) throw new Error("PRIVATE_DESTINATION_FORBIDDEN");
   return url;
 }
 
@@ -67,16 +89,16 @@ export class BrowserHarnessHttpAdapter extends HttpAdapterBase implements Readon
   constructor(config: IntegrationConfig, secrets: SecretResolver, readonly allowedDomains: readonly string[]) { super(config, secrets); }
 
   async readPage(request: { url: string; purpose: "scouting" | "enrichment"; sourceId?: string; authorization?: SourceAuthorization }, signal: AbortSignal) {
-    assertPublicHttps(request.url, this.allowedDomains);
+    await assertPublicHttps(request.url, this.allowedDomains);
     if (request.authorization && request.authorization.sourceId !== request.sourceId) throw new Error("SOURCE_AUTH_MISMATCH");
     const url = endpoint(this.config.browserHarnessBaseUrl, "v1/read", this.config.allowInsecureLocalhost);
     const result = await postJson<{ finalUrl: string; text: string; links: { text: string; url: string }[] }>(url, request, await this.token(), signal, this.timeout());
-    assertPublicHttps(result.finalUrl, this.allowedDomains);
+    await assertPublicHttps(result.finalUrl, this.allowedDomains);
     return { finalUrl: result.finalUrl, text: result.text, links: result.links ?? [] };
   }
 
   async executeAuthorizedApplication(request: ApplicationAuthorizationEnvelope, signal: AbortSignal): Promise<BrowserApplicationResult> {
-    const applicationUrl = assertPublicHttps(request.applicationUrl, this.allowedDomains);
+    const applicationUrl = await assertPublicHttps(request.applicationUrl, this.allowedDomains);
     const expectedHash = createHash("sha256").update(applicationUrl.toString()).digest("hex");
     if (!request.authorizationId || request.applicationUrlHash !== expectedHash || request.resumeVersion < 1) throw new Error("APPLICATION_AUTHORIZATION_INVALID");
     const url = endpoint(this.config.browserHarnessBaseUrl, "v1/applications/execute", this.config.allowInsecureLocalhost);
