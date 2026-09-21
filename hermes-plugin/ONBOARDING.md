@@ -16,6 +16,8 @@ Este é o manual operacional que o Hermes deve seguir ao instalar ou reconfigura
 
 O Hermes usa os padrões `/opt/hermes/plugins/busca-emprego`, `/var/lib/hermes/busca-emprego/radar.sqlite` e porta interna `8787`. Só pergunta o que não puder descobrir automaticamente. Texto recomendado:
 
+> Instalação já existente: descubra os valores reais antes de perguntar ou recriar qualquer coisa — raiz do repositório, porta, banco, operador e token interno estão no processo em execução e em `.env.local`. Nesta máquina: raiz `/opt/data/dashboard/busca_emprego`, porta `666`, banco `data/radar.sqlite`, operador `operador-local` e CLI do Hermes em `/opt/hermes/bin/hermes` (fora do `PATH`). O `RADAR_INTERNAL_SERVICE_TOKEN` já existe em `.env.local` (modo 600) e nunca deve ser impresso na conversa, em log ou em relatório.
+
 > Vou instalar a única versão de produção do Busca Emprego usando os padrões do Hermes. O dashboard e a API ficarão abertos na rede doméstica, sem login ou token. Usarei o Telegram que já está vinculado ao Hermes.
 
 > Qual identificador do operador responsável por esta instalação? Ele será usado em `RADAR_OPERATOR_ID` e na auditoria.
@@ -121,6 +123,11 @@ Depois, faça uma execução manual com uma fonte. Confirme que a vaga contém `
 O Hermes fornece ao plugin a capability Telegram e a identidade vinculada à conta atual. O plugin não possui configuração de bot ou destinatário e não inclui `recipientId` na requisição: `v1/telegram/questions` entrega pelo vínculo já mantido pelo Hermes. O setup executa apenas um teste de capability. Uma resposta resolve somente o `human_question_id` correspondente e não concede `AUTORIZO`.
 
 O executor de candidatura usa o Browser Harness separado e chama `v1/applications/execute` somente com o envelope vigente de autorização. Mudança de URL, currículo ou versão invalida a autorização. Sem evidência observável do portal, o resultado não pode ser `submitted`.
+
+Nesta instalação o Hermes não expõe `v1/telegram/questions` nem `v1/applications/execute`, então a ponte e o executor são feitos pelo próprio Hermes sobre as rotas internas do app:
+
+- **Entrega das perguntas humanas**: `scripts/ops/notify-human-questions.mjs` usa a capability Telegram já vinculada (`hermes send --to telegram`) e marca a entrega em `POST /api/human-questions/{id}/delivery` — sem bot token, chat id ou destinatário. Falha de envio fica em `delivery_failed`, continua respondível na conversa e é reenviada com `--retry-failed`.
+- **Candidatura autorizada**: o navegador é o Browser Harness do Hermes e `scripts/ops/apply-authorized.mjs` guarda o protocolo — `list` (fila com nonce, hash da URL e TTL), `claim` (reserva com o nonce e grava o estado em `.radar/executor/`), `verify` (confere a URL observada contra o hash autorizado, usando a mesma canonicalização do app), `submit` (só com `--evidence-ref` do portal), `fail` (motivo higienizado, volta para revisão) e `ask` (pergunta humana, entregue pela ponte). Sem `claim` registrado ou sem evidência observável, o envio não é confirmado. O gate `RADAR_AUTO_APPLICATION_ENABLED` está ligado nesta instalação e a fila exige o token interno (`401` sem ele). O navegador dessa execução é sempre a **instância única noVNC** (`/opt/data/chrome-app`; viewer `http://192.168.1.183:6080/vnc.html`, CDP `http://127.0.0.1:9222` no mesmo Chrome): o Hermes está configurado para anexar nela e **falha** se a stack estiver fora do ar, em vez de abrir outro Chrome. Suba com `bash /opt/data/chrome-app/ensure.sh`; nenhuma candidatura pode rodar em outro navegador, perfil ou endpoint CDP.
 
 ## 8. Reconfiguração, rotação e recuperação
 

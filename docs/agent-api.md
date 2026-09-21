@@ -20,7 +20,7 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
 - Não envie `Authorization`, chave da API ou `X-Project-Id`: a instalação usa o projeto fixo `busca-emprego` e aceita requisições de qualquer cliente que alcance a porta na LAN.
 - Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. O servidor confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
-- A anonimização legada e os dados demonstrativos são opt-in e devem ficar desabilitados em produção.
+- O aplicativo não cria dados exemplificativos: o banco inicia vazio e só recebe vagas de agentes, rodadas ou uso real do dashboard. A anonimização legada permanece opt-in e deve ficar desabilitada em produção.
 
 ## Capacidades e allowlist
 
@@ -295,6 +295,33 @@ Para autorizar, envie `resume_id` e a confirmação exata `AUTORIZO`:
 ```
 
 A vaga deve estar marcada como de interesse, o currículo associado deve estar aprovado, e a autorização fica vinculada ao ID/versão do currículo e à `application_url` canônica/hash apresentada ao usuário. Mudança de URL, host ou redirecionamento invalida a autorização e exige novo `AUTORIZO`. Uma autorização já concedida não pode ser repetida; revogue-a primeiro para voltar ao fluxo manual ou reiniciar a escolha. O executor Hermes/Browser Harness deve consultar `GET /api/authorized-applications`; alterar para `in_progress` só é permitido para um item válido da fila. O endpoint da fila entrega metadados da vaga e o conteúdo do currículo ATS, mas não executa o portal nem baixa o PDF-base automaticamente. O executor usa perfil de navegador separado de `browser.read`.
+
+#### Executor nesta instalação (`scripts/ops/apply-authorized.mjs`)
+
+| Comando | Rota usada | Regra |
+| --- | --- | --- |
+| `list` | `GET /api/authorized-applications` | exige `RADAR_AUTO_APPLICATION_ENABLED=true` e o token interno; mostra `nonce`, hash da URL e TTL |
+| `claim --application <id>` | `POST /api/applications/{id}/claim` | usa o `nonce` da fila, grava o estado local em `.radar/executor/<id>.json` |
+| `verify --observed-url <url>` | — (mesma `canonicalizeJobUrl` de `dist/src/domain.js`) | aborta se a URL aberta difere da autorizada |
+| `submit --evidence-ref <ref>` | `PATCH /api/applications/{id}` | recusa sem `claim` local e sem evidência observada no portal |
+| `fail --reason <código>` | `PATCH /api/applications/{id}` | grava só o código do motivo; a vaga volta para revisão |
+| `ask --field-ref <campo> --question <texto>` | `POST /api/applications/{id}/questions` | pausa a candidatura; a ponte Telegram entrega |
+| `status` | `GET /api/bootstrap` | estado local + estado no app |
+
+O PDF do currículo aprovado sai de `GET /api/resumes/{id}/files/pdf` (não exige token). `submit` sem evidência não é aceito: o app recusa `submitted` fora de `in_progress` e sem `evidence_ref`, e o script recusa antes disso.
+
+### Perguntas humanas (dúvida correlacionada)
+
+| Método e rota | Comportamento |
+| --- | --- |
+| `POST /api/applications/{id}/questions` | Pausa a candidatura por uma dúvida correlacionada; exige candidatura em `in_progress` e devolve a pergunta em `pending` |
+| `GET /api/human-questions` | Lista perguntas com estado de entrega, resposta e referência da mensagem |
+| `POST /api/human-questions/{id}/delivery` | Marca a entrega: `{ "delivered": true, "message_ref": "..." }` ou `{ "delivered": false, "error": "..." }` |
+| `POST /api/human-questions/{id}/answer` | Registra a resposta humana correlacionada àquela pergunta |
+
+Criar a pergunta move a candidatura para `needs_review`; ela volta a `in_progress` quando todas as perguntas obrigatórias estiverem respondidas. A entrega aceita `pending` e `delivery_failed` — um reenvio depois de falha real atualiza a mesma pergunta em vez de duplicá-la — e nunca reabre pergunta `answered` ou `cancelled`. A resposta exige a identidade vinculada (`HERMES_LINKED_RECIPIENT_ID` ou `HERMES_TELEGRAM_CHAT_ID`), só é aceita em `pending` ou `delivered` e é recusada com `human_question.reply_not_correlated` quando `reply_to_message_ref` não corresponde à mensagem entregue. Respostas usam `action: answer`, `skip`, `manual` ou `stop`: `skip` é recusado em pergunta obrigatória, `manual` revoga a autorização e devolve a candidatura ao envio manual e `stop` encerra a execução como `failed`. Uma resposta resolve somente o `human_question_id` correspondente e nunca concede `AUTORIZO`.
+
+A entrega na conversa do Telegram é feita pela capability já vinculada ao Hermes (`scripts/ops/notify-human-questions.mjs`), que marca esta rota; o plugin não recebe bot token, chat id ou destinatário.
 
 ### `POST /api/agent-events`
 

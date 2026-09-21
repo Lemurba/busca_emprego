@@ -4,6 +4,8 @@ data/
 .env
 .env.*
 npm-debug.log*
+*.log
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.radar/

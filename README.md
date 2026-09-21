@@ -18,7 +18,38 @@ Não existe login, token de acesso ou chave da API. O Telegram é reutilizado au
 
 O servidor escuta em `0.0.0.0:8787`. Abra `http://IP-DO-HERMES:8787` em qualquer dispositivo da rede doméstica; agentes no mesmo container usam `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. Como não há autenticação, restrinja a porta 8787 à LAN no roteador/firewall e nunca faça port forwarding ou exposição direta à internet.
 
-O banco inicia vazio. Dados demonstrativos só são criados com `RADAR_SEED_DEMO=true`. A manutenção legada de anonimização só roda quando solicitada explicitamente com `RADAR_RUN_LEGACY_ANONYMIZATION=true`; não a habilite em produção.
+O banco inicia vazio e o aplicativo não cria dados exemplificativos em nenhuma configuração: vagas, currículos e candidaturas surgem somente de agentes, da importação de rodadas ou do uso real do dashboard. A manutenção legada de anonimização só roda quando solicitada explicitamente com `RADAR_RUN_LEGACY_ANONYMIZATION=true`; não a habilite em produção.
+
+## Instalação atual (esta máquina)
+
+Valores reais desta instalação, diferentes dos padrões de exemplo do Hermes:
+
+| Item | Valor |
+| --- | --- |
+| Raiz do repositório | `/opt/data/dashboard/busca_emprego` |
+| Porta | `666` — `http://192.168.1.183:666` na LAN (sem login), `http://127.0.0.1:666` dentro do container |
+| Banco | `data/radar.sqlite` (WAL, `busy_timeout` 5000 ms) |
+| Start | `set -a && . ./.env.local && set +a && npm start` (log em `server-666.log`) |
+| Operador | `RADAR_OPERATOR_ID=operador-local` |
+| Token interno | `RADAR_INTERNAL_SERVICE_TOKEN` em `.env.local` (modo 600); enviado no header `x-radar-service-token` |
+| CLI do Hermes | `/opt/hermes/bin/hermes` (não está no `PATH`) |
+
+As rotas internas (`POST /api/agent-events`, `/api/rounds/*`, `/api/jobs/{id}/score`, `/api/applications/{id}/claim|questions`, `/api/human-questions/{id}/delivery|answer` e `GET /api/authorized-applications`) exigem o token interno. O dashboard aberto na LAN não usa essas rotas e continua funcionando sem login.
+
+Verificação desta instalação:
+
+```bash
+node scripts/ops/smoke-agents.mjs                # agentes em instância isolada (mesmo artefato compilado)
+node scripts/ops/live-prod-check.mjs             # token interno, execução de agente e vaga sintética descartada na produção
+node scripts/ops/notify-human-questions.mjs      # simulação da entrega Telegram das perguntas humanas
+node scripts/ops/telegram-diagnose.mjs           # capability Telegram do Hermes (sem expor segredo)
+node scripts/ops/apply-authorized.mjs list       # fila de candidaturas autorizadas (executor do Hermes)
+node test/executor.test.mjs                      # guarda do protocolo do executor (claim, URL, evidência, falha)
+```
+
+MCP e skill locais já registrados: `hermes mcp add radar-vagas --command node --env RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` e `hermes skills trust /opt/data/dashboard/busca_emprego`.
+
+Estado dos gates nesta máquina: `RADAR_AUTO_APPLICATION_ENABLED=true` — o executor existe (`scripts/ops/apply-authorized.mjs`, testado em `test/executor.test.mjs` e provado ao vivo com o Browser Harness do Hermes) e a fila autorizada responde `200` com o token interno (`401` sem ele). A entrega Telegram está vinculada ao chat do operador e o envio real foi confirmado (`hermes send`); sem conversa iniciada com o bot, a entrega de perguntas fica em `delivery_failed` e é reenviada com `--retry-failed`.
 
 ## Agentes, permissões e navegação
 

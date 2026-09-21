@@ -12,7 +12,9 @@ const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
 
 export const db = new DatabaseSync(dbPath);
-db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
+// busy_timeout mantém WAL seguro quando o dashboard e o servidor MCP oficial
+// (processos distintos, mesmo RADAR_DB_PATH) escrevem ao mesmo tempo.
+db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
 
 export function databaseReadiness() {
   const row = db.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
@@ -2083,7 +2085,9 @@ export function createHumanQuestion(applicationId: string, input: Record<string,
 
 export function markHumanQuestionDelivery(id: string, delivered: boolean, messageRef?: string, error?: string) {
   const status = delivered ? "delivered" : "delivery_failed";
-  const result = db.prepare("UPDATE human_questions SET status=?,telegram_message_ref=?,sanitized_delivery_error=? WHERE id=? AND status='pending'").run(status, messageRef ?? null, error?.slice(0, 240) ?? null, id);
+  // `delivery_failed` é reentrega legítima da mesma pergunta (a ponte Telegram só
+  // reenvia com --retry-failed); pergunta já respondida/cancelada nunca é reaberta.
+  const result = db.prepare("UPDATE human_questions SET status=?,telegram_message_ref=?,sanitized_delivery_error=? WHERE id=? AND status IN ('pending','delivery_failed')").run(status, messageRef ?? null, error?.slice(0, 240) ?? null, id);
   if (!result.changes) throw new Error("human_question.not_pending");
   audit("human_question", id, status, {});
   return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
@@ -2550,27 +2554,4 @@ export function resolveFieldConflict(conflictId: string, choice: "current" | "ca
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   audit("field_conflict", conflictId, "resolved", { actor, choice, evidence_id: evidenceId });
   return db.prepare("SELECT * FROM field_conflicts WHERE id=?").get(conflictId);
-}
-
-export function seedDemo() {
-  const count = Number((db.prepare("SELECT COUNT(*) AS count FROM jobs").get() as { count: number }).count);
-  if (count > 0) return;
-  const timestamp = now();
-  const demo = [
-    { id: "demo-01", title: "Analista de dados", company: "Empresa confidencial A", location: "São Paulo, SP", latitude: -23.5505, longitude: -46.6333, work_model: "Híbrido", seniority: "Pleno", source: "Portal demonstrativo", salary_min: 9_000, salary_max: 12_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-01", salary_checked_at: timestamp, match_score: 88, status: "resume_approved" as JobStatus, opening_status: "open" as const, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." },
-    { id: "demo-02", title: "Especialista em operações", company: "Empresa confidencial B", location: "Rio de Janeiro, RJ", latitude: -22.9068, longitude: -43.1729, work_model: "Remoto", seniority: "Sênior", source: "Site demonstrativo", salary_min: 11_000, salary_max: 15_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-02", salary_checked_at: timestamp, match_score: 84, status: "strong_match" as JobStatus, opening_status: "open" as const, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." },
-    { id: "demo-03", title: "Coordenador de projetos", company: "Empresa confidencial C", location: "Curitiba, PR", latitude: -25.4284, longitude: -49.2733, work_model: "Presencial", seniority: "Sênior", source: "Agregador demonstrativo", salary_min: 8_000, salary_max: 10_000, salary_period: "month" as const, salary_source: "Fonte demonstrativa", salary_source_url: "https://example.invalid/demo/salario-03", salary_checked_at: timestamp, match_score: 71, status: "review" as JobStatus, opening_status: "closed" as const, closed_at: timestamp, description: "Registro fictício usado apenas para demonstrar gráficos e fluxo." }
-  ];
-  for (const job of demo) {
-    upsertJob({ ...job, country: "Brasil", source_url: `https://example.invalid/${job.id}`, application_url: "", currency: "BRL", posted_at: null });
-    db.prepare("UPDATE jobs SET status=? WHERE id=?").run(job.status, job.id);
-  }
-  db.prepare("UPDATE jobs SET decision = 'interested', status = 'selected' WHERE id = 'demo-01'").run();
-  createResume({ id: "demo-resume", job_id: "demo-01", title: "Currículo demonstrativo", status: "draft", content: "Conteúdo fictício para demonstração.", keywords: [], changes: [] });
-  db.prepare("UPDATE resumes SET status = 'approved' WHERE id = 'demo-resume'").run();
-  db.prepare("UPDATE jobs SET decision = 'interested', status = 'resume_approved' WHERE id = 'demo-01'").run();
-  createApplication({ id: "demo-application", job_id: "demo-01", resume_id: "demo-resume", status: "queued", automation_mode: "manual", current_step: "Exemplo do fluxo manual", notes: "Registro fictício." });
-  selectManualApplication("demo-application");
-  updateApplication("demo-application", { status: "submitted", submitted_at: timestamp });
-  recordAgentRun({ id: "demo-run", agent_name: "Radar de demonstração", status: "completed", started_at: new Date(Date.now() - 3600_000).toISOString(), found_count: 5, message: "Dados locais demonstrativos carregados." });
 }
