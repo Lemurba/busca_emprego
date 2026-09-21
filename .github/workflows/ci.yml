@@ -36,7 +36,10 @@ jobs:
           node scripts/ops/health-check.mjs --help
       - name: Verificar ausência de secrets versionados
         run: |
-          if git grep -nE '(TELEGRAM_BOT_TOKEN|GLASSDOOR_PASSWORD|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer [A-Za-z0-9_-]{24,})' -- ':!package-lock.json' ':!.github/workflows/ci.yml'; then
+          # Mira valor atribuído, não o identificador: código que apenas lê a variável de
+          # ambiente (ex.: scripts/ops/telegram-diagnose.mjs) não é secret versionado, mas
+          # qualquer `NOME=valor` plausível continua barrado.
+          if git grep -nE '(TELEGRAM_BOT_TOKEN|GLASSDOOR_PASSWORD)[[:space:]]*[=:][[:space:]]*[[:punct:]]?[A-Za-z0-9_:-]{16,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer [A-Za-z0-9_-]{24,}' -- ':!package-lock.json' ':!.github/workflows/ci.yml'; then
             echo 'Possível secret versionado' >&2
             exit 1
           fi
