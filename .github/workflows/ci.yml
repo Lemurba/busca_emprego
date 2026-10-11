@@ -28,6 +28,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       # npm test já executa test/ops.test.mjs (backup/restore SQLite).
       - run: npm test
+      - name: Smoke dos agentes (instância isolada)
+        run: node scripts/ops/smoke-agents.mjs
       - name: Validar CLIs operacionais
         run: |
           node scripts/ops/backup-sqlite.mjs --help
