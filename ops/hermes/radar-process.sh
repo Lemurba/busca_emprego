@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-: "${RADAR_APP_DIR:=/opt/hermes/plugins/busca-emprego}"
-: "${RADAR_DB_PATH:=/var/lib/hermes/busca-emprego/radar.sqlite}"
+: "${RADAR_APP_DIR:=/opt/data/dashboard/busca_emprego}"
+: "${RADAR_DB_PATH:=$RADAR_APP_DIR/data/radar.sqlite}"
 : "${PORT:=8787}"
 : "${RADAR_ENVIRONMENT:=production}"
 : "${RADAR_OPERATOR_ID:?RADAR_OPERATOR_ID must identify the responsible operator}"
