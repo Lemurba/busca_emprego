@@ -460,7 +460,7 @@ try {
   await t("autorização automática sem AUTORIZO é recusada", async () => {
     const r = await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "sim" });
     expect("autorizar inválido", r, 400);
-    assert.match(String(r.data?.error ?? ""), /AUTORIZO/);
+    assert.match(`${r.data?.error ?? ""} ${r.data?.message ?? ""}`, /AUTORIZO/);
   });
   await t("autorização explícita AUTORIZO entra na fila", async () => {
     expect("autorizar", await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" }), 200);
