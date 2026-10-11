@@ -30,12 +30,15 @@ async function waitReady(serverBase, errorOutput) {
 }
 
 const headers = { "x-forwarded-proto": "https", "content-type": "application/json" };
-const request = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
+const authHeaders = { ...headers, "x-radar-service-token": internalToken };
+const anonymous = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
+const request = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...authHeaders, ...(init.headers ?? {}) } });
 
 try {
   await waitReady(base, () => stderr);
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 426, "proxy TLS gate must fail closed");
-  assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 200, "LAN API must not require login or token");
+  assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 401, "API must require a session or the service token");
+  assert.equal((await request("/api/bootstrap")).status, 200, "service token must reach dashboard routes");
 
   const internalRoutes = [
     ["POST", "/api/agent-events"],
@@ -49,7 +52,7 @@ try {
     ["POST", "/api/human-questions/missing/answer"]
   ];
   for (const [method, path] of internalRoutes) {
-    const response = await request(path, { method, body: method === "POST" ? "{}" : undefined });
+    const response = await anonymous(path, { method, body: method === "POST" ? "{}" : undefined });
     assert.equal(response.status, 401, `${method} ${path} must require the internal service token`);
   }
   assert.equal((await request("/api/authorized-applications", { headers: { "x-radar-service-token": internalToken } })).status, 200, "valid service token must reach internal route");
@@ -67,9 +70,9 @@ try {
     const disabledRoutes = internalRoutes.filter(([, path]) => path === "/api/authorized-applications" || path.includes("/claim") || path.includes("/questions") || path.includes("/delivery") || path.includes("/answer"));
     disabledRoutes.push(["POST", "/api/applications/missing/authorize-auto"]);
     for (const [method, path] of disabledRoutes) {
-      const response = await fetch(`${disabledBase}${path}`, { method, headers, body: method === "POST" ? "{}" : undefined });
+      const response = await fetch(`${disabledBase}${path}`, { method, headers: authHeaders, body: method === "POST" ? "{}" : undefined });
       assert.equal(response.status, 403, `${method} ${path} must be disabled by default`);
-      assert.deepEqual(await response.json(), { error: "AUTOMATION_DISABLED" });
+      assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
     }
   } finally {
     disabledChild.kill("SIGTERM");
@@ -78,8 +81,9 @@ try {
 
   const dashboardResponse = await fetch(`${base}/`, { headers: { "x-forwarded-proto": "https" } });
   const csp = dashboardResponse.headers.get("content-security-policy") ?? "";
-  assert.match(csp, /script-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet script host");
-  assert.match(csp, /style-src 'self' https:\/\/unpkg\.com/, "CSP must allow pinned Leaflet stylesheet host");
+  assert.match(csp, /script-src 'self';/, "CSP must only allow same-origin scripts (Leaflet is bundled)");
+  assert.match(csp, /style-src 'self';/, "CSP must only allow same-origin styles");
+  assert.doesNotMatch(csp, /unpkg/, "CSP must not allow external CDNs");
   assert.match(csp, /img-src 'self' data: https:\/\/tile\.openstreetmap\.de/, "CSP must allow map tiles");
 
   const sourceResponse = await request("/api/sources", { method: "POST", body: JSON.stringify({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }) });
@@ -123,7 +127,7 @@ try {
   assert.equal(new Set(bootstrap.jobs.map((job) => job.source)).size, 10);
   assert.equal((await request(`/api/agents/${agent.id}/rollback`, { method: "POST", body: JSON.stringify({ version_id: agent.published_version_id }) })).status, 200);
 
-  console.log("E2E open-LAN access, optional TLS gate, publication/rollback, and 10-source 500-result/20-worker load checks passed.");
+  console.log("E2E authenticated access, TLS gate, publication/rollback, and 10-source 500-result/20-worker load checks passed.");
 } finally {
   child.kill("SIGTERM");
   await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); });

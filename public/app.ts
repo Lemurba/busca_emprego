@@ -1,4 +1,8 @@
+import * as LeafletModule from "leaflet";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
+
+// Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
+const leafletLib: any = (LeafletModule as any).default ?? LeafletModule;
 
 type Job = {
   id: string;
@@ -109,6 +113,26 @@ const modalRoot = () => document.getElementById("modal-root") as HTMLElement;
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
+}
+
+/** Só http(s) vira href; qualquer outro esquema (javascript:, data:, ...) é descartado. */
+function safeHref(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Link externo seguro; se o esquema não for http(s), mostra só o texto. */
+function externalLink(url: unknown, label: string, className = "secondary-button") {
+  const href = safeHref(url);
+  const classAttr = className ? ` class="${className}"` : "";
+  if (!href) return url ? `<span${className ? ` class="${className} link-blocked"` : ` class="link-blocked"`} title="Link com esquema não permitido">${escapeHtml(label)}</span>` : "";
+  return `<a${classAttr} href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
 }
 
 function formatMoney(value: number | null, currency = "BRL") {
@@ -262,8 +286,8 @@ function mapMarkup(_jobs: Job[]) {
 function initializeMap(data: Data) {
   const container = document.getElementById("opportunities-map");
   if (!container) return;
-  const leaflet = (window as any).L;
-  if (!leaflet) { container.textContent = "Mapa indisponível: verifique a conexão com a internet."; return; }
+  const leaflet = leafletLib;
+  if (!leaflet?.map) { container.textContent = "Mapa indisponível."; return; }
   activeMap?.remove();
   activeMapMarkers.clear();
   const map = leaflet.map(container, { scrollWheelZoom: false }).setView([-14.235, -51.925], 4);
@@ -502,13 +526,113 @@ function render() {
   bindViewEvents();
 }
 
+const errorMessages: Record<string, string> = {
+  unauthorized: "Sua sessão expirou. Abra o link de acesso enviado pelo Hermes.",
+  internal_token_required: "Esta ação é reservada aos agentes do Radar.",
+  internal_token_not_configured: "O servidor está sem token interno configurado.",
+  origin_mismatch: "Requisição bloqueada: origem não autorizada.",
+  unsupported_media_type: "Requisição bloqueada: formato não suportado.",
+  host_not_allowed: "Endereço do dashboard não autorizado no servidor.",
+  payload_too_large: "O conteúdo enviado é grande demais.",
+  invalid_json: "Não foi possível ler os dados enviados.",
+  invalid_body: "Alguns campos estão inválidos.",
+  not_found: "Item não encontrado. Atualize a página.",
+  not_implemented: "Operação ainda não disponível nesta versão.",
+  internal_error: "Erro interno no servidor. Tente novamente.",
+  AUTOMATION_DISABLED: "A candidatura automatizada está desligada nesta instalação.",
+  TLS_REQUIRED: "Acesse o dashboard por HTTPS.",
+  PDF_DUPLICATE: "Este PDF já está na biblioteca.",
+  PDF_TOO_LARGE: "O PDF deve ter no máximo 5 MB.",
+  PDF_MIME_INVALID: "Envie um arquivo PDF.",
+  PDF_SIGNATURE_INVALID: "O arquivo enviado não parece ser um PDF válido.",
+  PDF_EXTRACTION_FAILED: "Não foi possível ler o texto do PDF.",
+  PDF_EXTRACTION_TIMEOUT: "A leitura do PDF demorou demais.",
+  PROFILE_CONFIRMATION_REQUIRED: "Confirme o perfil profissional antes de continuar.",
+  PROFILE_FACTS_UNCONFIRMED: "Revise os fatos pendentes do perfil antes de confirmar.",
+  PROFILE_EMPTY: "O perfil ainda não tem fatos confirmados.",
+  ROUND_NO_SOURCES: "Nenhuma fonte ativa para iniciar a rodada.",
+  ROUND_SOURCES_NOT_READY: "Nenhuma fonte está pronta para a rodada.",
+  ATS_REVIEW_REQUIRED: "O currículo precisa passar na revisão ATS (ou ter uma justificativa de exceção com pelo menos 10 caracteres) antes da aprovação.",
+  ILLEGAL_TRANSITION: "Essa mudança de etapa não é permitida.",
+  PRECONDITION_FAILED: "Faltam informações para essa mudança de etapa.",
+  VERSION_CONFLICT: "A vaga foi alterada em outra tela. Atualize e tente de novo.",
+  "workflow.version_conflict": "A vaga foi alterada em outra tela. Atualize e tente de novo.",
+  "resume.content.empty": "O currículo está vazio. Escreva o conteúdo antes de revisar ou aprovar.",
+  "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado, não pelo dashboard.",
+  "application.claim.worker_mismatch": "Esta candidatura está reservada por outro executor.",
+  "application.url_mismatch": "A página da candidatura não corresponde à URL autorizada. Revise e autorize de novo.",
+  "job.field.not_editable": "Este campo da vaga não pode ser editado por aqui.",
+  "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
+  reply_not_correlated: "A resposta não corresponde à pergunta enviada.",
+  "field_conflict.choice.invalid": "Escolha manter o valor atual ou usar a nova fonte.",
+  "source.secret_ref.invalid": "Referência de segredo inválida. Use o cofre do Hermes e informe só o id do perfil do navegador.",
+  "source.secret_ref.required": "Esse tipo de autenticação exige uma referência de segredo.",
+  "source.browser_profile.required": "Informe o id do perfil do navegador.",
+  "source.domain.invalid": "Domínio inválido.",
+  "agent.domain.forbidden": "Domínio fora da lista permitida para o agente.",
+  "agent.allowed_domains.invalid": "Lista de domínios permitidos inválida.",
+  "agent.name.invalid": "Informe um nome válido para o agente.",
+  "agent.has_history.disable_instead": "Este agente já tem histórico: pause-o em vez de excluir.",
+  "source.in_use.disable_instead": "Esta fonte está em uso: desative-a em vez de excluir.",
+  "possible_duplicate.not_found": "Essa duplicidade já foi resolvida.",
+  "job.not_found": "Vaga não encontrada. Atualize a página.",
+};
+
+const errorPrefixMessages: Array<[string, string]> = [
+  ["feedback.", "Revise o motivo, o detalhe e a confirmação do feedback."],
+  ["agent.", "A configuração do agente foi recusada. Revise os campos."],
+  ["source.", "A configuração da fonte foi recusada. Revise os campos."],
+  ["application.", "A candidatura não pode seguir nesta etapa."],
+  ["resume.", "O currículo não pode ser alterado nesta etapa."],
+  ["ATS_", "O currículo ATS não passou nas verificações."],
+  ["job.", "Os dados da vaga foram recusados. Revise os campos."],
+];
+
+class ApiError extends Error {
+  constructor(public readonly status: number, public readonly code: string, message: string) { super(message); }
+}
+
+function friendlyError(code: string, serverMessage?: string): string {
+  const base = code.split(":")[0] ?? code;
+  if (errorMessages[base]) return errorMessages[base];
+  if (code === "request.rejected" && serverMessage) return serverMessage;
+  const prefixed = errorPrefixMessages.find(([prefix]) => base.startsWith(prefix));
+  if (prefixed) return prefixed[1];
+  return serverMessage || "Não foi possível concluir a operação.";
+}
+
+function showAuthScreen(show: boolean) {
+  document.body.classList.toggle("auth-required", show);
+  const screen = document.getElementById("auth-screen");
+  if (screen) screen.hidden = !show;
+}
+
 async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
-  if (options.body) headers.set("content-type", "application/json");
-  const response = await fetch(url, { ...options, headers });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error((body as { error?: string }).error || "Não foi possível concluir a operação");
+  const method = String(options.method ?? "GET").toUpperCase();
+  const init: RequestInit = { ...options, headers, credentials: "same-origin" };
+  if (method !== "GET" && method !== "HEAD") {
+    headers.set("content-type", "application/json");
+    if (init.body == null && method !== "DELETE") init.body = "{}";
+  }
+  const response = await fetch(url, init);
+  const body = await response.json().catch(() => ({})) as { error?: unknown; message?: string };
+  if (response.status === 401) {
+    showAuthScreen(true);
+    throw new ApiError(401, "unauthorized", errorMessages.unauthorized);
+  }
+  if (!response.ok) {
+    const nested = body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined;
+    const code = typeof body.error === "string" ? body.error : typeof nested === "string" ? nested : "";
+    throw new ApiError(response.status, code, friendlyError(code, typeof body.message === "string" ? body.message : undefined));
+  }
   return body as T;
+}
+
+async function logout() {
+  try { await fetchJson("/api/logout", { method: "POST" }); } catch { /* a tela de acesso aparece de qualquer forma */ }
+  state.data = null;
+  showAuthScreen(true);
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -527,11 +651,13 @@ async function loadData(showToast = false) {
   if (syncLabel) syncLabel.textContent = "Sincronizando…";
   try {
     state.data = await fetchJson<Data>("/api/bootstrap");
+    showAuthScreen(false);
     render();
     registerModelTools();
     if (syncLabel) syncLabel.textContent = "SQLite local";
     if (showToast) toast("Dados atualizados.");
   } catch (error) {
+    if (error instanceof ApiError && error.status === 401) { if (syncLabel) syncLabel.textContent = "Sem sessão"; return; }
     if (syncLabel) syncLabel.textContent = "Erro de conexão";
     toast(error instanceof Error ? error.message : "Falha ao carregar dados", true);
   }
@@ -544,6 +670,7 @@ async function mutate(url: string, method: string, body: Record<string, unknown>
 }
 
 function toast(message: string, error = false) {
+  if (error && document.body.classList.contains("auth-required")) return;
   const root = document.getElementById("toast-root");
   if (!root) return;
   const element = document.createElement("div");
@@ -637,8 +764,8 @@ function showSourceModal(id?: string) {
       <div class="form-field"><label for="source-type">Tipo</label><select class="select" id="source-type" name="source_type">${["linkedin", "glassdoor", "company_site", "job_board", "custom"].map((value) => `<option value="${value}" ${source?.source_type === value ? "selected" : ""}>${value}</option>`).join("")}</select></div>
       <div class="form-field"><label for="source-domain">Domínio permitido</label><input class="input" id="source-domain" name="domain" required value="${escapeHtml(source?.domain ?? "")}" placeholder="glassdoor.com" /></div>
       <div class="form-field"><label for="source-auth">Autorização</label><select class="select" id="source-auth" name="auth_strategy">${["none", "bearer", "basic", "browser_profile"].map((value) => `<option value="${value}" ${source?.auth_strategy === value ? "selected" : ""}>${value}</option>`).join("")}</select></div>
-      <div class="form-field"><label for="source-secret-ref">Referência do secret</label><input class="input" id="source-secret-ref" name="secret_ref" value="${escapeHtml(source?.secret_ref ?? "")}" placeholder="hermes://sources/glassdoor" /></div>
-      <div class="form-field full"><label for="source-profile">Perfil autenticado do Browser Harness</label><input class="input" id="source-profile" name="browser_profile_id" value="${escapeHtml(source?.browser_profile_id ?? "")}" placeholder="hermes/glassdoor" /></div>
+      <div class="form-field"><label for="source-secret-ref">Referência do secret (só bearer/basic)</label><input class="input" id="source-secret-ref" name="secret_ref" value="${escapeHtml(source?.secret_ref ?? "")}" placeholder="deixe vazio para login pelo navegador" autocomplete="off" /></div>
+      <div class="form-field full"><label for="source-profile">Perfil do navegador (id)</label><input class="input" id="source-profile" name="browser_profile_id" value="${escapeHtml(source?.browser_profile_id ?? "")}" placeholder="glassdoor" autocomplete="off" /><small class="field-hint">Logins de portal ficam no cofre de credenciais do Hermes: rode <code>hermes vault add</code> na máquina do Hermes e informe aqui só o id do perfil do navegador. Nunca digite senha ou token neste formulário.</small></div>
       <div class="form-field"><label><input type="checkbox" name="enabled" ${source?.enabled === false ? "" : "checked"} /> Fonte ativa</label></div>
     </div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar fonte</button></div></form>`);
 }
@@ -680,7 +807,7 @@ function showJobDetail(id: string) {
     }
     if (application?.status !== "in_progress") actionButtons += `<button class="secondary-button" data-action="no-time" data-job-id="${escapeHtml(job.id)}">Sem tempo agora</button><button class="secondary-button" data-action="not-interested" data-job-id="${escapeHtml(job.id)}">Não tenho interesse</button>`;
   }
-  const sourceLinks = `${job.linkedin_post_url ? `<a class="secondary-button" href="${escapeHtml(job.linkedin_post_url)}" target="_blank" rel="noreferrer">Post do LinkedIn ↗</a>` : ""}${job.job_url ? `<a class="secondary-button" href="${escapeHtml(job.job_url)}" target="_blank" rel="noreferrer">Link da vaga ↗</a>` : ""}${job.salary_source_url ? `<a class="secondary-button" href="${escapeHtml(job.salary_source_url)}" target="_blank" rel="noreferrer">Fonte do salário ↗</a>` : ""}${job.application_url ? `<a class="secondary-button" href="${escapeHtml(job.application_url)}" target="_blank" rel="noreferrer">Candidatura ↗</a>` : ""}`;
+  const sourceLinks = `${externalLink(job.linkedin_post_url, "Post do LinkedIn ↗")}${externalLink(job.job_url, "Link da vaga ↗")}${externalLink(job.salary_source_url, "Fonte do salário ↗")}${externalLink(job.application_url, "Candidatura ↗")}`;
   const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
   openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Esta vaga está marcada como perdida porque foi encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Match com o perfil</span><strong>${escapeHtml(job.match_score)}%</strong></div><div class="detail-box"><span>Estado</span><strong><span class="status-pill ${lifecycle.className}">${escapeHtml(lifecycle.label)}</span></strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)} · ${escapeHtml(formatDate(job.salary_checked_at))}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Aguardando sua decisão de interesse")}</small></div></div><div class="detail-description">${escapeHtml(job.description || "Sem descrição registrada.")}</div><div class="button-row">${sourceLinks}${mapButton}</div><div class="modal-actions">${resume && job.decision === "interested" && resume.status !== "approved" ? `<button class="secondary-button" data-edit-resume="${escapeHtml(resume.id)}">Editar currículo</button>` : ""}${actionButtons}</div>`);
   const descriptionRoot = modalRoot().querySelector<HTMLElement>(".detail-description");
@@ -693,12 +820,12 @@ function showJobDetail(id: string) {
       section("Requisitos", job.requirements),
       section("Benefícios", job.benefits),
       section("Outras informações", job.additional_information),
-      enrichmentEvents.length ? `<section class="detail-section"><h3>Fontes e enriquecimentos</h3>${enrichmentEvents.map((event) => `<p><a href="${escapeHtml(event.source_url)}" target="_blank" rel="noreferrer">Fonte verificada ↗</a> · ${escapeHtml(formatDate(event.created_at))}<br><small>${escapeHtml(event.evidence_excerpt || "Campos atualizados pelo agente configurado.")}</small></p>`).join("")}</section>` : ""
+      enrichmentEvents.length ? `<section class="detail-section"><h3>Fontes e enriquecimentos</h3>${enrichmentEvents.map((event) => `<p>${externalLink(event.source_url, "Fonte verificada ↗", "") || "Fonte sem link"} · ${escapeHtml(formatDate(event.created_at))}<br><small>${escapeHtml(event.evidence_excerpt || "Campos atualizados pelo agente configurado.")}</small></p>`).join("")}</section>` : ""
     ].join("");
     fetchJson<{ evidence: Array<{ id: string; field_path: string; source_url: string; confidence: number; origin: string; retrieved_at: string; selected: number }>; conflicts: Array<{ id: string; field_path: string; status: string; reason: string }> }>(`/api/jobs/${encodeURIComponent(job.id)}/provenance`).then((provenance) => {
       if (!descriptionRoot.isConnected) return;
       const active = provenance.evidence.filter((item) => item.selected);
-      descriptionRoot.insertAdjacentHTML("beforeend", `<section class="detail-section"><h3>Proveniência por campo</h3>${active.length ? active.map((item) => `<p><strong>${escapeHtml(item.field_path)}</strong> · ${escapeHtml(item.origin)} · ${Math.round(item.confidence * 100)}% · ${escapeHtml(formatDate(item.retrieved_at))}${item.source_url.startsWith("https://") ? ` · <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">evidência ↗</a>` : ""}</p>`).join("") : "<p>Nenhuma evidência por campo registrada.</p>"}${provenance.conflicts.filter((item) => item.status === "pending").map((item) => `<div class="notice warning"><span>!</span><div><strong>Conflito em ${escapeHtml(item.field_path)}</strong><br>${escapeHtml(item.reason)}<div class="button-row"><button class="secondary-button" data-resolve-conflict="${escapeHtml(item.id)}" data-choice="current">Manter atual</button><button class="primary-button" data-resolve-conflict="${escapeHtml(item.id)}" data-choice="candidate">Usar nova fonte</button></div></div></div>`).join("")}</section>`);
+      descriptionRoot.insertAdjacentHTML("beforeend", `<section class="detail-section"><h3>Proveniência por campo</h3>${active.length ? active.map((item) => `<p><strong>${escapeHtml(item.field_path)}</strong> · ${escapeHtml(item.origin)} · ${Math.round(item.confidence * 100)}% · ${escapeHtml(formatDate(item.retrieved_at))}${safeHref(item.source_url) ? ` · ${externalLink(item.source_url, "evidência ↗", "")}` : ""}</p>`).join("") : "<p>Nenhuma evidência por campo registrada.</p>"}${provenance.conflicts.filter((item) => item.status === "pending").map((item) => `<div class="notice warning"><span>!</span><div><strong>Conflito em ${escapeHtml(item.field_path)}</strong><br>${escapeHtml(item.reason)}<div class="button-row"><button class="secondary-button" data-resolve-conflict="${escapeHtml(item.id)}" data-choice="current">Manter atual</button><button class="primary-button" data-resolve-conflict="${escapeHtml(item.id)}" data-choice="candidate">Usar nova fonte</button></div></div></div>`).join("")}</section>`);
     }).catch(() => { /* o detalhe principal continua disponível */ });
   }
 }
@@ -718,9 +845,19 @@ function showResumeModal(id: string) {
 async function confirmResumeApproval(id: string) {
   const resume = currentData().resumes.find((item) => item.id === id);
   if (!resume) throw new Error("Currículo não encontrado.");
+  if (!resume.content.trim()) throw new Error(errorMessages["resume.content.empty"]);
+  // A aprovação exige revisão ATS "pass" (ou exceção justificada): roda a revisão primeiro.
+  const reviewed = await fetchJson<{ review_status?: string; review_findings?: string[] }>(`/api/resumes/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({}) });
+  let overrideReason: string | undefined;
+  if (reviewed.review_status && reviewed.review_status !== "pass") {
+    const findings = (reviewed.review_findings ?? []).join(", ") || "sem detalhes";
+    const reason = window.prompt(`A revisão ATS não passou (${findings}). Para aprovar mesmo assim, escreva a justificativa (mínimo 10 caracteres):`) ?? "";
+    if (reason.trim().length < 10) { toast(errorMessages.ATS_REVIEW_REQUIRED, true); return; }
+    overrideReason = reason.trim();
+  }
   const confirmation = window.prompt("Revise o currículo salvo. Digite APROVO para confirmar esta versão:") ?? "";
   if (confirmation !== "APROVO") { toast("Aprovação não registrada."); return; }
-  await fetchJson(`/api/resumes/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ confirmation }) });
+  await fetchJson(`/api/resumes/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ confirmation, ...(overrideReason ? { override_reason: overrideReason } : {}) }) });
   closeModal(); await loadData(); toast("Currículo aprovado. Escolha agora o modo de candidatura.");
 }
 
@@ -1006,6 +1143,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.mapExpanded) setMapExpanded(false); });
   document.getElementById("top-add-job")?.addEventListener("click", showAddJobModal);
   document.getElementById("refresh-button")?.addEventListener("click", () => loadData(true));
+  document.getElementById("logout-button")?.addEventListener("click", () => { if (window.confirm("Sair do dashboard neste navegador?")) void logout(); });
+  document.getElementById("auth-retry")?.addEventListener("click", () => loadData());
   document.getElementById("mobile-menu")?.addEventListener("click", () => document.body.classList.toggle("menu-open"));
   modalRoot().addEventListener("click", async (event) => {
     const target = event.target as HTMLElement;
