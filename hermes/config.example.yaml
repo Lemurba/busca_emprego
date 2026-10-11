@@ -1,0 +1,64 @@
+# Fragmentos do config.yaml do Hermes para o Radar de Vagas.
+#
+# Mescle estas chaves em ~/.hermes/config.yaml (na imagem Docker oficial: /opt/data/config.yaml).
+# Não substitua o arquivo inteiro. Nenhuma credencial aparece aqui: valores vêm de
+# ~/.hermes/.env via ${env:VAR} ("MCP Config Reference" → "Environment variable references").
+#
+# Pré-requisito em ~/.hermes/.env (não secreto, mas por máquina):
+#   RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
+#   RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+# TELEGRAM_ALLOWED_USERS / TELEGRAM_HOME_CHANNEL já são definidos pelo setup do Telegram do Hermes.
+#
+# Depois de mesclar: `hermes mcp test radar-vagas`.
+
+mcp_servers:
+  radar-vagas:
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    # O subprocesso MCP recebe ambiente filtrado (só PATH, HOME, LANG… + o que estiver
+    # aqui) — "Security" → "MCP Credential Handling". Declare apenas o que o servidor lê.
+    env:
+      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      RADAR_ENVIRONMENT: production
+      TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
+      TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
+    # untrusted: toda ferramenta sem `readOnlyHint: true` pede aprovação antes de rodar e
+    # falha fechada onde ninguém pode aprovar (cron, execução desassistida).
+    # "MCP Config Reference" → "Server keys" → `trust`.
+    trust: untrusted
+    tools:
+      # Só estas ferramentas são registradas ("MCP Config Reference" → "Filtering semantics").
+      # Nomes ainda não implementados no servidor são simplesmente ignorados até existirem.
+      include:
+        # existentes (src/mcp-server.ts)
+        - radar_list_agents
+        - radar_list_sources
+        - radar_get_job
+        - radar_discover_job
+        - radar_enrich_job
+        - radar_create_resume
+        - radar_propose_agent_prompt
+        - radar_list_authorized_applications
+        # planejadas
+        - radar_list_open_questions
+        - radar_answer_question
+        - radar_record_score
+        - radar_claim_application
+        - radar_verify_application
+        - radar_submit_application
+        - radar_fail_application
+        - radar_ask_human
+      resources: false
+      prompts: false
+
+browser:
+  # Anexa o Hermes ao Chrome já em execução (CDP) em vez de abrir um navegador headless.
+  # `browser.cdp_url` tem precedência sobre `browser.engine`
+  # ("Browser Automation"; "Configuration" → "Browser").
+  cdp_url: http://127.0.0.1:9222
+
+skills:
+  config:
+    # Configuração declarada pela skill radar-vagas (metadata.hermes.config) — "Skill Settings".
+    radar:
+      app_dir: /opt/data/dashboard/busca_emprego
