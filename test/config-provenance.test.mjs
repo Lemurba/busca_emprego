@@ -55,6 +55,12 @@ try {
   const humanConflict = store.enrichJobFromAgent(agent.id, job.id, { benefits: "Valor divergente" }, "https://glassdoor.com/job/1", "Fonte divergente");
   assert.equal(humanConflict.job.benefits, "Benefício confirmado pelo usuário");
   assert.equal(humanConflict.conflict_ids.length, 1);
+  const disabledAgent = store.createAgentConfig({
+    name: "Enriquecedor desativado", description: "Agente pausado.", role_type: "job_enrichment", enabled: false, source_ids: ["glassdoor"],
+    allowed_domains: ["glassdoor.com"], tool_scopes: ["jobs.read", "jobs.enrich"], browser_enabled: false, can_create_jobs: false, can_edit_jobs: true,
+    editable_fields: ["benefits"], concurrency: 1, timeout_seconds: 120, prompt: "pausado", memory_enabled: false, hermes_prompt_optimization: false
+  }, "operator");
+  assert.throws(() => store.enrichJobFromAgent(disabledAgent.id, job.id, { benefits: "Não deve gravar" }, "https://glassdoor.com/job/1", "x"), /agent\.jobs\.enrich\.forbidden/u, "disabled agents must not write");
   const provenance = store.listFieldProvenance(job.id);
   assert.ok(provenance.evidence.some((item) => item.field_path === "benefits" && item.origin === "human"));
   assert.ok(provenance.conflicts.length >= 2);

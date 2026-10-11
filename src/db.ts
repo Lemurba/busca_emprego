@@ -2965,7 +2965,7 @@ export function deleteSourceConfig(id: string, actor: string, projectId = "busca
 
 export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
   const agent = publishedAgentConfig(agentId, projectId);
-  if (!agent || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
+  if (!agent || !agent.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
   if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
   const identityUrl = input.job_url || input.linkedin_post_url || input.application_url || input.source_url;
@@ -2989,7 +2989,7 @@ export function createJobFromAgent(agentId: string, input: Partial<Job> & { sour
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
   const agent = publishedAgentConfig(agentId, projectId);
-  if (!agent || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
+  if (!agent || !agent.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
   const current = getJob(jobId);
   if (!current) throw new Error("job.not_found");
   const entries = Object.entries(patch);
