@@ -208,8 +208,9 @@ export function compareExactIdentity(left: ExactIdentityCandidate, right: ExactI
   }
   const sameUrl = canonicalizeJobUrl(left.sourceUrl) === canonicalizeJobUrl(right.sourceUrl);
   const leftCompanyKey = companyKey(left.company);
-  // Cross-source consolidation additionally requires the same normalized company.
-  if (sameUrl && (sameSource || (leftCompanyKey !== "" && leftCompanyKey === companyKey(right.company)))) {
+  // A URL match alone is not identity: aggregators reuse URLs across employers, so
+  // consolidation (same source or not) additionally requires the same normalized company.
+  if (sameUrl && leftCompanyKey !== "" && leftCompanyKey === companyKey(right.company)) {
     return { action: "sighting", reason: "same_canonical_url" };
   }
   return { action: "new", reason: "different_identity" };
@@ -315,14 +316,16 @@ export function calculateScore(criteria: readonly ScoreCriterion[]): ScoreResult
     }
     return { ...criterion, score: excluded ? null : criterion.score, status: excluded ? "excluded" as const : "scored" as const };
   });
-  const rawScore = comparableWeight ? weightedScore / comparableWeight : 0;
-  const rawCoverage = (comparableWeight / totalWeight) * 100;
+  // The band is derived from the same rounded values that are persisted and displayed,
+  // so a score shown as 80.00 is never classified below the 80 threshold.
+  const scoreBase = round2(comparableWeight ? weightedScore / comparableWeight : 0);
+  const coveragePercent = round2((comparableWeight / totalWeight) * 100);
   let band: ScoreBand;
-  if (rawCoverage < 60) band = "insufficient_data";
-  else if (rawScore >= 80) band = "strong_match";
-  else if (rawScore >= 65) band = "review";
+  if (coveragePercent < 60) band = "insufficient_data";
+  else if (scoreBase >= 80) band = "strong_match";
+  else if (scoreBase >= 65) band = "review";
   else band = "low_match";
-  return { scoreBase: round2(rawScore), coveragePercent: round2(rawCoverage), band, criteria: normalized };
+  return { scoreBase, coveragePercent, band, criteria: normalized };
 }
 
 /** Strict six-criterion scorer required by the evaluator contract. */
@@ -417,7 +420,9 @@ export function compareTotalRejection(
   candidate: RejectionSimilarityJob,
   reasonCode: "role" | "company" | string = "role",
 ): RejectionSimilarityResult {
-  const titleScore = titleSimilarity(rejected.title, candidate.title);
+  // An empty title carries no evidence; two empty titles must never look identical.
+  const titlesPresent = normalizeComparableText(rejected.title ?? "") !== "" && normalizeComparableText(candidate.title ?? "") !== "";
+  const titleScore = titlesPresent ? titleSimilarity(rejected.title, candidate.title) : 0;
   const rejectedRequirements = normalizedRequirementSet(rejected.requirements);
   const candidateRequirements = normalizedRequirementSet(candidate.requirements);
   const requirementsPresent = rejectedRequirements.size > 0 && candidateRequirements.size > 0;

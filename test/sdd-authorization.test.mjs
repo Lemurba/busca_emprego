@@ -16,6 +16,7 @@ function preparedApplication(id, applicationUrl = "") {
   });
   store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
   const resume = store.createResume({ job_id: job.id, title: `CV ${id}`, content: "Experiência confirmada" });
+  store.reviewResume(resume.id, { verdict: "pass" }, "test-reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
   return { job, resume, application };
@@ -38,8 +39,10 @@ try {
   assert.equal(store.db.prepare("SELECT state FROM application_authorizations WHERE application_id=?").get(submitted.application.id).state, "issued");
   store.claimAuthorizedApplication(submitted.application.id, "worker-1", submittedAuthorization.nonce);
   assert.throws(() => store.claimAuthorizedApplication(submitted.application.id, "worker-2", submittedAuthorization.nonce), /application\.authorization\.unavailable/);
-  assert.throws(() => store.updateApplication(submitted.application.id, { status: "submitted" }), /SUBMISSION_EVIDENCE_REQUIRED/);
-  store.updateApplication(submitted.application.id, { status: "submitted", evidence_ref: "portal:confirmation:submitted" });
+  // C1: the PATCH path no longer records authorized submissions; the claiming worker uses the internal route.
+  assert.throws(() => store.updateApplication(submitted.application.id, { status: "submitted", evidence_ref: "portal:confirmation:submitted" }), /application\.internal_route_required/);
+  assert.throws(() => store.submitAuthorizedApplication(submitted.application.id, { worker_id: "worker-1" }), /SUBMISSION_EVIDENCE_REQUIRED/);
+  store.submitAuthorizedApplication(submitted.application.id, { worker_id: "worker-1", evidence_ref: "portal:confirmation:submitted" });
   const consumed = store.db.prepare("SELECT state,evidence_ref FROM application_authorizations WHERE application_id=?").get(submitted.application.id);
   assert.equal(consumed.state, "consumed");
   assert.equal(consumed.evidence_ref, "portal:confirmation:submitted");

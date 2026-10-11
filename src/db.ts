@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
-import { executeWorkflowCommand, type TransitionInput } from "./workflow.js";
-import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
+import { executeWorkflowCommand, WorkflowError, type TransitionInput, type TransitionResult, type WorkflowCommand } from "./workflow.js";
+import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
 import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "./agent-defaults.js";
 import { compactProfileContext, extractPdfText, MAX_PDF_BYTES, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
 
@@ -196,8 +196,9 @@ db.exec(`
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    profile_snapshot_id TEXT REFERENCES profile_snapshots(id) ON DELETE SET NULL,
-    round_id TEXT REFERENCES search_rounds(id) ON DELETE SET NULL,
+    -- '' means "no snapshot/round": NULL would make UNIQUE treat every row as distinct.
+    profile_snapshot_id TEXT NOT NULL DEFAULT '',
+    round_id TEXT NOT NULL DEFAULT '',
     score_base REAL NOT NULL,
     coverage_percent REAL NOT NULL,
     band TEXT NOT NULL,
@@ -420,7 +421,23 @@ db.exec(`
     command TEXT NOT NULL,
     evidence_ref TEXT,
     version INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    cycle INTEGER NOT NULL DEFAULT 1,
+    data_json TEXT NOT NULL DEFAULT '{}'
+  );
+
+  CREATE TABLE IF NOT EXISTS inbound_messages (
+    id TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL,
+    received_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS preference_signal_events (
+    project_id TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    polarity TEXT NOT NULL CHECK(polarity IN ('positive')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, job_id, polarity)
   );
 
   CREATE TABLE IF NOT EXISTS job_feedback_events (
@@ -584,6 +601,98 @@ ensureColumn("agent_configs", "description", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("agent_runs", "agent_id", "TEXT");
 ensureColumn("agent_runs", "config_version_id", "TEXT");
 ensureColumn("agent_runs", "config_snapshot", "TEXT");
+ensureColumn("jobs", "workflow_cycle", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("workflow_events", "cycle", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("workflow_events", "data_json", "TEXT NOT NULL DEFAULT '{}'");
+db.exec("CREATE INDEX IF NOT EXISTS idx_workflow_events_job ON workflow_events(job_id, version)");
+
+let savepointSequence = 0;
+
+/**
+ * Runs `fn` atomically. Top-level calls take the write lock up front (BEGIN IMMEDIATE);
+ * nested calls (e.g. upsertJob inside a batch ingestion) use a SAVEPOINT so a failure
+ * rolls back only the inner work and still propagates to the outer transaction.
+ */
+function tx<T>(fn: () => T): T {
+  if ((db as unknown as { isTransaction: boolean }).isTransaction) {
+    const name = `radar_sp_${++savepointSequence}`;
+    db.exec(`SAVEPOINT ${name}`);
+    try {
+      const result = fn();
+      db.exec(`RELEASE ${name}`);
+      return result;
+    } catch (error) {
+      try { db.exec(`ROLLBACK TO ${name}`); db.exec(`RELEASE ${name}`); } catch { /* outer rollback handles it */ }
+      throw error;
+    }
+  }
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** match_scores used NULL snapshot/round, so UNIQUE never deduplicated those rows. */
+function migrateMatchScoresScopeOnce() {
+  const columns = db.prepare("PRAGMA table_info(match_scores)").all() as { name: string; notnull: number }[];
+  const snapshot = columns.find((column) => column.name === "profile_snapshot_id");
+  if (!snapshot || Number(snapshot.notnull) === 1) return;
+  tx(() => {
+    db.exec(`CREATE TABLE match_scores_v2 (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      profile_snapshot_id TEXT NOT NULL DEFAULT '',
+      round_id TEXT NOT NULL DEFAULT '',
+      score_base REAL NOT NULL,
+      coverage_percent REAL NOT NULL,
+      band TEXT NOT NULL,
+      preference_adjustment REAL NOT NULL DEFAULT 0,
+      score_final REAL NOT NULL,
+      criteria_json TEXT NOT NULL,
+      evidence_json TEXT NOT NULL DEFAULT '[]',
+      strengths_json TEXT NOT NULL DEFAULT '[]',
+      gaps_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      UNIQUE(job_id, profile_snapshot_id, round_id)
+    )`);
+    // Keep only the latest row per (job, snapshot, round) once NULLs collapse into ''.
+    db.exec(`INSERT INTO match_scores_v2
+      SELECT id,project_id,job_id,COALESCE(profile_snapshot_id,''),COALESCE(round_id,''),score_base,coverage_percent,band,
+        preference_adjustment,score_final,criteria_json,evidence_json,strengths_json,gaps_json,created_at
+      FROM match_scores m
+      WHERE m.rowid = (SELECT m2.rowid FROM match_scores m2
+        WHERE m2.job_id=m.job_id AND COALESCE(m2.profile_snapshot_id,'')=COALESCE(m.profile_snapshot_id,'') AND COALESCE(m2.round_id,'')=COALESCE(m.round_id,'')
+        ORDER BY m2.created_at DESC, m2.rowid DESC LIMIT 1)`);
+    db.exec("DROP TABLE match_scores");
+    db.exec("ALTER TABLE match_scores_v2 RENAME TO match_scores");
+  });
+}
+
+migrateMatchScoresScopeOnce();
+
+/** Preference rows written under the legacy implicit 'default' project were invisible to the dashboard. */
+function migrateDefaultPreferenceProjectOnce() {
+  const migration = "preference_project_default_to_busca_emprego_v1";
+  if (db.prepare("SELECT name FROM schema_migrations WHERE name=?").get(migration)) return;
+  tx(() => {
+    db.prepare("UPDATE preference_rules SET project_id='busca-emprego' WHERE project_id='default'").run();
+    db.prepare("UPDATE job_feedback_events SET project_id='busca-emprego' WHERE project_id='default'").run();
+    db.prepare(`INSERT INTO preference_values (project_id,facet_key,normalized_value,positive_count,negative_count,updated_at)
+      SELECT 'busca-emprego',facet_key,normalized_value,positive_count,negative_count,updated_at FROM preference_values WHERE project_id='default'
+      ON CONFLICT(project_id,facet_key,normalized_value) DO UPDATE SET positive_count=positive_count+excluded.positive_count,
+        negative_count=negative_count+excluded.negative_count,updated_at=excluded.updated_at`).run();
+    db.prepare("DELETE FROM preference_values WHERE project_id='default'").run();
+    db.prepare("INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)").run(migration, new Date().toISOString());
+  });
+}
+
+migrateDefaultPreferenceProjectOnce();
 
 function now() {
   return new Date().toISOString();
@@ -811,7 +920,7 @@ export function getBootstrap(projectId = "busca-emprego") {
   const currentTime = Date.now();
   const jobs = listJobs().map((job) => {
     const application = applicationByJob.get(job.id);
-    const closedByDeadline = job.deadline_at ? new Date(job.deadline_at).getTime() < currentTime : false;
+    const closedByDeadline = deadlinePassed(job.deadline_at, currentTime);
     const isClosed = job.opening_status === "closed" || Boolean(job.closed_at) || closedByDeadline || job.status === "expired";
     const applied = Boolean(application && ["submitted", "accepted", "rejected"].includes(application.status));
     const lifecycle = applied ? "applied" : (isClosed ? "lost" : (job.decision === "not_interested" || job.status === "discarded" ? "not_interested" : (job.opening_status === "unknown" ? "unknown" : "open")));
@@ -827,7 +936,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     resumes: listResumes(),
     baseResumes: listBaseResumes(),
     applications,
-    preferences: listPreferenceState(),
+    preferences: listPreferenceState(projectId),
     humanQuestions: listHumanQuestions(),
     profiles: listProfiles(projectId),
     activeProfile: getActiveProfile(projectId),
@@ -858,68 +967,269 @@ export function getBootstrap(projectId = "busca-emprego") {
   };
 }
 
-function refreshExpiredJobs() {
+/** Marks the job expired through the workflow and revokes any automatic authorization still pending. */
+function expireJob(jobId: string, reason: string, sourceConfirmed: boolean, actor = "system:expiration") {
   const timestamp = now();
+  tx(() => {
+    applyWorkflowCommand(jobId, "expire", { actor, data: { expired_at: timestamp, reason, ...(sourceConfirmed ? { source_confirmed: true } : { configured_rule: true }) } });
+    db.prepare("UPDATE jobs SET decision = 'expired', decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(timestamp, timestamp, jobId);
+    for (const row of db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('queued','needs_review','failed')").all(jobId) as { id: string }[]) {
+      revokeAuthorizationRows(row.id, "job_expired");
+    }
+    db.prepare(`UPDATE applications SET automation_mode=CASE WHEN automation_mode='authorized_auto' THEN 'assisted' ELSE automation_mode END,
+      auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,updated_at=?
+      WHERE job_id=? AND status IN ('queued','needs_review','failed') AND authorization_id IS NOT NULL`).run(timestamp, jobId);
+  });
+  audit("job", jobId, "expired", { reason });
+}
+
+/**
+ * Expires vacancies closed at the source or past their deadline. Jobs whose application
+ * is being executed (job `applying`, application in progress or already sent) are never touched.
+ */
+export function refreshExpiredJobs(nowMs = Date.now()) {
+  const placeholders = PRE_APPLICATION_STATUSES.filter((status) => status !== "applying").map(() => "?").join(",");
   const rows = db.prepare(`
-    SELECT jobs.id
+    SELECT jobs.id, jobs.opening_status, jobs.closed_at, jobs.deadline_at
     FROM jobs
-    WHERE jobs.status NOT IN ('applied', 'discarded', 'expired')
+    WHERE jobs.status IN (${placeholders})
       AND jobs.decision NOT IN ('not_interested', 'applied')
-      AND (jobs.opening_status = 'closed' OR jobs.closed_at IS NOT NULL OR (jobs.deadline_at IS NOT NULL AND jobs.deadline_at < ?))
+      AND (jobs.opening_status = 'closed' OR jobs.closed_at IS NOT NULL OR jobs.deadline_at IS NOT NULL)
       AND NOT EXISTS (
         SELECT 1 FROM applications
         WHERE applications.job_id = jobs.id
-          AND applications.status IN ('submitted', 'accepted', 'rejected')
+          AND applications.status IN ('in_progress', 'submitted', 'accepted', 'rejected')
       )
-  `).all(timestamp) as { id: string }[];
+  `).all(...PRE_APPLICATION_STATUSES.filter((status) => status !== "applying")) as { id: string; opening_status: string; closed_at: string | null; deadline_at: string | null }[];
+  const expired: string[] = [];
   for (const row of rows) {
-    db.prepare("UPDATE jobs SET status = 'expired', decision = 'expired', decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(timestamp, timestamp, row.id);
-    audit("job", row.id, "expired", { reason: "deadline_or_source_closed" });
+    const sourceClosed = row.opening_status === "closed" || Boolean(row.closed_at);
+    if (!sourceClosed && !deadlinePassed(row.deadline_at, nowMs)) continue;
+    try {
+      expireJob(row.id, sourceClosed ? "source_closed" : "deadline_passed", sourceClosed);
+      expired.push(row.id);
+    } catch (error) {
+      // A concurrent transition wins; the next refresh re-evaluates the job.
+      if (!(error instanceof WorkflowError)) throw error;
+    }
   }
+  return expired;
 }
 
 function audit(entityType: string, entityId: string, eventType: string, payload: unknown = {}) {
   db.prepare("INSERT INTO audit_events (entity_type, entity_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)").run(entityType, entityId, eventType, JSON.stringify(payload), now());
 }
 
+// ---------------------------------------------------------------------------
+// Workflow: the single path for every write to jobs.status (SDD-WORKFLOW-001).
+// ---------------------------------------------------------------------------
+
+const STATUS_RANK: Readonly<Record<JobStatus, number>> = {
+  found: 0, validation: 1, strong_match: 2, review: 3, selected: 4, resume: 5, resume_approved: 6,
+  ready_to_apply: 7, applying: 8, applied: 9, interview_scheduled: 10, interview_completed: 11, completed: 12,
+  discarded: -1, expired: -1,
+};
+const FORWARD_COMMAND: Readonly<Partial<Record<JobStatus, WorkflowCommand>>> = {
+  found: "normalize", strong_match: "present_for_review", review: "select", selected: "create_resume",
+  resume: "approve_resume", resume_approved: "prepare_application", ready_to_apply: "start_application",
+  applying: "confirm_applied",
+};
+const PRE_APPLICATION_STATUSES: readonly JobStatus[] = ["found", "validation", "strong_match", "review", "selected", "resume", "resume_approved", "ready_to_apply", "applying"];
+const ACTIVE_STATUSES: readonly JobStatus[] = [...PRE_APPLICATION_STATUSES, "applied", "interview_scheduled", "interview_completed"];
+/** Commands whose preconditions only make sense inside a domain operation (never via the generic endpoint). */
+const INTERNAL_ONLY_COMMANDS = new Set<WorkflowCommand>(["revise_resume", "abort_application"]);
+
+interface WorkflowContext {
+  actor: string;
+  evidence_ref?: string | null;
+  occurred_at?: string;
+  /** Human assertions (reason, interview_at, ...). Facts computed from the database always override these keys. */
+  data?: Readonly<Record<string, unknown>>;
+  expected_version?: number;
+}
+
+/**
+ * Preconditions that are facts of the database. They are recomputed for every transition
+ * and override anything a client sent, so `score: 80` or `authorization_current: true`
+ * in a request body can never satisfy a rule by itself.
+ */
+function workflowFacts(jobId: string): Record<string, unknown> {
+  const job = db.prepare("SELECT title,company,source,source_url,decision FROM jobs WHERE id=?").get(jobId) as Record<string, unknown> | undefined;
+  if (!job) throw new Error("job.not_found");
+  const score = db.prepare("SELECT score_final,coverage_percent FROM match_scores WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId) as { score_final: number; coverage_percent: number } | undefined;
+  const resume = db.prepare("SELECT id,base_resume_id FROM resumes WHERE job_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1").get(jobId) as { id: string; base_resume_id: string | null } | undefined;
+  const approved = db.prepare("SELECT id FROM resumes WHERE job_id=? AND status='approved' LIMIT 1").get(jobId);
+  const application = db.prepare("SELECT id,status,automation_mode,authorization_id,evidence_ref FROM applications WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId) as Record<string, unknown> | undefined;
+  let authorizationCurrent = false;
+  if (application?.authorization_id) {
+    const authorization = currentAuthorization(String(application.id));
+    const state = String(authorization?.state ?? "");
+    if (state === "issued" || state === "claimed") {
+      try { assertCurrentAuthorization(authorization, state); authorizationCurrent = true; } catch { authorizationCurrent = false; }
+    }
+  }
+  const submitted = Boolean(application && ["submitted", "accepted", "rejected"].includes(String(application.status)));
+  const coverage = score ? Number(score.coverage_percent) : undefined;
+  return {
+    source_ref: String(job.source_url ?? "").trim() || (String(job.source ?? "").trim() ? `source:${String(job.source)}` : undefined),
+    normalized: Boolean(String(job.title ?? "").trim() && String(job.company ?? "").trim()),
+    score: score ? Number(score.score_final) : undefined,
+    coverage,
+    validation_sufficient: coverage !== undefined && coverage >= 60,
+    coverage_insufficient: coverage !== undefined && coverage < 60,
+    explicit_interest: job.decision === "interested",
+    resume_id: resume?.id,
+    base_resume_id: resume?.base_resume_id ?? undefined,
+    ats_draft_created: Boolean(resume),
+    confirmation: approved ? "APROVO" : undefined,
+    flow: application ? String(application.automation_mode) : undefined,
+    authorization_current: authorizationCurrent,
+    manual_user_command: application?.automation_mode === "manual",
+    manual_user_confirmation: application?.automation_mode === "manual" && submitted,
+    portal_confirmation: application?.automation_mode === "authorized_auto" && submitted && Boolean(String(application.evidence_ref ?? "").trim()),
+  };
+}
+
+/** Executes one command, bumps the version (CAS) and appends the workflow event, atomically. */
+function applyWorkflowCommand(jobId: string, command: WorkflowCommand, ctx: WorkflowContext): TransitionResult {
+  return tx(() => {
+    const row = db.prepare("SELECT status,version,workflow_cycle FROM jobs WHERE id=?").get(jobId) as { status: JobStatus; version: number; workflow_cycle: number } | undefined;
+    if (!row) throw new Error("job.not_found");
+    const version = Number(row.version ?? 0);
+    const data = { ...(ctx.data ?? {}), ...workflowFacts(jobId) };
+    const result = executeWorkflowCommand({ status: row.status, version, cycle: Number(row.workflow_cycle ?? 1) }, {
+      command, expected_version: ctx.expected_version ?? version, actor: ctx.actor, evidence_ref: ctx.evidence_ref ?? undefined,
+      occurred_at: ctx.occurred_at, data,
+    });
+    const update = db.prepare("UPDATE jobs SET status=?,version=?,workflow_cycle=?,updated_at=? WHERE id=? AND version=?")
+      .run(result.state.status, result.state.version, result.state.cycle, result.event.created_at, jobId, version);
+    if (!update.changes) throw new WorkflowError("VERSION_CONFLICT", 409, "O estado foi alterado por outra operação.", { expected_version: version });
+    db.prepare(`INSERT INTO workflow_events
+      (job_id,from_status,to_status,actor,command,evidence_ref,version,created_at,cycle,data_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(jobId, result.event.from_status, result.event.to_status, result.event.actor, result.event.command,
+        result.event.evidence_ref, result.event.version, result.event.created_at, result.event.cycle, JSON.stringify(result.event.data));
+    audit("job", jobId, "workflow_transition", { command, from_status: result.event.from_status, to_status: result.event.to_status, version: result.event.version, cycle: result.event.cycle, actor: result.event.actor });
+    return result;
+  });
+}
+
+/**
+ * Walks the forward chain until `target`. Never regresses: a job already at or beyond
+ * `target` is left untouched (e.g. interview_scheduled stays when an application is accepted).
+ */
+function advanceJobTo(jobId: string, target: JobStatus, ctx: WorkflowContext): TransitionResult[] {
+  return tx(() => {
+    const results: TransitionResult[] = [];
+    for (let step = 0; step < 16; step += 1) {
+      const row = db.prepare("SELECT status FROM jobs WHERE id=?").get(jobId) as { status: JobStatus } | undefined;
+      if (!row) throw new Error("job.not_found");
+      const status = row.status;
+      if (status === target || STATUS_RANK[status] >= STATUS_RANK[target]) return results;
+      if (STATUS_RANK[status] < 0) throw new WorkflowError("ILLEGAL_TRANSITION", 409, "Reabra a vaga antes de continuar o fluxo.", { from_status: status, target });
+      let command = FORWARD_COMMAND[status];
+      if (status === "validation") {
+        const facts = workflowFacts(jobId);
+        command = typeof facts.score === "number" && facts.score >= 80 && facts.validation_sufficient === true ? "mark_strong_match" : "request_review";
+      }
+      if (!command) throw new WorkflowError("ILLEGAL_TRANSITION", 409, "Não há caminho de workflow até o estado pedido.", { from_status: status, target });
+      // A human acting on the job (interest, resume, application) has seen it: the walker records that explicitly.
+      results.push(applyWorkflowCommand(jobId, command, { ...ctx, expected_version: undefined, data: { review_required: true, presented_to_user: true, ...(ctx.data ?? {}) } }));
+    }
+    throw new WorkflowError("ILLEGAL_TRANSITION", 409, "Caminho de workflow longo demais.", { target });
+  });
+}
+
+/** Returns an `applying` job to the queue when its authorized execution stops. */
+function abortApplyingJob(jobId: string, reason: string, actor: string) {
+  const row = db.prepare("SELECT status FROM jobs WHERE id=?").get(jobId) as { status: JobStatus } | undefined;
+  if (row?.status === "applying") applyWorkflowCommand(jobId, "abort_application", { actor, data: { reason } });
+}
+
+/** A date-only deadline (YYYY-MM-DD) stays valid through the whole local day. */
+function deadlinePassed(deadline: string | null | undefined, nowMs = Date.now()): boolean {
+  if (!deadline) return false;
+  const value = String(deadline).trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  const limit = dateOnly ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 23, 59, 59, 999).getTime() : Date.parse(value);
+  return Number.isFinite(limit) && limit < nowMs;
+}
+
+const JOB_URL_FIELDS = ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const;
+const OPENING_STATUSES = new Set(["open", "closed", "unknown"]);
+
+function optionalNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  return typeof value === "number" ? value : Number(value);
+}
+
+/**
+ * Shared validation for every write of vacancy fields (upsertJob, updateJob).
+ * `changed` holds the fields being written; `current` the stored job (if any). URL fields
+ * are canonicalized (public HTTPS only); salary and coordinates are validated on the merged
+ * result so a patch cannot create an inconsistent pair (min > max, lone latitude...).
+ */
+function validateJobFields(changed: Record<string, unknown>, current: Record<string, unknown> = {}): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...changed };
+  for (const field of JOB_URL_FIELDS) {
+    if (!(field in changed)) continue;
+    const value = changed[field];
+    normalized[field] = value == null || String(value).trim() === "" ? "" : canonicalizeJobUrl(String(value));
+  }
+  const merged = { ...current, ...normalized };
+  const salaryMin = optionalNumber(merged.salary_min);
+  const salaryMax = optionalNumber(merged.salary_max);
+  const salary = validateSalary({ min: salaryMin, max: salaryMax, currency: merged.currency == null || merged.currency === "" ? null : String(merged.currency) });
+  if (salary.fieldErrors.length || !salary.value) throw new Error(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
+  if ("salary_min" in changed) normalized.salary_min = salaryMin;
+  if ("salary_max" in changed) normalized.salary_max = salaryMax;
+  if ("currency" in changed || "salary_min" in changed || "salary_max" in changed) normalized.currency = salary.value.currency ?? (merged.currency == null || merged.currency === "" ? "BRL" : String(merged.currency));
+  const salaryPeriod = merged.salary_period ?? null;
+  if (salaryPeriod !== null && !["hour", "month", "year"].includes(String(salaryPeriod))) throw new Error("job.salary_period.invalid");
+  const latitude = optionalNumber(merged.latitude);
+  const longitude = optionalNumber(merged.longitude);
+  const coordinates = validateCoordinates({ latitude, longitude });
+  if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
+  if ("latitude" in changed) normalized.latitude = latitude;
+  if ("longitude" in changed) normalized.longitude = longitude;
+  if ("opening_status" in changed && !OPENING_STATUSES.has(String(changed.opening_status ?? "unknown"))) throw new Error("job.opening_status.invalid");
+  for (const field of ["title", "company"] as const) {
+    if (field in changed && !String(changed[field] ?? "").trim()) throw new Error("job.required_fields.invalid");
+  }
+  return normalized;
+}
+
 export function upsertJob(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
   if (!input.title?.trim() || !input.company?.trim() || !input.source?.trim()) throw new Error("job.required_fields.invalid");
-  const sourceUrl = input.source_url ? canonicalizeJobUrl(input.source_url) : "";
-  const linkedinPostUrl = input.linkedin_post_url ? canonicalizeJobUrl(input.linkedin_post_url) : "";
-  const jobUrl = input.job_url ? canonicalizeJobUrl(input.job_url) : "";
-  const applicationUrl = input.application_url ? canonicalizeJobUrl(input.application_url) : "";
-  const salary = validateSalary({ min: input.salary_min ?? null, max: input.salary_max ?? null, currency: input.currency ?? null });
-  if (salary.fieldErrors.length || !salary.value) throw new Error(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
-  const salaryPeriod = input.salary_period ?? null;
-  if (salaryPeriod !== null && !["hour", "month", "year"].includes(String(salaryPeriod))) throw new Error("job.salary_period.invalid");
-  const coordinates = validateCoordinates({ latitude: input.latitude ?? null, longitude: input.longitude ?? null });
-  if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
-  input = { ...input, source_url: sourceUrl, linkedin_post_url: linkedinPostUrl, job_url: jobUrl, application_url: applicationUrl, currency: salary.value.currency ?? input.currency ?? "BRL", salary_period: salaryPeriod };
+  if (!String(input.source_url ?? "").trim()) throw new Error("job.source_url.required");
+  // Validation happens before any write, and the whole upsert is one transaction.
+  const normalized = validateJobFields({ ...input, source_url: input.source_url ?? "", salary_period: input.salary_period ?? null } as Record<string, unknown>);
+  input = { ...input, ...normalized, currency: String(normalized.currency ?? input.currency ?? "BRL") } as typeof input;
+  const jobUrl = String(input.job_url ?? "");
+  const linkedinPostUrl = String(input.linkedin_post_url ?? "");
+  const applicationUrl = String(input.application_url ?? "");
+  const sourceUrl = String(input.source_url ?? "");
   const id = input.id || idFor(`${input.source}|${jobUrl || linkedinPostUrl || applicationUrl || sourceUrl}|${input.title}|${input.company}`);
   const timestamp = now();
-  const existing = db.prepare("SELECT id FROM jobs WHERE id = ?").get(id) as { id: string } | undefined;
-  const current = existing ? db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined : undefined;
-  const currentJob = current ? mapJob(current) : undefined;
-  const job = { ...(currentJob ?? {}), ...input, id,
-    // Ingestion never changes human workflow state. Use transitions for that.
-    status: currentJob?.status ?? "found",
-    decision: currentJob?.decision ?? "pending",
-    decision_at: currentJob?.decision_at ?? null
-  } as Partial<Job> & { source: string; title: string; company: string; source_url: string };
-  const values = [
-    id, job.title, job.company, job.location ?? "Não informado", job.latitude ?? null, job.longitude ?? null, job.country ?? "Brasil", job.work_model ?? "Não informado", job.seniority ?? "Não informado",
-    job.salary_min ?? null, job.salary_max ?? null, job.currency ?? "BRL", job.salary_period ?? null, job.salary_source ?? "Não informado", job.salary_source_url ?? "", job.salary_checked_at ?? null,
-    job.salary_confidence ?? "not_checked", job.source, job.source_url, job.linkedin_post_url ?? "", job.job_url ?? "", job.application_url ?? "", job.opening_status ?? "unknown", job.opening_checked_at ?? null, job.deadline_at ?? null, job.closed_at ?? null, job.decision ?? "pending", job.decision_at ?? null, job.description ?? "", job.benefits ?? "", job.requirements ?? "", job.responsibilities ?? "", job.additional_information ?? "", job.match_score ?? 0, job.status ?? "found", job.posted_at ?? null, timestamp, timestamp
-  ];
-  if (existing) {
-    db.prepare(`UPDATE jobs SET title=?, company=?, location=?, latitude=?, longitude=?, country=?, work_model=?, seniority=?, salary_min=?, salary_max=?, currency=?, salary_period=?, salary_source=?, salary_source_url=?, salary_checked_at=?, salary_confidence=?, source=?, source_url=?, linkedin_post_url=?, job_url=?, application_url=?, opening_status=?, opening_checked_at=?, deadline_at=?, closed_at=?, decision=?, decision_at=?, description=?, benefits=?, requirements=?, responsibilities=?, additional_information=?, match_score=?, status=?, posted_at=?, updated_at=? WHERE id=?`).run(...values.slice(1, -2), timestamp, id);
-  } else {
-    db.prepare(`INSERT INTO jobs (id,title,company,location,latitude,longitude,country,work_model,seniority,salary_min,salary_max,currency,salary_period,salary_source,salary_source_url,salary_checked_at,salary_confidence,source,source_url,linkedin_post_url,job_url,application_url,opening_status,opening_checked_at,deadline_at,closed_at,decision,decision_at,description,benefits,requirements,responsibilities,additional_information,match_score,status,posted_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values);
-  }
-  const rawInput = input as unknown as Record<string, unknown>;
-  db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
-    .run(String(rawInput.project_id ?? "busca-emprego"), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), canonicalizeJobUrl(job.source_url), rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
-  audit("job", id, existing ? "updated" : "discovered", { changed_fields: Object.keys(input) });
+  tx(() => {
+    const current = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    const currentJob = current ? mapJob(current) : undefined;
+    const job = { ...(currentJob ?? {}), ...input, id } as Partial<Job> & { source: string; title: string; company: string; source_url: string };
+    // Ingestion never changes human workflow state (status/decision): only the workflow does.
+    const values = [
+      job.title, job.company, job.location ?? "Não informado", job.latitude ?? null, job.longitude ?? null, job.country ?? "Brasil", job.work_model ?? "Não informado", job.seniority ?? "Não informado",
+      job.salary_min ?? null, job.salary_max ?? null, job.currency ?? "BRL", job.salary_period ?? null, job.salary_source ?? "Não informado", job.salary_source_url ?? "", job.salary_checked_at ?? null,
+      job.salary_confidence ?? "not_checked", job.source, job.source_url, job.linkedin_post_url ?? "", job.job_url ?? "", job.application_url ?? "", job.opening_status ?? "unknown", job.opening_checked_at ?? null, job.deadline_at ?? null, job.closed_at ?? null, job.description ?? "", job.benefits ?? "", job.requirements ?? "", job.responsibilities ?? "", job.additional_information ?? "", job.match_score ?? 0, job.posted_at ?? null
+    ];
+    if (currentJob) {
+      db.prepare(`UPDATE jobs SET title=?, company=?, location=?, latitude=?, longitude=?, country=?, work_model=?, seniority=?, salary_min=?, salary_max=?, currency=?, salary_period=?, salary_source=?, salary_source_url=?, salary_checked_at=?, salary_confidence=?, source=?, source_url=?, linkedin_post_url=?, job_url=?, application_url=?, opening_status=?, opening_checked_at=?, deadline_at=?, closed_at=?, description=?, benefits=?, requirements=?, responsibilities=?, additional_information=?, match_score=?, posted_at=?, updated_at=? WHERE id=?`).run(...(values as any[]), timestamp, id);
+    } else {
+      db.prepare(`INSERT INTO jobs (id,title,company,location,latitude,longitude,country,work_model,seniority,salary_min,salary_max,currency,salary_period,salary_source,salary_source_url,salary_checked_at,salary_confidence,source,source_url,linkedin_post_url,job_url,application_url,opening_status,opening_checked_at,deadline_at,closed_at,description,benefits,requirements,responsibilities,additional_information,match_score,posted_at,decision,decision_at,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,'found',?,?)`).run(id, ...(values as any[]), timestamp, timestamp);
+    }
+    const rawInput = input as unknown as Record<string, unknown>;
+    db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
+      .run(String(rawInput.project_id ?? currentJob?.project_id ?? "busca-emprego"), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
+    audit("job", id, currentJob ? "updated" : "discovered", { changed_fields: Object.keys(input) });
+  });
   return getJob(id);
 }
 
@@ -1074,12 +1384,41 @@ function activeSuppression(job: Job, projectId = "busca-emprego") {
     const match = parseObject(rule.match_json);
     const type = String(match.type ?? "");
     const value = normalizedFacet(match.value);
-    const isMatch = type === "company" && normalizedFacet(job.company) === normalizedFacet(match.company)
-      || type === "similar_role" && normalizedFacet(job.title) === normalizedFacet(match.title)
-      || type === "facet_match" && normalizedFacet((job as unknown as Record<string, unknown>)[String(match.detail_key)] ?? "") === value;
+    const candidate = {
+      title: job.title, company: job.company, roleFamily: job.role_family ?? null, roleFamilyConfidence: job.role_family_confidence ?? null,
+      requirements: String(job.requirements ?? "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean),
+    };
+    const rejected = {
+      title: String(match.title_original ?? match.title ?? ""), company: String(match.company_original ?? match.company ?? ""),
+      roleFamily: match.role_family == null ? null : String(match.role_family),
+      roleFamilyConfidence: match.role_family_confidence == null ? null : Number(match.role_family_confidence),
+      requirements: Array.isArray(match.requirements) ? match.requirements.map(String) : [],
+    };
+    const isMatch = type === "company" && compareTotalRejection(rejected, candidate, "company").similar
+      || type === "similar_role" && compareTotalRejection(rejected, candidate, "role").similar
+      || type === "facet_match" && !["unknown", "feedback-specified"].includes(value) && feedbackFacetValue(job, String(match.detail_key)) === value;
     if (isMatch) matched.push(rule.id);
   }
   return matched;
+}
+
+/**
+ * A source reporting the vacancy as closed is authoritative for the opening fields: the job
+ * is closed (opening_status/closed_at) and, while no application is under way, expired via the workflow.
+ */
+function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, roundId?: string) {
+  const job = getJob(jobId);
+  if (!job) return;
+  const timestamp = now();
+  const evidence = addEvidence({ projectId: job.project_id ?? "busca-emprego", jobId, field: "opening_status", value: "closed", sourceUrl, confidence: 0.9, origin: "agent", runId: roundId, sourceId });
+  selectEvidence(jobId, "opening_status", evidence.id, sourceId, evidence.timestamp);
+  db.prepare("UPDATE field_conflicts SET status='resolved_candidate',reviewed_by=?,reviewed_at=? WHERE job_id=? AND field_path='opening_status' AND status='pending'").run(`source:${sourceId}`, timestamp, jobId);
+  db.prepare("UPDATE jobs SET opening_status='closed',opening_checked_at=?,closed_at=COALESCE(closed_at,?),updated_at=? WHERE id=?").run(timestamp, timestamp, timestamp, jobId);
+  const busy = db.prepare("SELECT 1 FROM applications WHERE job_id=? AND status IN ('in_progress','submitted','accepted','rejected') LIMIT 1").get(jobId);
+  if (!busy && PRE_APPLICATION_STATUSES.includes(job.status) && job.status !== "applying" && !["not_interested", "applied"].includes(job.decision)) {
+    expireJob(jobId, "source_closed", true, `source:${sourceId}`);
+  }
+  audit("job", jobId, "closed_by_source", { source_id: sourceId, round_id: roundId ?? null });
 }
 
 export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego") {
@@ -1113,16 +1452,31 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
     const sourceUrl = canonicalizeJobUrl(String(item.source_url ?? item.job_url));
     const jobUrl = canonicalizeJobUrl(String(item.job_url));
     const sourceJobId = item.source_job_id == null ? null : String(item.source_job_id);
-    let occurrence = sourceJobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND source_id=? AND source_job_id=? ORDER BY observed_at DESC LIMIT 1").get(projectId, sourceId, sourceJobId) as Record<string, unknown> | undefined : undefined;
-    if (!occurrence) occurrence = db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND canonical_url=? ORDER BY observed_at DESC LIMIT 1").get(projectId, jobUrl) as Record<string, unknown> | undefined;
-    let existingJob = occurrence ? getJob(String(occurrence.job_id)) : null;
-    if (!existingJob) {
-      const byUrl = (db.prepare("SELECT * FROM jobs WHERE project_id=? AND canonical_url=? ORDER BY created_at LIMIT 10").all(projectId, jobUrl) as Record<string, unknown>[]).map(mapJob).find((candidate) => companyKey(candidate.company) === companyKey(String(item.company)));
-      existingJob = byUrl ?? null;
-    }
-    let action = "new";
+    // Exact identity (domain.compareExactIdentity): same source job id within the source, or the
+    // same canonical URL *and* the same normalized company. A URL alone never merges employers.
+    const incoming = { sourceId, sourceJobId, sourceUrl: jobUrl, company: String(item.company) };
+    let existingJob: Job | null = null;
     let reason = "different_identity";
-    if (existingJob) { action = "sighting"; reason = sourceJobId && existingJob.source_job_id === sourceJobId ? "same_source_job_id" : "same_canonical_url"; }
+    const occurrences = [
+      ...(sourceJobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND source_id=? AND source_job_id=? ORDER BY observed_at DESC LIMIT 5").all(projectId, sourceId, sourceJobId) as Record<string, unknown>[] : []),
+      ...(db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND canonical_url=? ORDER BY observed_at DESC LIMIT 20").all(projectId, jobUrl) as Record<string, unknown>[]),
+    ];
+    for (const occurrence of occurrences) {
+      const candidate = getJob(String(occurrence.job_id));
+      if (!candidate) continue;
+      const decision = compareExactIdentity(incoming, {
+        sourceId: String(occurrence.source_id), sourceJobId: occurrence.source_job_id == null ? null : String(occurrence.source_job_id),
+        sourceUrl: String(occurrence.canonical_url), company: candidate.company,
+      });
+      if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
+    }
+    if (!existingJob) {
+      for (const candidate of (db.prepare("SELECT * FROM jobs WHERE project_id=? AND (canonical_url=? OR job_url=?) ORDER BY created_at LIMIT 10").all(projectId, jobUrl, jobUrl) as Record<string, unknown>[]).map(mapJob)) {
+        const decision = compareExactIdentity(incoming, { sourceId: candidate.source, sourceJobId: candidate.source_job_id ?? null, sourceUrl: candidate.job_url || candidate.canonical_url || jobUrl, company: candidate.company });
+        if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
+      }
+    }
+    let action = existingJob ? "sighting" : "new";
     if (!existingJob) {
       const candidates = listJobs().filter((candidate) => candidate.project_id === projectId).slice(0, 500);
       const fuzzy = candidates.find((candidate) => compareFuzzyDuplicate(
@@ -1143,16 +1497,25 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
     // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
     const job = existingJob ?? upsertJob(jobInput);
     if (!job) throw new Error("job.persist.failed");
-    const occurrenceId = idFor(`occurrence|${projectId}|${roundId}|${sourceId}|${sourceJobId ?? jobUrl}|${payloadHash}`);
-    db.prepare(`INSERT OR IGNORE INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at,opening_status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(occurrenceId, projectId, job.id, roundId, sourceId, sourceJobId, String(item.source_url ?? item.job_url), jobUrl, payloadHash, now(), String(item.opening_status ?? "unknown"));
+    // One occurrence per (round, source, item): the same item repeated across batches of a
+    // round is the same sighting, so the batch hash is not part of the identity.
+    const occurrenceId = idFor(`occurrence|${projectId}|${roundId}|${sourceId}|${sourceJobId ?? jobUrl}`);
+    db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at,opening_status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,opening_status=excluded.opening_status,payload_hash=excluded.payload_hash`)
+      .run(occurrenceId, projectId, job.id, roundId, sourceId, sourceJobId, String(item.source_url ?? item.job_url), jobUrl, jobPayloadHash(item), now(), String(item.opening_status ?? "unknown"));
+    const wasSuppressed = Boolean(existingJob?.suppressed);
     const suppressed = activeSuppression(job, projectId);
-    if (suppressed.length) {
+    if (suppressed.length && !wasSuppressed) {
+      // Count each suppressed vacancy once, not once per repeated sighting.
       db.prepare("UPDATE jobs SET suppressed=1 WHERE id=?").run(job.id);
       for (const ruleId of suppressed) db.prepare("UPDATE preference_rules SET suppressed_count=suppressed_count+1,updated_at=? WHERE id=?").run(now(), ruleId);
     }
+    if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId);
     for (const [field, value] of Object.entries(jobInput)) {
       if (["id", "project_id", "source_job_id", "source"].includes(field) || value == null || value === "") continue;
+      // A closure reported by the source is applied by closeJobFromSource, not parked as a conflict.
+      if (field === "opening_status" && value === "closed") continue;
       const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl, confidence: 0.8, origin: "agent", runId: roundId, sourceId });
       if (!existingJob) {
         selectEvidence(job.id, field, evidence.id, sourceId, evidence.timestamp);
@@ -1241,22 +1604,27 @@ export function recordMatchScore(input: { job_id: string; scores: Record<string,
     return candidate !== "unknown" && candidate !== "feedback-specified" && candidate === value.normalized_value;
   });
   const adjusted = applyPreferenceAdjustment(result.scoreBase, matchingValues.map((value) => ({ facetKey: value.facet_key, normalizedValue: value.normalized_value, positiveCount: Number(value.positive_count), negativeCount: Number(value.negative_count) })));
-  const id = idFor(`match|${input.job_id}|${input.profile_snapshot_id ?? "none"}|${input.round_id ?? "none"}|${JSON.stringify(input.scores)}`);
-  db.prepare(`INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,evidence_json,strengths_json,gaps_json,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,profile_snapshot_id,round_id) DO UPDATE SET score_base=excluded.score_base,coverage_percent=excluded.coverage_percent,band=excluded.band,preference_adjustment=excluded.preference_adjustment,score_final=excluded.score_final,criteria_json=excluded.criteria_json,evidence_json=excluded.evidence_json,strengths_json=excluded.strengths_json,gaps_json=excluded.gaps_json,created_at=excluded.created_at`)
-    .run(id, input.project_id ?? "busca-emprego", input.job_id, input.profile_snapshot_id ?? null, input.round_id ?? null, result.scoreBase, result.coveragePercent, result.band, adjusted.preferenceAdjustment, adjusted.scoreFinal, JSON.stringify(result.criteria), json(input.evidence ?? []), json(input.strengths ?? []), json(input.gaps ?? []), now());
-  db.prepare("UPDATE jobs SET match_score=?,updated_at=? WHERE id=?").run(Math.round(adjusted.scoreFinal), now(), input.job_id);
+  // Random row id + upsert on the very target of the UNIQUE constraint: a repeated (even
+  // identical) score for the same job/snapshot/round updates the row instead of failing.
+  tx(() => {
+    db.prepare(`INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,evidence_json,strengths_json,gaps_json,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,profile_snapshot_id,round_id) DO UPDATE SET project_id=excluded.project_id,score_base=excluded.score_base,coverage_percent=excluded.coverage_percent,band=excluded.band,preference_adjustment=excluded.preference_adjustment,score_final=excluded.score_final,criteria_json=excluded.criteria_json,evidence_json=excluded.evidence_json,strengths_json=excluded.strengths_json,gaps_json=excluded.gaps_json,created_at=excluded.created_at`)
+      .run(randomUUID(), input.project_id ?? "busca-emprego", input.job_id, input.profile_snapshot_id ?? "", input.round_id ?? "", result.scoreBase, result.coveragePercent, result.band, adjusted.preferenceAdjustment, adjusted.scoreFinal, JSON.stringify(result.criteria), json(input.evidence ?? []), json(input.strengths ?? []), json(input.gaps ?? []), now());
+    db.prepare("UPDATE jobs SET match_score=?,updated_at=? WHERE id=?").run(Math.round(adjusted.scoreFinal), now(), input.job_id);
+  });
   audit("job", input.job_id, "match_scored", { score_base: result.scoreBase, coverage_percent: result.coveragePercent, band: result.band, score_final: adjusted.scoreFinal, profile_snapshot_id: input.profile_snapshot_id ?? null, round_id: input.round_id ?? null });
   return getMatchScore(input.job_id, input.profile_snapshot_id, input.round_id);
 }
 
 export function getMatchScore(jobId: string, profileSnapshotId?: string | null, roundId?: string | null) {
-  const row = db.prepare(`SELECT * FROM match_scores WHERE job_id=? AND profile_snapshot_id IS ? AND round_id IS ? ORDER BY created_at DESC LIMIT 1`).get(jobId, profileSnapshotId ?? null, roundId ?? null) as Record<string, unknown> | undefined;
+  const row = db.prepare(`SELECT * FROM match_scores WHERE job_id=? AND profile_snapshot_id=? AND round_id=? ORDER BY created_at DESC LIMIT 1`).get(jobId, profileSnapshotId ?? "", roundId ?? "") as Record<string, unknown> | undefined;
   if (!row) return null;
-  return { ...row, criteria: JSON.parse(String(row.criteria_json)), evidence: JSON.parse(String(row.evidence_json)), strengths: JSON.parse(String(row.strengths_json)), gaps: JSON.parse(String(row.gaps_json)) };
+  return { ...row, profile_snapshot_id: row.profile_snapshot_id || null, round_id: row.round_id || null, criteria: JSON.parse(String(row.criteria_json)), evidence: JSON.parse(String(row.evidence_json)), strengths: JSON.parse(String(row.strengths_json)), gaps: JSON.parse(String(row.gaps_json)) };
 }
 
-const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source", "source_url", "linkedin_post_url", "job_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities", "additional_information", "match_score", "status", "posted_at"]);
+const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities", "additional_information", "posted_at"]);
+/** match_score comes only from recordMatchScore; source is part of the job identity; status only from the workflow. */
+const nonPatchableJobFields = new Set(["match_score", "source"]);
 
 function evidenceIdFor(jobId: string, field: string, value: unknown, timestamp: string) {
   return idFor(`evidence|${jobId}|${field}|${JSON.stringify(value)}|${timestamp}|${Math.random()}`);
@@ -1278,51 +1646,72 @@ function addEvidence(input: {
 }
 
 function selectEvidence(jobId: string, field: string, evidenceId: string, selectedBy: string, timestamp = now()) {
-  db.prepare("UPDATE job_field_provenance SET superseded_at=? WHERE job_id=? AND field_path=? AND superseded_at IS NULL").run(timestamp, jobId, field);
-  db.prepare("UPDATE evidence_records SET state='superseded' WHERE id IN (SELECT evidence_id FROM job_field_provenance WHERE job_id=? AND field_path=? AND superseded_at=?)").run(jobId, field, timestamp);
-  db.prepare("INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at) VALUES (?,?,?,?,?)").run(jobId, field, evidenceId, selectedBy, timestamp);
+  tx(() => {
+    db.prepare("UPDATE job_field_provenance SET superseded_at=? WHERE job_id=? AND field_path=? AND superseded_at IS NULL AND evidence_id<>?").run(timestamp, jobId, field, evidenceId);
+    db.prepare("UPDATE evidence_records SET state='superseded' WHERE id<>? AND id IN (SELECT evidence_id FROM job_field_provenance WHERE job_id=? AND field_path=? AND superseded_at=?)").run(evidenceId, jobId, field, timestamp);
+    // Re-selecting evidence that already has a provenance row ("keep current") reactivates it.
+    db.prepare(`INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at) VALUES (?,?,?,?,?)
+      ON CONFLICT(job_id,field_path,evidence_id) DO UPDATE SET superseded_at=NULL,selected_by=excluded.selected_by,selected_at=excluded.selected_at`).run(jobId, field, evidenceId, selectedBy, timestamp);
+    db.prepare("UPDATE evidence_records SET state='active' WHERE id=?").run(evidenceId);
+  });
 }
 
 export function updateJob(id: string, patch: Record<string, unknown>, options: { origin?: "human" | "system"; actor?: string; projectId?: string } = {}) {
   if (patch.status !== undefined) throw new Error("workflow.status_requires_transition_command");
-  const entries = Object.entries(patch).filter(([key]) => editableJobFields.has(key));
-  if (!entries.length) return getJob(id);
-  const set = entries.map(([key]) => `${key} = ?`).join(", ");
-  const values = entries.map(([, value]) => value ?? null);
-  db.prepare(`UPDATE jobs SET ${set}, updated_at = ? WHERE id = ?`).run(...(values as any[]), now(), id);
-  if ((options.origin ?? "human") === "human") {
-    for (const [field, value] of entries) {
-      const evidence = addEvidence({ projectId: options.projectId ?? "busca-emprego", jobId: id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
-      selectEvidence(id, field, evidence.id, options.actor ?? "user", evidence.timestamp);
+  const forbidden = Object.keys(patch).filter((key) => nonPatchableJobFields.has(key));
+  if (forbidden.length) throw new Error(`job.field.not_editable:${forbidden.join(",")}`);
+  const current = getJob(id);
+  if (!current) throw new Error("job.not_found");
+  const requested = Object.fromEntries(Object.entries(patch).filter(([key]) => editableJobFields.has(key)));
+  if (!Object.keys(requested).length) return current;
+  // Same validation as upsertJob, applied to the merged job before anything is written.
+  const normalized = validateJobFields(requested, current as unknown as Record<string, unknown>);
+  const entries = Object.entries(normalized).filter(([key]) => editableJobFields.has(key));
+  tx(() => {
+    const set = entries.map(([key]) => `${key} = ?`).join(", ");
+    const values = entries.map(([, value]) => value ?? null);
+    db.prepare(`UPDATE jobs SET ${set}, updated_at = ? WHERE id = ?`).run(...(values as any[]), now(), id);
+    if ("source_url" in normalized) db.prepare("UPDATE jobs SET canonical_url=? WHERE id=?").run(String(normalized.source_url ?? ""), id);
+    if ((options.origin ?? "human") === "human") {
+      for (const [field, value] of entries) {
+        const evidence = addEvidence({ projectId: options.projectId ?? "busca-emprego", jobId: id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
+        selectEvidence(id, field, evidence.id, options.actor ?? "user", evidence.timestamp);
+      }
     }
-  }
-  if (entries.some(([field]) => ["application_url", "job_url", "source_url"].includes(field))) {
-    db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
-    db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,
-      authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,
-      current_step='Autorização revogada: URL da vaga alterada',updated_at=?
-      WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')`).run(now(), id);
-  }
-  audit("job", id, "updated", { changed_fields: Object.keys(patch) });
+    if (entries.some(([field]) => ["application_url", "job_url", "source_url"].includes(field))) {
+      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,
+        authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,
+        current_step='Autorização revogada: URL da vaga alterada',updated_at=?
+        WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')`).run(now(), id);
+      abortApplyingJob(id, "job_url_changed", options.actor ?? "system");
+    }
+    audit("job", id, "updated", { changed_fields: Object.keys(requested) });
+  });
   return getJob(id);
 }
 
+/**
+ * Generic transition endpoint. Client `data` only carries human assertions (reason, interview
+ * date, notes...); every precondition that is a database fact (score, coverage, resume,
+ * authorization, submission evidence) is recomputed and overrides the client value.
+ */
 export function transitionJob(id: string, input: TransitionInput) {
-  const current = getJob(id);
-  if (!current) throw new Error("job.not_found");
-  const result = executeWorkflowCommand({ status: current.status, version: current.version, cycle: 1 }, input);
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const update = db.prepare("UPDATE jobs SET status=?,version=?,updated_at=? WHERE id=? AND version=?")
-      .run(result.state.status, result.state.version, result.event.created_at, id, input.expected_version);
-    if (!update.changes) throw new Error("workflow.version_conflict");
-    db.prepare(`INSERT INTO workflow_events
-      (job_id,from_status,to_status,actor,command,evidence_ref,version,created_at)
-      VALUES (?,?,?,?,?,?,?,?)`).run(id, result.event.from_status, result.event.to_status, result.event.actor, result.event.command, result.event.evidence_ref, result.event.version, result.event.created_at);
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("job", id, "workflow_transition", result.event);
+  if (!getJob(id)) throw new Error("job.not_found");
+  if (INTERNAL_ONLY_COMMANDS.has(input.command)) {
+    throw new WorkflowError("ILLEGAL_TRANSITION", 409, "Comando reservado ao fluxo interno.", { command: input.command });
+  }
+  const result = applyWorkflowCommand(id, input.command, {
+    actor: input.actor, evidence_ref: input.evidence_ref, occurred_at: input.occurred_at,
+    data: input.data ?? {}, expected_version: input.expected_version,
+  });
   return { job: getJob(id), event: result.event };
+}
+
+/** Workflow event stream of a job (oldest first). */
+export function listWorkflowEvents(jobId: string) {
+  return (db.prepare("SELECT * FROM workflow_events WHERE job_id=? ORDER BY version, id").all(jobId) as Record<string, unknown>[])
+    .map((row) => ({ ...row, version: Number(row.version), cycle: Number(row.cycle ?? 1), data: parseObject(row.data_json) }));
 }
 
 export function recordJobDecision(id: string, decision: string, confirmation: string) {
@@ -1336,27 +1725,38 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
   if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
     throw new Error("A decisão não pode ser alterada enquanto a candidatura está em andamento ou já foi enviada.");
   }
-  let status = job.status;
-  if (decision === "interested") {
-    const resume = db.prepare("SELECT status FROM resumes WHERE job_id = ? ORDER BY updated_at DESC LIMIT 1").get(id) as { status: string } | undefined;
-    const application = db.prepare("SELECT id FROM applications WHERE job_id = ? LIMIT 1").get(id);
-    status = resume?.status === "approved" ? (application ? "ready_to_apply" : "resume_approved") : resume ? "resume" : "selected";
-  } else if (decision === "not_interested") {
-    status = "discarded";
-  }
   const timestamp = now();
-  db.prepare("UPDATE jobs SET decision = ?, decision_at = ?, status = ?, updated_at = ? WHERE id = ?").run(decision, timestamp, status, timestamp, id);
-  if (decision === "interested") {
+  tx(() => {
+    db.prepare("UPDATE jobs SET decision = ?, decision_at = ?, updated_at = ? WHERE id = ?").run(decision, timestamp, timestamp, id);
     const projectId = job.project_id ?? "busca-emprego";
-    for (const [facetKey, value] of [["role_family", job.role_family ?? job.title], ["seniority", job.seniority], ["location", job.location], ["work_model", job.work_model]] as const) {
-      if (!value || value === "Não informado") continue;
-      db.prepare(`INSERT INTO preference_values (project_id,facet_key,normalized_value,positive_count,negative_count,updated_at)
-        VALUES (?,?,?,1,0,?) ON CONFLICT(project_id,facet_key,normalized_value) DO UPDATE SET positive_count=positive_count+1,updated_at=excluded.updated_at`)
-        .run(projectId, facetKey, normalizedFacet(value), timestamp);
+    if (decision === "interested") {
+      const resume = db.prepare("SELECT status FROM resumes WHERE job_id = ? ORDER BY updated_at DESC LIMIT 1").get(id) as { status: string } | undefined;
+      const approved = db.prepare("SELECT id FROM resumes WHERE job_id = ? AND status = 'approved' LIMIT 1").get(id);
+      const application = db.prepare("SELECT id FROM applications WHERE job_id = ? LIMIT 1").get(id);
+      const target: JobStatus = approved ? (application ? "ready_to_apply" : "resume_approved") : resume ? "resume" : "selected";
+      advanceJobTo(id, target, { actor: "user", data: { reason: "interest_confirmed" } });
+      // One positive signal per vacancy: toggling SEM TEMPO / TENHO INTERESSE must not inflate preferences.
+      const firstSignal = db.prepare("INSERT OR IGNORE INTO preference_signal_events (project_id,job_id,polarity,created_at) VALUES (?,?,'positive',?)").run(projectId, id, timestamp);
+      if (firstSignal.changes) {
+        for (const [facetKey, value] of [["role_family", job.role_family ?? job.title], ["seniority", job.seniority], ["location", job.location], ["work_model", job.work_model]] as const) {
+          if (!value || value === "Não informado") continue;
+          db.prepare(`INSERT INTO preference_values (project_id,facet_key,normalized_value,positive_count,negative_count,updated_at)
+            VALUES (?,?,?,1,0,?) ON CONFLICT(project_id,facet_key,normalized_value) DO UPDATE SET positive_count=positive_count+1,updated_at=excluded.updated_at`)
+            .run(projectId, facetKey, normalizedFacet(value), timestamp);
+        }
+      }
+    } else {
+      // SEM TEMPO withdraws the go-ahead: the current automatic authorization is revoked, not just hidden.
+      const applications = db.prepare("SELECT id FROM applications WHERE job_id = ? AND status IN ('queued', 'needs_review', 'failed')").all(id) as { id: string }[];
+      for (const application of applications) revokeAuthorizationRows(application.id, "decision_no_time");
+      db.prepare(`UPDATE applications SET automation_mode = CASE WHEN automation_mode = 'authorized_auto' THEN 'assisted' ELSE automation_mode END,
+        auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL, authorization_id = NULL, expires_at = NULL,
+        claimed_by = NULL, claimed_at = NULL, updated_at = ?
+        WHERE job_id = ? AND status IN ('queued', 'needs_review', 'failed')`).run(timestamp, id);
+      abortApplyingJob(id, "decision_no_time", "user");
     }
-  }
-  if (decision !== "interested") db.prepare("UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL WHERE job_id = ? AND status IN ('queued', 'needs_review', 'failed')").run(id);
-  audit("job", id, "decision", { decision });
+    audit("job", id, "decision", { decision });
+  });
   return getJob(id);
 }
 
@@ -1480,15 +1880,19 @@ export function createProfessionalProfile(input: Record<string, unknown>, actor 
   if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new Error("base_resume.not_found");
   const context = parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
-  const version = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM professional_profiles WHERE project_id=?").get(projectId) as { version: number }).version);
-  const id = String(input.id ?? idFor(`profile|${projectId}|${version}|${Date.now()}|${Math.random()}`));
-  const timestamp = now();
-  db.prepare(`INSERT INTO professional_profiles
-    (id,project_id,version,status,base_resume_id,context_json,created_at,updated_at)
-    VALUES (?,?,?,'draft',?,?,?,?)`).run(id, projectId, version, baseResumeId, contextJson, timestamp, timestamp);
   const facts = Array.isArray(input.facts) ? input.facts : [];
-  for (const fact of facts) addProfileFact(id, fact as Record<string, unknown>, actor);
-  audit("profile", id, "draft_created", { project_id: projectId, version, base_resume_id: baseResumeId, fact_count: facts.length, actor });
+  const timestamp = now();
+  // Profile row and facts are one unit: an invalid fact must not leave an empty draft behind.
+  const id = tx(() => {
+    const version = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM professional_profiles WHERE project_id=?").get(projectId) as { version: number }).version);
+    const profileId = String(input.id ?? idFor(`profile|${projectId}|${version}|${randomUUID()}`));
+    db.prepare(`INSERT INTO professional_profiles
+      (id,project_id,version,status,base_resume_id,context_json,created_at,updated_at)
+      VALUES (?,?,?,'draft',?,?,?,?)`).run(profileId, projectId, version, baseResumeId, contextJson, timestamp, timestamp);
+    for (const fact of facts) addProfileFact(profileId, fact as Record<string, unknown>, actor);
+    audit("profile", profileId, "draft_created", { project_id: projectId, version, base_resume_id: baseResumeId, fact_count: facts.length, actor });
+    return profileId;
+  });
   return { ...getProfile(id, projectId), facts: listProfileFacts(id) };
 }
 
@@ -1584,14 +1988,17 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
   if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
   const baseResumeId = input.base_resume_id ?? null;
   if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(baseResumeId)) throw new Error("Currículo-base selecionado não encontrado.");
-  const id = input.id || idFor(`resume|${input.job_id}|${Date.now()}|${input.title}`);
+  const id = input.id || idFor(`resume|${input.job_id}|${randomUUID()}|${input.title}`);
   const timestamp = now();
-  db.prepare("INSERT INTO resumes (id,job_id,base_resume_id,version,title,status,content,keywords,changes,created_at,updated_at) VALUES (?,?,?,?,?,'draft',?,?,?,?,?)").run(id, input.job_id, baseResumeId, input.version ?? 1, input.title, input.content ?? "", JSON.stringify(input.keywords ?? []), JSON.stringify(input.changes ?? []), timestamp, timestamp);
   const metadata = input as unknown as Record<string, unknown>;
-  db.prepare(`UPDATE resumes SET profile_snapshot_id=?,generation_source=?,facts_used=?,gaps=?,review_status=?,review_findings=? WHERE id=?`)
-    .run(metadata.profile_snapshot_id == null ? null : String(metadata.profile_snapshot_id), metadata.generation_source === "writer" ? "writer" : "manual", JSON.stringify(metadata.facts_used ?? []), JSON.stringify(metadata.gaps ?? []), metadata.review_status == null ? "not_run" : String(metadata.review_status), JSON.stringify(metadata.review_findings ?? []), id);
-  db.prepare("UPDATE jobs SET status = 'resume', updated_at = ? WHERE id = ?").run(timestamp, input.job_id);
-  audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft" });
+  tx(() => {
+    db.prepare("INSERT INTO resumes (id,job_id,base_resume_id,version,title,status,content,keywords,changes,created_at,updated_at) VALUES (?,?,?,?,?,'draft',?,?,?,?,?)").run(id, input.job_id, baseResumeId, input.version ?? 1, input.title, input.content ?? "", JSON.stringify(input.keywords ?? []), JSON.stringify(input.changes ?? []), timestamp, timestamp);
+    // review_status is never accepted from the caller: only reviewResume can record a verdict.
+    db.prepare(`UPDATE resumes SET profile_snapshot_id=?,generation_source=?,facts_used=?,gaps=?,review_status='not_run',review_findings='[]' WHERE id=?`)
+      .run(metadata.profile_snapshot_id == null ? null : String(metadata.profile_snapshot_id), metadata.generation_source === "writer" ? "writer" : "manual", JSON.stringify(metadata.facts_used ?? []), JSON.stringify(metadata.gaps ?? []), id);
+    advanceJobTo(input.job_id, "resume", { actor: metadata.generation_source === "writer" ? "resume_writer" : "user", data: { reason: "resume_draft_created" } });
+    audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft" });
+  });
   return listResumes().find((resume) => resume.id === id) ?? null;
 }
 
@@ -1604,14 +2011,23 @@ export function updateResume(id: string, patch: Partial<Resume>) {
   const current = listResumes().find((resume) => resume.id === id);
   if (current?.status === "approved" && patch.status !== "review") throw new Error("Retorne o currículo aprovado para revisão antes de alterá-lo.");
   if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status = 'in_progress' LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
+  if (patch.status !== undefined && !["draft", "review"].includes(String(patch.status))) throw new Error("resume.status.invalid");
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
-  db.prepare(`UPDATE resumes SET ${set}, version = version + 1, review_status = CASE WHEN ? IN ('content','keywords','changes','base_resume_id','facts_used','gaps') THEN 'not_run' ELSE review_status END, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), entries.some(([key]) => ["content", "keywords", "changes", "base_resume_id", "facts_used", "gaps"].includes(key)) ? "content" : "unchanged", now(), id);
-  if (patch.status && current?.status === "approved") {
-    db.prepare("SELECT id FROM applications WHERE resume_id=? AND status IN ('queued','needs_review','failed')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "resume_changed"));
-    db.prepare("UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL,authorization_id=NULL,expires_at=NULL WHERE resume_id = ? AND status IN ('queued', 'needs_review', 'failed')").run(id);
-    db.prepare("UPDATE jobs SET status = 'resume', updated_at = ? WHERE id = ? AND status IN ('resume_approved', 'ready_to_apply')").run(now(), current.job_id);
-  }
-  audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
+  tx(() => {
+    db.prepare(`UPDATE resumes SET ${set}, version = version + 1, review_status = CASE WHEN ? IN ('content','keywords','changes','base_resume_id','facts_used','gaps') THEN 'not_run' ELSE review_status END, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), entries.some(([key]) => ["content", "keywords", "changes", "base_resume_id", "facts_used", "gaps"].includes(key)) ? "content" : "unchanged", now(), id);
+    if (patch.status && current?.status === "approved") {
+      db.prepare("SELECT id FROM applications WHERE resume_id=? AND status IN ('queued','needs_review','failed')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "resume_changed"));
+      db.prepare("UPDATE applications SET automation_mode = CASE WHEN automation_mode = 'authorized_auto' THEN 'assisted' ELSE automation_mode END, auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL WHERE resume_id = ? AND status IN ('queued', 'needs_review', 'failed')").run(id);
+      // Removing the approval returns the job to the resume stage, unless another approved resume remains.
+      const otherApproved = db.prepare("SELECT id FROM resumes WHERE job_id=? AND status='approved' AND id<>? LIMIT 1").get(current.job_id, id);
+      if (!otherApproved) {
+        abortApplyingJob(current.job_id, "resume_changed", "user");
+        const job = db.prepare("SELECT status FROM jobs WHERE id=?").get(current.job_id) as { status: JobStatus } | undefined;
+        if (job && ["resume_approved", "ready_to_apply"].includes(job.status)) applyWorkflowCommand(current.job_id, "revise_resume", { actor: "user", data: { reason: "approved_resume_edited", resume_id: id } });
+      }
+    }
+    audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
+  });
   return listResumes().find((resume) => resume.id === id) ?? null;
 }
 
@@ -1702,15 +2118,20 @@ export function approveResume(id: string, confirmation: string, options: { overr
   const job = getJob(resume.job_id);
   if (!job || job.decision !== "interested") throw new Error("A vaga precisa estar marcada como de interesse antes da aprovação.");
   if (resume.status === "approved") throw new Error("Este currículo já foi aprovado.");
-  if (resume.generation_source === "writer" && resume.review_status !== "pass") {
-    const reason = String(options.override_reason ?? "").trim();
-    if (reason.length < 10) throw new Error("ATS_REVIEW_REQUIRED");
-    db.prepare("UPDATE resumes SET review_status='override',review_findings=? WHERE id=?").run(JSON.stringify([`override:${reason.slice(0, 240)}`]), id);
-  }
+  // SDD-ATS-003: never approve empty content, and every source (writer or manual) needs an
+  // ATS review `pass` for the current version or an explicitly justified human override.
+  if (!String(resume.content ?? "").trim()) throw new Error("resume.content.empty");
+  const reason = String(options.override_reason ?? "").trim();
+  if (resume.review_status !== "pass" && reason.length < 10) throw new Error("ATS_REVIEW_REQUIRED");
   const timestamp = now();
-  db.prepare("UPDATE resumes SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, id);
-  db.prepare("UPDATE jobs SET status = 'resume_approved', decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(timestamp, timestamp, resume.job_id);
-  audit("resume", id, "approved", { job_id: resume.job_id, approved_at: timestamp, review_status: getResume(id)?.review_status ?? resume.review_status, actor: options.actor ?? "user" });
+  tx(() => {
+    if (resume.review_status !== "pass") db.prepare("UPDATE resumes SET review_status='override',review_findings=? WHERE id=?").run(JSON.stringify([`override:${reason.slice(0, 240)}`]), id);
+    db.prepare("UPDATE resumes SET status = 'approved', updated_at = ? WHERE id = ?").run(timestamp, id);
+    db.prepare("UPDATE jobs SET decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(timestamp, timestamp, resume.job_id);
+    const application = db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('queued','needs_review','failed') LIMIT 1").get(resume.job_id);
+    advanceJobTo(resume.job_id, application ? "ready_to_apply" : "resume_approved", { actor: options.actor ?? "user", data: { reason: "resume_approved" } });
+    audit("resume", id, "approved", { job_id: resume.job_id, approved_at: timestamp, review_status: getResume(id)?.review_status ?? resume.review_status, actor: options.actor ?? "user" });
+  });
   return listResumes().find((item) => item.id === id) ?? null;
 }
 
@@ -1721,13 +2142,16 @@ export function createApplication(input: Partial<Application> & { job_id: string
   if (!job) throw new Error("Vaga não encontrada.");
   if (job.decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(job.status)) throw new Error("Registre interesse e aprove o currículo antes de iniciar uma candidatura.");
   if (!resume || resume.job_id !== input.job_id || resume.status !== "approved") throw new Error("Selecione o currículo aprovado para esta vaga.");
-  if (db.prepare("SELECT id FROM applications WHERE job_id = ?").get(input.job_id)) throw new Error("Já existe uma candidatura para esta vaga.");
-  const id = input.id || idFor(`application|${input.job_id}|${Date.now()}`);
+  const id = input.id || idFor(`application|${input.job_id}|${randomUUID()}`);
   const timestamp = now();
   const mode = input.automation_mode === "manual" ? "manual" : "assisted";
-  db.prepare("INSERT INTO applications (id,job_id,resume_id,status,automation_mode,auto_authorized_at,authorized_resume_id,authorized_resume_version,current_step,submitted_at,notes,created_at,updated_at) VALUES (?,?,?,'queued',?,NULL,NULL,NULL,?,NULL,?,?,?)").run(id, input.job_id, resumeId, mode, input.current_step ?? "Aguardando decisão de candidatura", input.notes ?? "", timestamp, timestamp);
-  db.prepare("UPDATE jobs SET status = 'ready_to_apply', updated_at = ? WHERE id = ?").run(timestamp, input.job_id);
-  audit("application", id, "created", { job_id: input.job_id, resume_id: resumeId, automation_mode: mode });
+  tx(() => {
+    // Re-checked under the write lock: two concurrent requests cannot both create an application.
+    if (db.prepare("SELECT id FROM applications WHERE job_id = ?").get(input.job_id)) throw new Error("Já existe uma candidatura para esta vaga.");
+    db.prepare("INSERT INTO applications (id,job_id,resume_id,status,automation_mode,auto_authorized_at,authorized_resume_id,authorized_resume_version,current_step,submitted_at,notes,created_at,updated_at) VALUES (?,?,?,'queued',?,NULL,NULL,NULL,?,NULL,?,?,?)").run(id, input.job_id, resumeId, mode, input.current_step ?? "Aguardando decisão de candidatura", input.notes ?? "", timestamp, timestamp);
+    advanceJobTo(input.job_id, "ready_to_apply", { actor: "user", data: { reason: "application_created" } });
+    audit("application", id, "created", { job_id: input.job_id, resume_id: resumeId, automation_mode: mode });
+  });
   return listApplications().find((application) => application.id === id) ?? null;
 }
 
@@ -1822,10 +2246,16 @@ export function listAuthorizedApplications() {
 
 function expireAuthorizations() {
   const timestamp = now();
-  db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired' WHERE state IN ('issued','claimed') AND expires_at <= ?").run(timestamp, timestamp);
-  db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
-    claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada',updated_at=?
-    WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired') AND status IN ('queued','needs_review','in_progress')`).run(timestamp);
+  if (!db.prepare("SELECT 1 FROM application_authorizations WHERE state IN ('issued','claimed') AND expires_at <= ? LIMIT 1").get(timestamp)) return;
+  tx(() => {
+    db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired' WHERE state IN ('issued','claimed') AND expires_at <= ?").run(timestamp, timestamp);
+    const affected = db.prepare(`SELECT id,job_id FROM applications WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired')
+      AND status IN ('queued','needs_review','in_progress')`).all() as { id: string; job_id: string }[];
+    db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+      claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada',updated_at=?
+      WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired') AND status IN ('queued','needs_review','in_progress')`).run(timestamp);
+    for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
+  });
 }
 
 function revokeAuthorizationRows(applicationId: string, reason: string) {
@@ -1849,7 +2279,7 @@ function assertCurrentAuthorization(value: Record<string, unknown> | undefined, 
   if (!value || value.state !== expectedState || String(value.expires_at) <= timestamp || value.automation_mode !== "authorized_auto" || !value.auto_authorized_at
     || value.application_resume_id !== value.resume_id || value.authorized_resume_id !== value.resume_id
     || Number(value.authorized_resume_version) !== Number(value.resume_version) || Number(value.current_resume_version) !== Number(value.resume_version)
-    || value.current_resume_status !== "approved" || value.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(String(value.job_status))) {
+    || value.current_resume_status !== "approved" || value.job_decision !== "interested" || !["resume_approved", "ready_to_apply", "applying"].includes(String(value.job_status))) {
     throw new Error("application.authorization.unavailable");
   }
   const currentUrl = String(value.current_application_url ?? "").trim();
@@ -1875,6 +2305,8 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
     if (!claimed.changes) throw new Error("application.authorization.unavailable");
     const updated = db.prepare("UPDATE applications SET status='in_progress',claimed_by=?,claimed_at=?,current_step='Execução autorizada iniciada',updated_at=? WHERE id=? AND authorization_id=? AND status IN ('queued','needs_review')").run(workerId.trim(), timestamp, timestamp, applicationId, String(authorization.id));
     if (!updated.changes) throw new Error("application.authorization.unavailable");
+    // The claimed, current authorization is the precondition for ready_to_apply -> applying.
+    advanceJobTo(String(authorization.job_id), "applying", { actor: `worker:${workerId.trim()}`, data: { reason: "authorized_execution_claimed" } });
     db.exec("COMMIT");
   } catch (error) { try { db.exec("ROLLBACK"); } catch { /* transaction already closed */ } throw error; }
   audit("application", applicationId, "claimed", { worker_id: workerId });
@@ -1891,55 +2323,102 @@ export function updateApplication(id: string, patch: Partial<Application>) {
   if (normalized.status === "in_progress") {
     throw new Error("application.claim.required");
   }
+  // C1: the result of an authorized execution is recorded only by the worker that holds the
+  // claim, through submitAuthorizedApplication / failAuthorizedApplication (internal routes).
+  if (current.automation_mode === "authorized_auto" && ["submitted", "failed"].includes(String(normalized.status))) {
+    throw new Error("application.internal_route_required");
+  }
   if (normalized.status === "queued" && current.status !== "queued") throw new Error("Uma candidatura em andamento não pode ser recolocada na fila automaticamente.");
   if (normalized.status === "needs_review" && !["queued", "in_progress", "failed"].includes(current.status)) throw new Error("Esta candidatura não pode voltar para revisão nesta etapa.");
-  if (normalized.status === "failed" && (current.automation_mode !== "authorized_auto" || !["queued", "in_progress", "needs_review"].includes(current.status))) throw new Error("Somente um envio automático autorizado pode ser registrado como falha.");
+  if (normalized.status === "failed") throw new Error("Somente um envio automático autorizado pode ser registrado como falha.");
   if (["accepted", "rejected"].includes(String(normalized.status)) && current.status !== "submitted") throw new Error("Registre o envio antes de registrar o resultado da candidatura.");
-  if (normalized.status === "submitted" && current.automation_mode === "authorized_auto" && current.status !== "in_progress") throw new Error("O envio automático precisa estar em andamento antes de ser confirmado.");
   if (current.automation_mode === "authorized_auto" && normalized.resume_id !== undefined && normalized.resume_id !== current.authorized_resume_id) throw new Error("O currículo vinculado não pode ser trocado após a autorização automática.");
-  if (["submitted", "accepted", "rejected"].includes(String(normalized.status))) {
-    const authorizedResume = current.authorized_resume_id ? db.prepare("SELECT status,version FROM resumes WHERE id = ?").get(current.authorized_resume_id) as { status: string; version: number } | undefined : undefined;
-    if (current.automation_mode !== "manual" && !(current.automation_mode === "authorized_auto" && current.auto_authorized_at && current.authorized_resume_id === current.resume_id && authorizedResume?.status === "approved" && authorizedResume.version === current.authorized_resume_version)) {
-      throw new Error("O envio só pode ser registrado no modo manual ou após autorização automática explícita.");
-    }
-    if (normalized.status === "submitted" && current.status !== "submitted") {
-      const job = db.prepare("SELECT decision,status FROM jobs WHERE id = ?").get(current.job_id) as { decision: string; status: string } | undefined;
-      if (job?.decision !== "interested") throw new Error("Registre interesse na vaga antes de confirmar o envio.");
-      if (current.automation_mode === "authorized_auto" && !["resume_approved", "ready_to_apply"].includes(job.status)) throw new Error("A etapa da vaga não permite iniciar este envio automático.");
-      const resumeId = normalized.resume_id ?? current.resume_id;
-      const resume = resumeId ? db.prepare("SELECT job_id,status FROM resumes WHERE id = ?").get(resumeId) as { job_id: string; status: string } | undefined : undefined;
-      if (!resume || resume.job_id !== current.job_id || resume.status !== "approved") throw new Error("O currículo vinculado precisa estar aprovado para registrar o envio.");
-      if (current.automation_mode === "authorized_auto") {
-        if (!String(normalized.evidence_ref ?? "").trim()) throw new Error("SUBMISSION_EVIDENCE_REQUIRED");
-        assertCurrentAuthorization(currentAuthorization(id), "claimed");
-      }
-    }
+  if (normalized.status === "submitted" && current.status !== "submitted") {
+    if (current.automation_mode !== "manual") throw new Error("O envio só pode ser registrado no modo manual ou após autorização automática explícita.");
+    const job = db.prepare("SELECT decision,status FROM jobs WHERE id = ?").get(current.job_id) as { decision: string; status: string } | undefined;
+    if (job?.decision !== "interested") throw new Error("Registre interesse na vaga antes de confirmar o envio.");
+    const resumeId = normalized.resume_id ?? current.resume_id;
+    const resume = resumeId ? db.prepare("SELECT job_id,status FROM resumes WHERE id = ?").get(resumeId) as { job_id: string; status: string } | undefined : undefined;
+    if (!resume || resume.job_id !== current.job_id || resume.status !== "approved") throw new Error("O currículo vinculado precisa estar aprovado para registrar o envio.");
   }
-  if (["submitted", "accepted", "rejected"].includes(String(normalized.status)) && normalized.submitted_at === undefined) normalized.submitted_at = now();
+  if (["submitted", "accepted", "rejected"].includes(String(normalized.status)) && normalized.submitted_at === undefined) normalized.submitted_at = current.submitted_at ?? now();
   const entries = allowed.flatMap((key) => normalized[key] === undefined ? [] : [[key, normalized[key]] as [string, unknown]]);
   if (!entries.length) return listApplications().find((application) => application.id === id) ?? null;
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
-  db.exec("BEGIN IMMEDIATE");
-  try {
-  db.prepare(`UPDATE applications SET ${set}, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), now(), id);
-  if (["submitted", "accepted", "rejected"].includes(String(normalized.status))) {
-    const application = listApplications().find((item) => item.id === id);
-    if (application) {
-      if (normalized.status === "submitted" && application.automation_mode === "authorized_auto" && application.authorization_id) {
-        const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=? WHERE id=? AND state='claimed'").run(now(), String(normalized.evidence_ref), application.authorization_id);
-        if (!consumed.changes) throw new Error("application.authorization.unavailable");
-      }
-      db.prepare("UPDATE jobs SET status = 'applied', decision = 'applied', decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(application.submitted_at ?? now(), now(), application.job_id);
+  tx(() => {
+    db.prepare(`UPDATE applications SET ${set}, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), now(), id);
+    if (["submitted", "accepted", "rejected"].includes(String(normalized.status))) {
+      const application = listApplications().find((item) => item.id === id);
+      if (application) markJobApplied(application.job_id, application.submitted_at ?? now(), "user", application.evidence_ref ?? null);
     }
-  }
-  db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("application", id, "updated", { changed_fields: Object.keys(patch) });
+    audit("application", id, "updated", { changed_fields: Object.keys(patch) });
+  });
   return listApplications().find((application) => application.id === id) ?? null;
 }
 
+/** Records the submission on the job: workflow up to `applied` (never backwards) and decision `applied`. */
+function markJobApplied(jobId: string, submittedAt: string, actor: string, evidenceRef: string | null) {
+  advanceJobTo(jobId, "applied", { actor, evidence_ref: evidenceRef, data: { reason: "application_submitted" } });
+  const timestamp = now();
+  db.prepare("UPDATE jobs SET decision = 'applied', decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(submittedAt, timestamp, jobId);
+}
+
+function claimedAuthorizationFor(id: string, workerId: string) {
+  const worker = String(workerId ?? "").trim();
+  if (!worker) throw new Error("application.worker.required");
+  const authorization = assertCurrentAuthorization(currentAuthorization(id), "claimed");
+  if (String(authorization.claimed_by ?? "") !== worker) throw new Error("application.claim.worker_mismatch");
+  return { authorization, worker };
+}
+
+/**
+ * C1 — confirms an authorized automatic submission. Only the worker holding the claim may
+ * call it, with observable evidence; an observed URL must canonicalize to the authorized one.
+ */
+export function submitAuthorizedApplication(id: string, input: { worker_id: string; evidence_ref: string; observed_url?: string | null }) {
+  expireAuthorizations();
+  const evidenceRef = String(input?.evidence_ref ?? "").trim();
+  const timestamp = now();
+  tx(() => {
+    const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
+    if (authorization.application_status !== "in_progress") throw new Error("application.authorization.unavailable");
+    if (!evidenceRef) throw new Error("SUBMISSION_EVIDENCE_REQUIRED");
+    if (input.observed_url != null && String(input.observed_url).trim() !== "") {
+      let observedHash = "";
+      try { observedHash = createHash("sha256").update(canonicalizeJobUrl(String(input.observed_url))).digest("hex"); } catch { throw new Error("application.url_mismatch"); }
+      if (observedHash !== authorization.application_url_hash) throw new Error("application.url_mismatch");
+    }
+    const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=? WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
+    if (!consumed.changes) throw new Error("application.authorization.unavailable");
+    db.prepare("UPDATE applications SET status='submitted',submitted_at=?,evidence_ref=?,current_step='Envio confirmado pelo portal',updated_at=? WHERE id=? AND status='in_progress'").run(timestamp, evidenceRef.slice(0, 500), timestamp, id);
+    markJobApplied(String(authorization.job_id), timestamp, `worker:${worker}`, evidenceRef.slice(0, 500));
+    audit("application", id, "submitted_authorized", { worker_id: worker, authorization_id: authorization.id });
+  });
+  return listApplications().find((item) => item.id === id) ?? null;
+}
+
+/** C1 — records a sanitized failure of the claimed execution and hands the job back to human review. */
+export function failAuthorizedApplication(id: string, input: { worker_id: string; reason: string }) {
+  const reason = String(input?.reason ?? "").normalize("NFKC").replace(/[^\p{L}\p{N} _.:,-]+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 120);
+  if (!reason) throw new Error("application.failure.reason_required");
+  const timestamp = now();
+  tx(() => {
+    const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
+    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    revokeAuthorizationRows(id, `execution_failed:${reason}`);
+    db.prepare(`UPDATE applications SET status='failed',automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,
+      authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=?`).run(`Falha no envio autorizado: ${reason}`, timestamp, id);
+    db.prepare("UPDATE human_questions SET status='cancelled' WHERE application_id=? AND status IN ('pending','delivered','delivery_failed')").run(id);
+    abortApplyingJob(String(authorization.job_id), `execution_failed:${reason}`, `worker:${worker}`);
+    audit("application", id, "failed_authorized", { worker_id: worker, reason });
+  });
+  return listApplications().find((item) => item.id === id) ?? null;
+}
+
 export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }) {
-  const id = input.id || idFor(`run|${input.agent_name}|${Date.now()}`);
+  // A random id never collides between runs started in the same millisecond; an explicit id
+  // updates that run (status/finish) instead of replacing the row and losing its start.
+  const id = input.id || randomUUID();
   const timestamp = now();
   let versionId = input.config_version_id ?? null;
   let snapshot = input.config_snapshot ?? null;
@@ -1951,9 +2430,14 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     versionId = version.id;
     snapshot = JSON.parse(version.config_json);
   }
-  db.prepare(`INSERT OR REPLACE INTO agent_runs
+  db.prepare(`INSERT INTO agent_runs
     (id,agent_name,status,started_at,finished_at,found_count,message,agent_id,config_version_id,config_snapshot,model_effective,input_tokens,output_tokens,cost,latency_ms)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "", input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET agent_name=excluded.agent_name,status=excluded.status,finished_at=excluded.finished_at,found_count=excluded.found_count,
+      message=excluded.message,agent_id=COALESCE(excluded.agent_id,agent_runs.agent_id),config_version_id=COALESCE(excluded.config_version_id,agent_runs.config_version_id),
+      config_snapshot=COALESCE(excluded.config_snapshot,agent_runs.config_snapshot),model_effective=COALESCE(excluded.model_effective,agent_runs.model_effective),
+      input_tokens=COALESCE(excluded.input_tokens,agent_runs.input_tokens),output_tokens=COALESCE(excluded.output_tokens,agent_runs.output_tokens),
+      cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "", input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
   audit("agent_run", id, "status", { status: input.status, found_count: input.found_count ?? 0, agent_id: input.agent_id ?? null, config_version_id: versionId });
   return listAgentRuns().find((run) => run.id === id) ?? null;
 }
@@ -1980,7 +2464,7 @@ function feedbackFacetValue(job: Job, detailKey: string) {
   return normalizedFacet(values[detailKey]);
 }
 
-export function recordJobFeedback(jobId: string, input: Record<string, unknown>, actor = "user", projectId = "default") {
+export function recordJobFeedback(jobId: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
   const mode = String(input.mode ?? "");
   const reasonCode = String(input.reason_code ?? "");
   const detailKey = String(input.detail_key ?? "");
@@ -2013,15 +2497,23 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
     let ruleId: string | null = null;
     if (mode === "total") {
       ruleId = idFor(`rule|${id}`);
+      // similar_role/company rules keep what compareTotalRejection needs (original title, family, requirements).
       const match = reasonCode === "company"
-        ? { type: "company", company: normalizedFacet(job.company) }
+        ? { type: "company", company: normalizedFacet(job.company), company_original: job.company }
         : (["role", "skill"].includes(reasonCode)
-          ? { type: "similar_role", title: normalizedFacet(job.title), detail_key: detailKey }
+          ? {
+            type: "similar_role", title: normalizedFacet(job.title), title_original: job.title, detail_key: detailKey,
+            role_family: job.role_family ?? null, role_family_confidence: job.role_family_confidence ?? null,
+            requirements: String(job.requirements ?? "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean),
+          }
           : { type: "facet_match", detail_key: detailKey, value: facetValue });
       db.prepare(`INSERT INTO preference_rules
         (id,project_id,source_feedback_ids,match_json,action,state,reason,created_at,updated_at)
         VALUES (?,?,?,?, 'suppress','active',?,?,?)`).run(ruleId, projectId, JSON.stringify([id]), JSON.stringify(match), explanation, timestamp, timestamp);
-      db.prepare("UPDATE jobs SET decision='not_interested', decision_at=?, status='discarded', version=version+1, updated_at=? WHERE id=?").run(timestamp, timestamp, jobId);
+      db.prepare("UPDATE jobs SET decision='not_interested', decision_at=?, updated_at=? WHERE id=?").run(timestamp, timestamp, jobId);
+      if (ACTIVE_STATUSES.includes(job.status)) {
+        applyWorkflowCommand(jobId, "discard", { actor, data: { mode, reason_code: reasonCode, explanation, feedback_id: id } });
+      }
       db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('queued','needs_review','failed')").all(jobId).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "interest_withdrawn"));
       db.prepare("UPDATE applications SET automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL WHERE job_id=? AND status IN ('queued','needs_review','failed')").run(jobId);
     }
@@ -2034,7 +2526,7 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   }
 }
 
-export function listPreferenceState(projectId = "default") {
+export function listPreferenceState(projectId = "busca-emprego") {
   const rules = (db.prepare("SELECT * FROM preference_rules WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[])
     .map((row) => ({ ...row, source_feedback_ids: parseJsonArray(row.source_feedback_ids), match_json: JSON.parse(String(row.match_json)) }));
   const values = db.prepare("SELECT * FROM preference_values WHERE project_id=? ORDER BY facet_key,normalized_value").all(projectId);
@@ -2093,38 +2585,65 @@ export function markHumanQuestionDelivery(id: string, delivered: boolean, messag
   return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
 }
 
+/** Telegram identities allowed to answer: official Hermes names first, legacy names as fallback (C4). */
+function allowedAnswerIdentities(): Set<string> {
+  const official = [...String(process.env.TELEGRAM_ALLOWED_USERS ?? "").split(","), String(process.env.TELEGRAM_HOME_CHANNEL ?? "")]
+    .map((value) => value.trim()).filter(Boolean);
+  if (official.length) return new Set(official);
+  return new Set([process.env.HERMES_LINKED_RECIPIENT_ID, process.env.HERMES_TELEGRAM_CHAT_ID].map((value) => String(value ?? "").trim()).filter(Boolean));
+}
+
+/**
+ * C2 — records a human answer. `inbound_message_id` makes redelivery idempotent (the same
+ * message never answers a second question), and `reply_to_message_ref`, when sent, must be
+ * the reference of the message that carried this question.
+ */
 export function answerHumanQuestion(id: string, input: Record<string, unknown>) {
+  const inboundMessageId = String(input.inbound_message_id ?? "").trim().slice(0, 200);
+  if (inboundMessageId) {
+    const seen = db.prepare("SELECT question_id FROM inbound_messages WHERE id=?").get(inboundMessageId) as { question_id: string } | undefined;
+    if (seen) return { duplicate: true, question: db.prepare("SELECT * FROM human_questions WHERE id=?").get(seen.question_id) ?? null };
+  }
   const row = db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) as Record<string, unknown> | undefined;
   if (!row || !['pending', 'delivered'].includes(String(row.status))) throw new Error("human_question.not_active");
-  const expectedIdentity = process.env.HERMES_LINKED_RECIPIENT_ID ?? process.env.HERMES_TELEGRAM_CHAT_ID;
-  const identity = String(input.identity_id ?? input.sender_id ?? input.chat_id ?? "");
-  if (!expectedIdentity || identity !== expectedIdentity) throw new Error("human_question.identity_unauthorized");
-  const replyTo = String(input.reply_to_message_ref ?? input.reply_to ?? "");
-  if (row.telegram_message_ref && replyTo && replyTo !== String(row.telegram_message_ref)) throw new Error("human_question.reply_not_correlated");
+  const allowed = allowedAnswerIdentities();
+  const identity = String(input.identity_id ?? input.sender_id ?? input.chat_id ?? "").trim();
+  if (!allowed.size || !identity || !allowed.has(identity)) throw new Error("human_question.identity_unauthorized");
+  const replyTo = String(input.reply_to_message_ref ?? input.reply_to ?? "").trim();
+  if (replyTo && replyTo !== String(row.telegram_message_ref ?? "")) throw new Error("human_question.reply_not_correlated");
   const action = String(input.action ?? "answer").toLowerCase();
-  const answer = String(input.answer ?? "").trim();
+  const answer = String(input.answer ?? input.text ?? "").trim();
   const required = Number(row.required ?? 1) === 1;
   if (!["answer", "skip", "manual", "stop"].includes(action)) throw new Error("human_question.action.invalid");
   if (action === "skip" && required) throw new Error("human_question.required_cannot_skip");
   if (action === "answer" && (!answer || answer.length > 1000)) throw new Error("human_question.answer.invalid");
   const timestamp = now();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const finalAnswer = action === "skip" ? "PULADO" : action === "manual" ? "MANUAL" : action === "stop" ? "PARADO" : answer;
-    db.prepare("UPDATE human_questions SET status=?,answered_at=?,answer=?,answer_actor=?,reply_to_message_ref=? WHERE id=?").run(action === "stop" ? "cancelled" : "answered", timestamp, finalAnswer, identity, replyTo || null, id);
-    if (action === "manual") {
-      revokeAuthorizationRows(String(row.application_id), "human_manual");
-      db.prepare("UPDATE applications SET automation_mode='manual',status='queued',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Fluxo manual após resposta ${id}`, timestamp, String(row.application_id));
-    } else if (action === "stop") {
-      revokeAuthorizationRows(String(row.application_id), "human_stop");
-      db.prepare("UPDATE applications SET status='failed',automation_mode='assisted',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Execução interrompida por ${id}`, timestamp, String(row.application_id));
-    } else {
-      assertCurrentAuthorization(currentAuthorization(String(row.application_id)), "claimed", timestamp);
-      db.prepare("UPDATE applications SET status='in_progress',current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Resposta recebida para ${id}; execução retomada`, timestamp, String(row.application_id));
+  const applicationId = String(row.application_id);
+  const duplicate = tx(() => {
+    if (inboundMessageId) {
+      // Claimed under the write lock: a concurrent redelivery of the same message loses here.
+      const inserted = db.prepare("INSERT OR IGNORE INTO inbound_messages (id,question_id,received_at) VALUES (?,?,?)").run(inboundMessageId, id, timestamp);
+      if (!inserted.changes) return true;
     }
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("human_question", id, "answered", { application_id: row.application_id });
+    const finalAnswer = action === "skip" ? "PULADO" : action === "manual" ? "MANUAL" : action === "stop" ? "PARADO" : answer;
+    const updated = db.prepare("UPDATE human_questions SET status=?,answered_at=?,answer=?,answer_actor=?,reply_to_message_ref=? WHERE id=? AND status IN ('pending','delivered')").run(action === "stop" ? "cancelled" : "answered", timestamp, finalAnswer, identity, replyTo || null, id);
+    if (!updated.changes) throw new Error("human_question.not_active");
+    if (action === "manual") {
+      revokeAuthorizationRows(applicationId, "human_manual");
+      db.prepare("UPDATE applications SET automation_mode='manual',status='queued',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Fluxo manual após resposta ${id}`, timestamp, applicationId);
+      abortApplyingJob(String(row.job_id), "human_manual", identity);
+    } else if (action === "stop") {
+      revokeAuthorizationRows(applicationId, "human_stop");
+      db.prepare("UPDATE applications SET status='failed',automation_mode='assisted',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Execução interrompida por ${id}`, timestamp, applicationId);
+      abortApplyingJob(String(row.job_id), "human_stop", identity);
+    } else {
+      assertCurrentAuthorization(currentAuthorization(applicationId), "claimed", timestamp);
+      db.prepare("UPDATE applications SET status='in_progress',current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Resposta recebida para ${id}; execução retomada`, timestamp, applicationId);
+    }
+    audit("human_question", id, "answered", { application_id: row.application_id, inbound_message_id: inboundMessageId || null });
+    return false;
+  });
+  if (duplicate) return { duplicate: true, question: db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) ?? null };
   return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
 }
 
@@ -2452,17 +2971,20 @@ export function createJobFromAgent(agentId: string, input: Partial<Job> & { sour
   const identityUrl = input.job_url || input.linkedin_post_url || input.application_url || input.source_url;
   const canonicalIdentityUrl = identityUrl ? canonicalizeJobUrl(identityUrl) : "";
   const candidateId = input.id || idFor(`${input.source}|${canonicalIdentityUrl}|${input.title}|${input.company}`);
-  if (getJob(candidateId)) throw new Error("agent.jobs.create_existing.forbidden");
-  const job = upsertJob(input);
-  if (job) {
-    for (const [field, value] of Object.entries(input)) {
-      if (field === "id" || value == null || value === "") continue;
-      const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl: job.source_url, confidence: 0.8, origin: "agent", agentId, sourceId: input.source });
-      selectEvidence(job.id, field, evidence.id, agentId, evidence.timestamp);
+  // Job, evidence and provenance are created together or not at all.
+  return tx(() => {
+    if (getJob(candidateId)) throw new Error("agent.jobs.create_existing.forbidden");
+    const job = upsertJob(input);
+    if (job) {
+      for (const [field, value] of Object.entries(input)) {
+        if (field === "id" || value == null || value === "") continue;
+        const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl: job.source_url, confidence: 0.8, origin: "agent", agentId, sourceId: input.source });
+        selectEvidence(job.id, field, evidence.id, agentId, evidence.timestamp);
+      }
     }
-  }
-  audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
-  return job;
+    audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
+    return job;
+  });
 }
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {

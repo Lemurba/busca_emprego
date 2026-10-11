@@ -96,6 +96,9 @@ const generatedDocx = await renderResumeFile(draft, "docx");
 assert.equal(generatedPdf.data.subarray(0, 5).toString("ascii"), "%PDF-");
 assert.equal(generatedDocx.data.subarray(0, 2).toString("ascii"), "PK");
 assert.throws(() => store.approveResume(draft.id, ""), /APROVO/);
+// SDD-ATS-003: every resume (manual included) needs an ATS review before APROVO.
+assert.throws(() => store.approveResume(draft.id, "APROVO"), /ATS_REVIEW_REQUIRED/);
+store.reviewResume(draft.id, { verdict: "pass" }, "test-reviewer");
 store.approveResume(draft.id, "APROVO");
 assert.equal(store.getJob(job.id).status, "resume_approved");
 const automatic = store.createApplication({ job_id: job.id, resume_id: draft.id, status: "submitted", automation_mode: "authorized_auto" });
@@ -129,7 +132,8 @@ assert.equal(store.listApplications().find((item) => item.id === automatic.id).a
 
 const runningJob = store.upsertJob({ id: "running-job", title: "Coordinator", company: "Example Co", source: "Test", source_url: "https://example.test/running", application_url: "https://example.test/running/apply" });
 store.recordJobDecision(runningJob.id, "interested", "TENHO INTERESSE");
-const runningResume = store.createResume({ job_id: runningJob.id, title: "Running ATS" });
+const runningResume = store.createResume({ job_id: runningJob.id, title: "Running ATS", content: "Experiência confirmada" });
+store.reviewResume(runningResume.id, { verdict: "pass" }, "test-reviewer");
 store.approveResume(runningResume.id, "APROVO");
 const runningApplication = store.createApplication({ job_id: runningJob.id, resume_id: runningResume.id });
 store.authorizeAutoApplication(runningApplication.id, runningResume.id, "AUTORIZO");
@@ -138,17 +142,23 @@ assert.throws(() => store.updateResume(runningResume.id, { status: "review" }), 
 assert.throws(() => store.recordJobFeedback(runningJob.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" }), /em andamento/i);
 assert.throws(() => store.revokeAutoApplication(runningApplication.id), /após o início/i);
 assert.throws(() => store.updateApplication(runningApplication.id, { status: "queued" }), /recolocada na fila/i);
-store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp, evidence_ref: "portal:confirmation:running" });
+// C1: an authorized submission is only recorded by the claiming worker through the internal route.
+assert.throws(() => store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp, evidence_ref: "portal:confirmation:running" }), /application\.internal_route_required/);
+store.submitAuthorizedApplication(runningApplication.id, { worker_id: "test-worker", evidence_ref: "portal:confirmation:running" });
 assert.equal(store.getJob(runningJob.id).decision, "applied", "an authorized in-progress application can record a confirmed submission");
 
 const manualJob = store.upsertJob({ id: "manual-job", title: "Specialist", company: "Example Co", source: "Test", source_url: "https://example.test/manual" });
 store.recordJobDecision(manualJob.id, "interested", "TENHO INTERESSE");
-const manualResume = store.createResume({ job_id: manualJob.id, title: "Manual ATS" });
+const manualResume = store.createResume({ job_id: manualJob.id, title: "Manual ATS", content: "Experiência confirmada" });
+store.reviewResume(manualResume.id, { verdict: "pass" }, "test-reviewer");
 store.approveResume(manualResume.id, "APROVO");
 const manualApplication = store.createApplication({ job_id: manualJob.id, resume_id: manualResume.id, automation_mode: "manual" });
 assert.equal(manualApplication.automation_mode, "manual");
 store.updateResume(manualResume.id, { status: "review", content: "Updated manual resume" });
-assert.throws(() => store.updateApplication(manualApplication.id, { status: "submitted", submitted_at: timestamp }), /modo manual|autorização automática/i);
+// Editing the approved resume removes the approval: the manual flow is kept, but submission is refused until re-approval.
+assert.throws(() => store.updateApplication(manualApplication.id, { status: "submitted", submitted_at: timestamp }), /precisa estar aprovado/i);
+assert.equal(store.getJob(manualJob.id).status, "resume", "removing the approval returns the job to the resume stage via revise_resume");
+store.reviewResume(manualResume.id, { verdict: "pass" }, "test-reviewer");
 store.approveResume(manualResume.id, "APROVO");
 store.selectManualApplication(manualApplication.id);
 store.updateApplication(manualApplication.id, { status: "submitted", submitted_at: timestamp });

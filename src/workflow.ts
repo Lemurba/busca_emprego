@@ -17,6 +17,8 @@ export type WorkflowCommand =
   | "complete_interview"
   | "complete"
   | "complete_exceptionally"
+  | "revise_resume"
+  | "abort_application"
   | "discard"
   | "expire"
   | "reopen";
@@ -123,11 +125,14 @@ const RULES: Readonly<Record<WorkflowCommand, Rule>> = {
   },
   present_for_review: { from: ["strong_match"], to: "review", validate: oneTruthy("presented_to_user") },
   select: { from: ["review"], to: "selected", validate: oneTruthy("explicit_interest") },
-  create_resume: { from: ["selected"], to: "resume", validate: combine(required("base_resume_id", "resume_id"), oneTruthy("ats_draft_created")) },
+  // base_resume_id is recorded when present; manual drafts written by the user have no base PDF.
+  create_resume: { from: ["selected"], to: "resume", validate: combine(required("resume_id"), oneTruthy("ats_draft_created")) },
   approve_resume: { from: ["resume"], to: "resume_approved", validate: literal("confirmation", "APROVO") },
   prepare_application: {
     from: ["resume_approved"], to: "ready_to_apply",
-    validate: (d) => d.flow === "manual" || truthy(d, "authorization_current") ? [] : ["flow", "authorization_current"],
+    // The application record exists with an explicit flow (manual or assisted awaiting AUTORIZO),
+    // or a current automatic authorization exists. Both are computed from the database.
+    validate: (d) => d.flow === "manual" || d.flow === "assisted" || truthy(d, "authorization_current") ? [] : ["flow", "authorization_current"],
   },
   start_application: {
     from: ["ready_to_apply"], to: "applying",
@@ -150,6 +155,10 @@ const RULES: Readonly<Record<WorkflowCommand, Rule>> = {
     ],
   },
   complete_exceptionally: { from: ["applied"], to: "completed", validate: combine(validResult, required("completed_at", "reason")) },
+  // Editing an approved resume removes the approval (SDD-ATS-003) and returns the job to the resume stage.
+  revise_resume: { from: ["resume_approved", "ready_to_apply"], to: "resume", validate: required("resume_id", "reason") },
+  // An authorized execution that failed, expired or was handed back to the human returns to the queue.
+  abort_application: { from: ["applying"], to: "ready_to_apply", validate: required("reason") },
   discard: { from: ACTIVE, to: "discarded", validate: combine(required("mode", "reason_code", "explanation"), (d) => String(d.explanation ?? "").trim().length >= 10 ? [] : ["explanation"]) },
   expire: { from: PRE_APPLICATION, to: "expired", validate: combine(required("expired_at", "reason"), oneTruthy("source_confirmed", "configured_rule")) },
   reopen: { from: TERMINAL, to: "found", validate: required("reason") },
