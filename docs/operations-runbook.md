@@ -2,62 +2,67 @@
 
 Este runbook opera uma única instalação de produção do Radar como **processo adicional no container Hermes existente**. Não há seleção de staging/production, segunda variante do aplicativo ou Docker próprio. A validação acontece sobre o mesmo artefato antes de colocá-lo em tráfego.
 
-Para uma instalação nova, o Hermes deve executar primeiro o fluxo interativo de [`hermes-plugin/ONBOARDING.md`](../hermes-plugin/ONBOARDING.md), definido por [`hermes-plugin/onboarding.json`](../hermes-plugin/onboarding.json). Este runbook assume que o diálogo seguro de credenciais, os perfis de navegador e o operador responsável já foram confirmados.
+Para uma instalação nova, siga primeiro [`ops/hermes/ONBOARDING.md`](../ops/hermes/ONBOARDING.md) (serviço s6, skill, MCP, navegador, cofre de credenciais, Telegram e watchdog). Este runbook assume que `.env.local`, logins de portais e o operador responsável já foram configurados.
 
 ## 1. Premissas e topologia suportada
 
-- Uma única instância do Radar por arquivo SQLite. Dois processos jamais devem abrir o mesmo `RADAR_DB_PATH` por volume compartilhado.
-- Node.js 24 ou superior já disponível no container Hermes.
-- Código em `/opt/hermes/plugins/busca-emprego` e volume persistente em `/var/lib/hermes/busca-emprego` (ajuste os caminhos ao ambiente).
-- A porta 8787 fica somente na rede interna. Não publicar diretamente na internet.
-- Dashboard e API não exigem login ou token. A porta 8787 deve ser permitida somente para a sub-rede doméstica e bloqueada na WAN; proxy TLS é opcional dentro da LAN.
-- O supervisor já utilizado pelo Hermes deve iniciar ambos os processos. O exemplo em `ops/hermes/supervisord-radar.conf.example` só deve ser incluído se o container já usar Supervisor.
+- Uma única instância HTTP do Radar por arquivo SQLite. Dois servidores jamais devem abrir o mesmo `RADAR_DB_PATH` por volume compartilhado.
+- Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI usa Node 24).
+- Código e dados no volume persistente `/opt/data` (padrão `/opt/data/dashboard/busca_emprego`, banco em `data/radar.sqlite`); `/opt/hermes` é do root e somente leitura na imagem oficial.
+- Porta canônica 8787, escutando em `RADAR_BIND_HOST` (padrão `127.0.0.1`). Uma instalação pode trocar a porta em `.env.local`. Não publicar diretamente na internet.
+- Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`).
+- O processo roda como serviço s6 do container (`ops/hermes/radar-s6-run.sh`), recriado a cada boot por um gateway hook do Hermes. `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
 
-O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node recebe os sinais do supervisor. Se Hermes usar s6, tini ou outro init, traduza os mesmos valores para esse gerenciador; não execute o Node desacoplado em background no entrypoint.
+O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node recebe os sinais do supervisor. Não execute o Node desacoplado em background no entrypoint.
 
 ## 2. Variáveis e secrets
 
-| Nome | Obrigatório agora | Origem | Observação |
-| --- | --- | --- | --- |
-| `RADAR_APP_DIR` | sim | configuração do processo | diretório do release ativo |
-| `RADAR_DB_PATH` | sim | configuração do processo | caminho absoluto em volume persistente, modo 0600 |
-| `PORT` | sim | configuração do processo | padrão 8787, rede interna |
-| `RADAR_BACKUP_DIR` | recomendado | configuração do job | fora do diretório do banco; copiar para destino externo criptografado |
-| `RADAR_HEALTH_URL` | recomendado | configuração do monitor | URL interna de `/api/health` |
-| `RADAR_INTERNAL_SERVICE_TOKEN` | sim, para rotas de agente | configuração do processo / secret store | valor aleatório de 32 bytes; enviado no header `x-radar-service-token`; nunca reutilizar como senha de usuário nem imprimir em log ou relatório |
-| `RADAR_AUTO_APPLICATION_ENABLED` | não (gate) | configuração do processo | ligar somente com executor autorizado testado (`scripts/ops/apply-authorized.mjs`); com `false` a fila responde 403 `AUTOMATION_DISABLED` |
-| `GEOAPIFY_API_KEY` | não implementado | — | o mapa usa tiles do OpenStreetMap; não existe backend Geoapify no código, então não há chave a configurar |
-| chave pública de tiles Geoapify | não implementada | — | só faz sentido se o frontend passar a usar Geoapify; hoje usa OSM com atribuição |
-| capability Telegram | gate externo | vínculo existente do Hermes | descoberta automaticamente; não configurar bot token, chat ID ou destinatário no plugin |
+O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, modo 600). Principais chaves:
 
-Arquivos `.env` não são artefatos de deploy e já são ignorados pelo Git. Use injeção do secret store do Hermes.
+| Nome | Obrigatório | Observação |
+| --- | --- | --- |
+| `PORT` | não | padrão 8787 |
+| `RADAR_BIND_HOST` / `RADAR_ALLOWED_HOSTS` | não | padrão `127.0.0.1` / `127.0.0.1,localhost` |
+| `RADAR_INTERNAL_SERVICE_TOKEN` | sim | 32 bytes aleatórios; header `x-radar-service-token`; nunca imprimir |
+| `RADAR_DASHBOARD_TOKEN` | sim | trocado por cookie de sessão em `/auth`; link via `scripts/ops/dashboard-link.mjs` |
+| `RADAR_OPERATOR_ID` | sim | pessoa responsável (auditoria) |
+| `RADAR_DB_PATH` | sim | caminho absoluto em `/opt/data`, modo 0600 |
+| `RADAR_BACKUP_DIR` | recomendado | fora do diretório do banco; copiar para destino externo criptografado |
+| `RADAR_LOG_DIR` | não | padrão `/opt/data/logs` |
+| `RADAR_TRUST_PROXY_TLS` | não | `true` só atrás de proxy TLS em loopback |
+| `RADAR_AUTO_APPLICATION_ENABLED` | não (gate) | ligar somente com executor testado; com `false` a fila responde 403 `AUTOMATION_DISABLED` |
+| `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_HOME_CHANNEL` | não | vazios = herdados de `/opt/data/.env` do Hermes |
+| `RADAR_BROWSER_VIEWER_URL` | não | visualizador remoto do navegador, se existir |
+| `GEOAPIFY_API_KEY` | não implementado | o mapa usa tiles do OpenStreetMap |
+
+O bot token do Telegram fica só no `.env` do Hermes. Logins de portais ficam no cofre do Hermes (`hermes vault add`). `.env*` é ignorado pelo Git.
 
 ## 3. Instalação ou atualização
 
-Use somente `ops/hermes/radar.env.example`, `supervisord-radar.conf.example` e `nginx-radar.conf.example`. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela instalação e é obrigatório.
+Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver proxy TLS, `nginx-radar.conf.example`. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela instalação e é obrigatório.
 
 1. Criar release imutável a partir de commit identificado; registrar o SHA.
-2. Dentro do release, executar `npm ci`, `npm test` e `node test/ops.test.mjs`.
+2. Dentro do release, executar `npm ci` e `npm test` (inclui `test/ops.test.mjs`).
 3. Se já existir uma instalação, executar backup do banco atual:
 
    ```bash
-   RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
-   RADAR_BACKUP_DIR=/var/backups/hermes/busca-emprego \
+   RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite \
+   RADAR_BACKUP_DIR=/opt/data/backups/radar-vagas \
    node scripts/ops/backup-sqlite.mjs
    ```
 
-4. Parar somente o processo Radar, trocar o symlink/diretório de release preservando o volume de dados e iniciar pelo supervisor.
+4. Parar somente o processo Radar (`touch .radar-stopped` para silenciar o watchdog), trocar o release preservando o volume de dados e iniciar pelo s6; remover `.radar-stopped`.
 5. Executar o health check profundo:
 
    ```bash
-   RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
+   RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite \
    RADAR_HEALTH_URL=http://127.0.0.1:8787/api/health \
    node scripts/ops/health-check.mjs
    ```
 
-6. Em outro dispositivo da LAN, abrir `http://IP-DO-HERMES:8787`, carregar o dashboard e criar uma vaga sintética removível sem login.
-7. Executar `RADAR_PUBLIC_URL=http://IP-PRIVADO:8787 node scripts/ops/verify-environment.mjs --environment production`. O verificador aceita HTTP somente em endereço privado/localhost e confirma health, readiness e bootstrap sem credencial.
-8. Verificar `telegram.question` pelo vínculo existente do Hermes. O teste não pede nem recebe bot token, chat ID ou destinatário. A entrega das perguntas humanas usa `node scripts/ops/notify-human-questions.mjs` (simulação por padrão; `--send` entrega pela capability vinculada) e o diagnóstico do vínculo fica em `node scripts/ops/telegram-diagnose.mjs`.
+6. Gerar o link de sessão com `node scripts/ops/dashboard-link.mjs --send`, abrir o dashboard pelo link recebido e criar uma vaga sintética removível. Confirmar que `/api/bootstrap` sem cookie nem token responde 401.
+7. Executar `RADAR_PUBLIC_URL=<url do dashboard> node scripts/ops/verify-environment.mjs --environment production`. O verificador aceita HTTP somente em endereço privado/localhost.
+8. Verificar o Telegram do gateway do Hermes (`TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL`): `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e `node scripts/ops/notify-human-questions.mjs` (simulação; `--send` entrega via `hermes send`).
 9. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não ativar agendamentos ou candidatura automática com falhas, skips ou gates sem aprovação registrada.
 
 ### Publicação e rollback de agentes
@@ -84,7 +89,7 @@ node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref cnh 
 
 Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `--evidence-ref` observado no portal o envio não é confirmado; URL observada diferente da autorizada (mesma canonicalização do app) aborta a execução — nesse caso use `ask` para revisão humana; `fail` grava apenas o código do motivo (nada de conteúdo de página, token ou URL com credencial). Pergunta humana criada com `ask` pausa a candidatura e é entregue por `notify-human-questions.mjs`.
 
-**Navegador (instância única, inegociável):** o executor conduz sempre o Chrome da stack noVNC em `/opt/data/chrome-app` — a mesma janela que o operador acompanha em `http://192.168.1.183:6080/vnc.html` (viewer `6080` → `x11vnc` → display `:99`), cujo CDP é `http://127.0.0.1:9222` no mesmo processo. O Hermes está configurado com `browser.cdp_url=http://127.0.0.1:9222` (e `BU_CDP_URL` no `.env`): com a stack fora do ar o harness **falha fechado** em vez de abrir um segundo Chrome. Suba/derrube com `bash /opt/data/chrome-app/ensure.sh` (idempotente) e `stop.sh`; o hook `/opt/data/hooks/chrome-novnc` sobe a stack no boot do gateway e o watchdog `harness-watchdog` (cron do Hermes, a cada 10 min) só fala quando precisou reiniciar. Nenhuma candidatura pode rodar em outro navegador, outro perfil ou outro endpoint CDP.
+**Navegador:** o executor conduz o navegador configurado no Hermes por `browser.cdp_url: http://127.0.0.1:9222` (`hermes/config.example.yaml`), que tem precedência sobre o motor padrão; com o CDP fora do ar o Hermes não deve abrir outro navegador para candidatura — pare e corrija o serviço do Chrome. Se houver visualizador remoto da sessão, sua URL fica em `RADAR_BROWSER_VIEWER_URL` no `.env.local`. Logins de portais vêm do cofre de credenciais do Hermes (`hermes vault add`); nenhuma candidatura roda em outro perfil ou endpoint CDP.
 
 Verificação obrigatória antes de ligar o gate: `node test/executor.test.mjs` (claim, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada — 10 checagens).
 
@@ -94,7 +99,7 @@ Para provar o harness **no ambiente real**, use um formulário HTTPS **público*
 
 Antes de habilitar os agentes, confirmar operador, canal de incidente, release anterior, backup íntegro e espaço livre. Não é necessário parar todo o Hermes quando o supervisor permite controle individual. Após iniciar:
 
-**Serviço da porta 666:** inicie sempre **destacado** (`setsid nohup … npm start`, dono `init`), nunca preso à sessão que o lançou — um wrapper morto deixa o `node dist/src/server.js` órfão e sem ninguém para reerguê-lo. O watchdog `radar-666-watchdog` (cron do Hermes, sem LLM, a cada 10 min) checa `/api/health` e sobe o serviço sozinho quando necessário, avisando no Telegram só quando precisou agir.
+**Serviço e watchdog:** o app roda como serviço s6 (seção 1). O watchdog versionado `hermes/cron/radar-watchdog.sh` é copiado para `/opt/data/scripts/` e registrado com `hermes cron create "every 10m" --no-agent --script radar-watchdog.sh --deliver telegram`: checa `/api/health` na `PORT` do `.env.local` (padrão 8787), só envia mensagem quando falha e fica em silêncio com `.radar-stopped`.
 
 - verificar API, SQLite e volume com `health-check.mjs`;
 - verificar logs sem CV, tokens, URLs privadas ou conteúdo de prompts;
@@ -104,7 +109,7 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 
 ## 5. Backup, retenção e restore
 
-`backup-sqlite.mjs` usa `VACUUM INTO`, valida origem e snapshot, aplica permissões 0600 e gera manifesto SHA-256. Agende no mecanismo já usado pelo Hermes; o repositório não instala cron. A frequência, retenção, criptografia e cópia off-host devem ser definidas conforme RPO, LGPD e capacidade do operador.
+`backup-sqlite.mjs` usa `VACUUM INTO`, valida origem e snapshot, aplica permissões 0600 e gera manifesto SHA-256. Agende pelo cron do Hermes (ex.: script sem LLM em `/opt/data/scripts/`); o repositório não instala esse agendamento. A frequência, retenção, criptografia e cópia off-host devem ser definidas conforme RPO, LGPD e capacidade do operador.
 
 Teste restore periodicamente em caminho/ambiente isolado. Para restaurar o banco ativo:
 
@@ -114,8 +119,8 @@ Teste restore periodicamente em caminho/ambiente isolado. Para restaurar o banco
 
    ```bash
    node scripts/ops/restore-sqlite.mjs \
-     --from /var/backups/hermes/busca-emprego/radar-AAAA.sqlite \
-     --db /var/lib/hermes/busca-emprego/radar.sqlite \
+     --from /opt/data/backups/radar-vagas/radar-AAAA.sqlite \
+     --db /opt/data/dashboard/busca_emprego/data/radar.sqlite \
      --health-url http://127.0.0.1:8787/api/health \
      --confirm RESTORE
    ```
@@ -148,14 +153,14 @@ Não fazer downgrade de código sobre schema incompatível. Cada futura migraç�
 - **DB `quick_check` falha:** parar imediatamente, não executar reparo no original, copiar arquivos SQLite/sidecars para investigação e restaurar o último backup testado.
 - **disco quase cheio:** pausar coleta/escrita; liberar espaço apenas por política aprovada. Não excluir banco, WAL ou backups ad hoc.
 - **Geoapify indisponível/quota:** manter Kanban/lista; desabilitar mapa/geocoding e não inventar coordenadas.
-- **Telegram indisponível:** manter candidatura em `needs_review`; nunca usar resposta padrão nem submeter. Diagnostique o vínculo com `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e reentregue com `node scripts/ops/notify-human-questions.mjs --send`. Pergunta em `delivery_failed` continua respondível na conversa e só é reenviada com `--retry-failed`, porque a rota de entrega marca uma única vez (`pending` → `delivered`).
+- **Telegram indisponível:** manter candidatura em `needs_review`; nunca usar resposta padrão nem submeter. Diagnostique o gateway com `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e reentregue com `node scripts/ops/notify-human-questions.mjs --send`. Pergunta em `delivery_failed` continua respondível na conversa e só é reenviada com `--retry-failed`, porque a rota de entrega marca uma única vez (`pending` → `delivered`).
 - **possível vazamento de secret:** revogar no provedor, rotacionar no Hermes, revisar logs e auditoria; não imprimir o novo valor em teste.
 
 ## 8. Limitações operacionais conhecidas
 
 - `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume, mas ainda não mede filas/dependências.
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
-- A API não autentica usuários nem aplica escopos HTTP; qualquer dispositivo com acesso à porta pode executar todas as rotas. SQLite continua em instância única.
+- A API distingue apenas dois papéis (token interno e sessão do dashboard), sem escopos por rota. SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
 - Não há migração versionada/rollback de schema, alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
 - A anonimização legada permanece opt-in (`RADAR_RUN_LEGACY_ANONYMIZATION=true`) e deve ficar desabilitada em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.

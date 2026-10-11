@@ -32,4 +32,21 @@ restoredDatabase.close();
 const missingConfirmation = spawnSync(process.execPath, ["scripts/ops/restore-sqlite.mjs", "--from", backupResult.backup_path, "--db", restored], { encoding: "utf8" });
 assert.notEqual(missingConfirmation.status, 0, "restore must fail closed without the literal confirmation");
 
+for (const [script, args] of [["scripts/ops/health-check.mjs", ["--timeout-ms", "abc"]], ["scripts/ops/backup-sqlite.mjs", ["--db", source, "--timeout-ms", "NaN"]]]) {
+  const invalid = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+  assert.equal(invalid.status, 1, `${script} deve recusar argumento numérico inválido`);
+  assert.match(invalid.stderr, /invalid_numeric_argument/);
+}
+
+const { isPrivateNetworkHost } = await import("../scripts/ops/verify-environment.mjs");
+for (const host of ["127.0.0.1", "10.0.0.5", "172.16.3.4", "192.168.1.10", "localhost", "[::1]", "fd12:3456::1", "fc00::1", "fe80::1", "::ffff:192.168.0.1"]) {
+  assert.equal(isPrivateNetworkHost(host), true, `${host} deveria ser rede privada`);
+}
+for (const host of ["fcbarcelona.com", "fd.example.org", "172.32.0.1", "8.8.8.8", "2001:db8::1", "::ffff:8.8.8.8", "example.local"]) {
+  assert.equal(isPrivateNetworkHost(host), false, `${host} não deveria ser rede privada`);
+}
+const publicHttp = spawnSync(process.execPath, ["scripts/ops/verify-environment.mjs", "--url", "http://fcbarcelona.com/"], { encoding: "utf8" });
+assert.equal(publicHttp.status, 2);
+assert.match(publicHttp.stderr, /url_must_use_https_or_private_lan_http/);
+
 console.log("SQLite backup and restore checks passed.");

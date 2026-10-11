@@ -72,7 +72,10 @@ assert.deepEqual(calculateScore(criteria), {
 assert.equal(calculateScore([{ key: "known", weight: 59, score: 100 }, { key: "unknown", weight: 41, score: null }]).band, "insufficient_data");
 assert.equal(calculateScore([{ key: "edge", weight: 1, score: 80 }]).band, "strong_match");
 assert.equal(calculateScore([{ key: "edge", weight: 1, score: 65 }]).band, "review");
-assert.equal(calculateScore([{ key: "edge", weight: 1, score: 64.999 }]).band, "low_match");
+// The band follows the rounded value that is persisted/displayed: 64.999 is shown as 65.00, so it is "review".
+assert.equal(calculateScore([{ key: "edge", weight: 1, score: 64.999 }]).band, "review");
+assert.equal(calculateScore([{ key: "edge", weight: 1, score: 64.994 }]).band, "low_match");
+assert.equal(calculateScore([{ key: "edge", weight: 1, score: 79.996 }]).band, "strong_match");
 assert.equal(calculateMatchScore({
   role_family: 80, skills: 80, seniority: 80, location_work_model: 80, compensation: null, explicit_preferences: null,
 }).coveragePercent, 80);
@@ -96,5 +99,10 @@ assert.equal(compareTotalRejection(rejected, { ...rejected, company: "Empresa X 
 const unknownFamily = { ...rejected, roleFamily: null, roleFamilyConfidence: null, requirements: [] };
 assert.equal(compareTotalRejection(unknownFamily, { ...unknownFamily }).similar, true, "identical title passes conservative title fallback");
 assert.equal(compareTotalRejection(unknownFamily, { ...unknownFamily, title: "Cientista de Dados" }).similar, false);
+assert.equal(compareTotalRejection({ ...unknownFamily, title: "" }, { ...unknownFamily, title: "  " }).similar, false, "empty titles carry no evidence of similarity");
+assert.equal(compareExactIdentity(
+  { ...tracked, company: "Acme" },
+  { ...clean, company: "Outra Empresa" },
+).action, "new", "same source and URL with a different company is not the same vacancy");
 
 console.log("Domain normalization, dedupe, validation, scoring, and preference checks passed.");

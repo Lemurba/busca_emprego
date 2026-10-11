@@ -9,3 +9,5 @@ npm-debug.log*
 *.sqlite-shm
 *.sqlite-wal
 .radar/
+__pycache__/
+*.pyc

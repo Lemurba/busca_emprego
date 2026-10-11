@@ -8,20 +8,26 @@
  *   - envio sem evidência é recusado;
  *   - URL observada diferente da autorizada é recusada (mesma canonicalização do app);
  *   - pergunta humana pausa a candidatura e a resposta retoma;
- *   - envio com evidência fecha a candidatura e marca a vaga como candidatada;
- *   - falha autorizada volta para revisão humana;
  *   - com a automação desligada a fila responde 403 automation_disabled.
+ *
+ * As rotas internas do contrato C1 (POST /api/applications/{id}/submit e /fail) são
+ * exercitadas contra a API falsa em processo (test/fixtures/fake-radar-api.mjs):
+ *   - --application com path traversal é recusado antes de ler/gravar qualquer arquivo;
+ *   - submit sem --observed-url, com URL divergente ou de outro worker é recusado localmente;
+ *   - submit/fail enviam {worker_id, evidence_ref, observed_url} / {worker_id, reason}
+ *     com x-radar-service-token; sem token o script nem chama o app.
  *
  * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { startFakeRadarApi } from "./fixtures/fake-radar-api.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const token = `executor-token-${randomUUID()}`;
@@ -44,7 +50,7 @@ async function startServer({ automation }) {
       ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, `db-${port}.sqlite`),
       RADAR_ENVIRONMENT: "production", RADAR_OPERATOR_ID: "executor-operator", RADAR_TRUST_PROXY_TLS: "true",
       RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: automation,
-      HERMES_LINKED_RECIPIENT_ID: LINKED_IDENTITY,
+      HERMES_LINKED_RECIPIENT_ID: LINKED_IDENTITY, TELEGRAM_ALLOWED_USERS: LINKED_IDENTITY, TELEGRAM_HOME_CHANNEL: "",
     },
   });
   let stderr = "";
@@ -71,6 +77,23 @@ const api = async (method, path, body) => {
   return { status: res.status, data };
 };
 
+/** Versão assíncrona: a API falsa roda neste processo, então spawnSync bloquearia o servidor. */
+const executorAsync = (args, extraEnv = {}) => new Promise((resolvePromise) => {
+  const child = spawn(process.execPath, ["scripts/ops/apply-authorized.mjs", ...args], {
+    cwd: repoRoot,
+    env: {
+      ...process.env, RADAR_BASE_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_FORWARDED_PROTO: "",
+      RADAR_EXECUTOR_WORKER_ID: "executor-test", RADAR_EXECUTOR_STATE_DIR: stateDir, ...extraEnv,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.once("close", (status) => resolvePromise({ status, stdout, stderr }));
+});
+
 const executor = (...args) => spawnSync(process.execPath, ["scripts/ops/apply-authorized.mjs", ...args], {
   cwd: repoRoot,
   env: {
@@ -89,6 +112,8 @@ async function preparedApplication(label, applicationUrl) {
   })).data;
   await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: `CV ${label}`, content: "Experiência confirmada" })).data;
+  // SDD-ATS-003: APROVO requires an ATS review of the current version for every resume.
+  await api("POST", `/api/resumes/${resume.id}/review`, { verdict: "pass" });
   await api("POST", `/api/resumes/${resume.id}/approve`, { confirmation: "APROVO" });
   const application = (await api("POST", "/api/applications", { job_id: job.id, resume_id: resume.id })).data;
   await api("POST", `/api/applications/${application.id}/authorize-auto`, { resume_id: resume.id, confirmation: "AUTORIZO" });
@@ -108,6 +133,7 @@ const t = async (name, fn) => {
 };
 
 let instance = null;
+let fake = null;
 try {
   instance = await startServer({ automation: "true" });
   base = instance.baseUrl;
@@ -115,13 +141,14 @@ try {
   const first = await preparedApplication("alpha", "https://portal.example.test/alpha/aplicar?utm_source=radar");
   const second = await preparedApplication("beta", "https://portal.example.test/beta/aplicar");
 
-  await t("list mostra a fila autorizada com hash, nonce e TTL", () => {
+  await t("list mostra a fila autorizada com hash, prefixo do nonce e TTL", () => {
     const result = executor("list", "--json");
     assert.equal(result.status, 0, `list saiu com ${result.status}: ${result.stderr}`);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.total, 2);
     const entry = payload.applications.find((item) => item.id === first.application.id);
-    assert.ok(entry?.nonce, "fila sem nonce");
+    assert.equal(entry?.nonce, undefined, "o nonce completo não pode aparecer na saída");
+    assert.match(entry.nonce_prefix, /^.{8}…$/u);
     assert.equal(entry.application_url_hash.length, 64);
     assert.ok(new Date(entry.expires_at).getTime() > Date.now(), "autorização já expirada");
   });
@@ -166,29 +193,9 @@ try {
     questionId = JSON.parse(asked.stdout).question_id;
     assert.ok(questionId);
     assert.equal((await appState(first.application.id)).status, "needs_review");
-    const answered = await api("POST", `/api/human-questions/${questionId}/answer`, { answer: "Sim, categoria B", identity_id: LINKED_IDENTITY });
+    const answered = await api("POST", `/api/human-questions/${questionId}/answer`, { answer: "Sim, categoria B", sender_id: LINKED_IDENTITY, identity_id: LINKED_IDENTITY });
     assert.equal(answered.status, 200);
     assert.equal((await appState(first.application.id)).status, "in_progress");
-  });
-
-  await t("envio com evidência fecha a candidatura e marca a vaga como candidatada", async () => {
-    const result = executor("submit", "--application", first.application.id,
-      "--observed-url", "https://portal.example.test/alpha/aplicar", "--evidence-ref", "portal.example.test:confirmation:9f1c2a");
-    assert.equal(result.status, 0, `submit saiu com ${result.status}: ${result.stderr}`);
-    const application = await appState(first.application.id);
-    assert.equal(application.status, "submitted");
-    assert.equal(application.evidence_ref, "portal.example.test:confirmation:9f1c2a");
-    const job = (await api("GET", `/api/jobs/${first.job.id}`)).data;
-    assert.equal(job.decision, "applied");
-  });
-
-  await t("falha autorizada registra motivo higienizado e volta para revisão", async () => {
-    assert.equal(executor("claim", "--application", second.application.id).status, 0);
-    const result = executor("fail", "--application", second.application.id, "--reason", "captcha_manual");
-    assert.equal(result.status, 0, `fail saiu com ${result.status}: ${result.stderr}`);
-    const application = await appState(second.application.id);
-    assert.equal(application.status, "failed");
-    assert.match(String(application.current_step), /captcha_manual/u);
   });
 
   await t("comando desconhecido e falta de --application falham sem tocar o banco", () => {
@@ -211,8 +218,94 @@ try {
     assert.match(raw.stdout, /^403/u);
     assert.match(raw.stdout, /AUTOMATION_DISABLED/u);
   });
+
+  await instance.stop();
+  instance = null;
+
+  // ------------------------------------------------ C1 contra a API falsa em processo
+  const { canonicalizeJobUrl } = await import("../dist/src/domain.js");
+  fake = await startFakeRadarApi({ token, canonicalize: canonicalizeJobUrl });
+  base = fake.baseUrl;
+  const calls = (suffix) => fake.requests.filter((r) => r.path.endsWith(suffix));
+  const fakeApp = fake.addApplication({ application_url: "https://portal.example.test/gama/aplicar?utm_source=radar" });
+
+  await t("--application com path traversal é recusado sem ler/gravar arquivo", async () => {
+    const before = fake.requests.length;
+    for (const bad of ["../../etc/passwd", "a/b", "..", "x".repeat(129), "id com espaço"]) {
+      const result = await executorAsync(["claim", "--application", bad]);
+      assert.equal(result.status, 1, `${bad}: ${result.stderr}`);
+      assert.match(result.stderr, /--application inválido/u);
+    }
+    assert.equal(fake.requests.length, before, "id inválido não pode chegar à rede");
+    assert.ok(!existsSync(join(directory, "etc")), "nada pode ser gravado fora do diretório de estado");
+  });
+
+  await t("claim na API falsa grava estado só no diretório do executor", async () => {
+    const result = await executorAsync(["claim", "--application", fakeApp.id]);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.ok(readdirSync(stateDir).includes(`${fakeApp.id}.json`));
+    assert.equal(fakeApp.claimed_by, "executor-test");
+  });
+
+  await t("submit sem --observed-url é recusado antes de chamar o app", async () => {
+    const result = await executorAsync(["submit", "--application", fakeApp.id, "--evidence-ref", "portal:confirmation:abc123"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--observed-url é obrigatório/u);
+    assert.equal(calls("/submit").length, 0);
+  });
+
+  await t("submit com URL divergente da autorizada é recusado localmente", async () => {
+    const result = await executorAsync(["submit", "--application", fakeApp.id, "--evidence-ref", "portal:confirmation:abc123",
+      "--observed-url", "https://portal.example.test/gama/outra-vaga"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /divergente/u);
+    assert.equal(calls("/submit").length, 0);
+    assert.equal(fakeApp.status, "in_progress");
+  });
+
+  await t("submit de outro worker é recusado localmente", async () => {
+    const result = await executorAsync(["submit", "--application", fakeApp.id, "--evidence-ref", "portal:confirmation:abc123",
+      "--observed-url", "https://portal.example.test/gama/aplicar"], { RADAR_EXECUTOR_WORKER_ID: "intruso" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /pertence ao worker/u);
+    assert.equal(calls("/submit").length, 0);
+  });
+
+  await t("sem token interno o script recusa antes de chamar o app", async () => {
+    const before = fake.requests.length;
+    const result = await executorAsync(["list"], { RADAR_INTERNAL_SERVICE_TOKEN: "" });
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(fake.requests.length, before);
+  });
+
+  await t("submit usa POST /submit {worker_id, evidence_ref, observed_url} com token", async () => {
+    const observed = "https://portal.example.test/gama/aplicar?utm_source=radar&utm_medium=email";
+    const result = await executorAsync(["submit", "--application", fakeApp.id, "--evidence-ref", "portal.example.test:confirmation:9f1c2a",
+      "--observed-url", observed]);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    const [call] = calls("/submit");
+    assert.equal(call.method, "POST");
+    assert.equal(call.path, `/api/applications/${fakeApp.id}/submit`);
+    assert.deepEqual(call.body, { worker_id: "executor-test", evidence_ref: "portal.example.test:confirmation:9f1c2a", observed_url: observed });
+    assert.equal(call.headers["x-radar-service-token"], token);
+    assert.equal(call.headers["x-forwarded-proto"], undefined);
+    assert.equal(fakeApp.status, "submitted");
+    assert.equal(fake.requests.filter((r) => r.method === "PATCH").length, 0, "nada de PATCH genérico");
+  });
+
+  await t("fail usa POST /fail {worker_id, reason} e o app devolve para revisão", async () => {
+    const other = fake.addApplication({});
+    assert.equal((await executorAsync(["claim", "--application", other.id])).status, 0);
+    const result = await executorAsync(["fail", "--application", other.id, "--reason", "captcha  manual"]);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    const [call] = calls("/fail");
+    assert.equal(call.path, `/api/applications/${other.id}/fail`);
+    assert.deepEqual(call.body, { worker_id: "executor-test", reason: "captcha manual" });
+    assert.equal(other.status, "failed");
+  });
 } finally {
   await instance?.stop?.();
+  await fake?.stop?.();
   rmSync(directory, { recursive: true, force: true });
 }
 

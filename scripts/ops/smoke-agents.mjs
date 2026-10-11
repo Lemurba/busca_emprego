@@ -30,6 +30,7 @@ import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PRESETS } from "../../dist/src/agent-defaults.js";
+import { RADAR_MCP_TOOLS } from "../../dist/src/mcp-tools.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const keepDb = process.argv.includes("--keep-db");
@@ -460,7 +461,7 @@ try {
   await t("autorização automática sem AUTORIZO é recusada", async () => {
     const r = await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "sim" });
     expect("autorizar inválido", r, 400);
-    assert.match(String(r.data?.error ?? ""), /AUTORIZO/);
+    assert.match(`${r.data?.error ?? ""} ${r.data?.message ?? ""}`, /AUTORIZO/);
   });
   await t("autorização explícita AUTORIZO entra na fila", async () => {
     expect("autorizar", await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" }), 200);
@@ -509,7 +510,8 @@ try {
   const shimOut = join(directory, "telegram-shim.ndjson");
   const notifyEnv = (extra = {}) => ({
     ...process.env, RADAR_BASE_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_OPERATOR_ID: "smoke-operator",
-    RADAR_FORWARDED_PROTO: "https", RADAR_TELEGRAM_SEND_COMMAND: `${process.execPath} ${shimPath}`, ...extra,
+    RADAR_FORWARDED_PROTO: "https", RADAR_TELEGRAM_SEND_COMMAND: JSON.stringify([process.execPath, shimPath]),
+    RADAR_NOTIFY_LOCK: join(directory, "notify.lock"), RADAR_TELEGRAM_REFS_PATH: join(directory, "telegram-refs.json"), ...extra,
   });
   const runNotify = (env, ...flags) => spawnSync(
     process.execPath, ["scripts/ops/notify-human-questions.mjs", "--send", ...flags],
@@ -580,8 +582,10 @@ try {
   });
 
   await t("envio registrado com evidência e vaga marcada como candidatada", async () => {
-    const r = await api("PATCH", `/api/applications/${applicationId}`, {
-      status: "submitted", submitted_at: new Date().toISOString(), evidence_ref: "portal:smoke:confirmation",
+    // C1: envio autorizado só pela rota interna, com o worker do claim e a URL observada.
+    const authorizedUrl = expect("job", await api("GET", `/api/jobs/${job0}`), 200).application_url;
+    const r = await api("POST", `/api/applications/${applicationId}/submit`, {
+      worker_id: "smoke-worker", evidence_ref: "portal:smoke:confirmation", observed_url: authorizedUrl,
     });
     const application = expect("enviar", r, 200);
     assert.equal(application.status, "submitted");
@@ -663,7 +667,7 @@ try {
 
   // ---------- 11. MCP ----------
   section("11. servidor MCP oficial (stdio): handshake, tools/list, tools/call");
-  await t("MCP responde com as 8 ferramentas e lê os 24 agentes do banco", async () => {
+  await t("MCP lista exatamente as ferramentas registradas e lê os 24 agentes do banco", async () => {
     const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
       cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, RADAR_DB_PATH: dbPath },
@@ -679,9 +683,8 @@ try {
       assert.ok(responses.get(1)?.result?.serverInfo?.name === "radar-vagas", "handshake MCP falhou");
       const tools = responses.get(2)?.result?.tools ?? [];
       const names = tools.map((tool) => tool.name);
-      for (const expected of ["radar_list_agents", "radar_list_sources", "radar_get_job", "radar_discover_job", "radar_enrich_job", "radar_create_resume", "radar_propose_agent_prompt", "radar_list_authorized_applications"]) {
-        assert.ok(names.includes(expected), `ferramenta MCP ausente: ${expected}`);
-      }
+      assert.deepEqual([...names].sort(), [...RADAR_MCP_TOOLS].sort(), "ferramentas MCP divergem de RADAR_MCP_TOOLS");
+      assert.ok(!names.includes("radar_answer_question"), "respostas humanas não podem entrar pelo MCP");
       const listed = responses.get(3)?.result?.structuredContent?.agents ?? [];
       assert.equal(listed.length, 24, `MCP listou ${listed.length} agentes`);
       const job = responses.get(4)?.result?.structuredContent?.job;

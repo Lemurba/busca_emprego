@@ -13,18 +13,19 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 
 ## Conexão
 
-- Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes.
-- Envie `Content-Type: application/json` em toda requisição com corpo.
+- Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes (porta canônica 8787; a instalação pode trocar `PORT` no `.env.local`).
+- Autenticação: toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` com o valor de `RADAR_INTERNAL_SERVICE_TOKEN` **ou** o cookie `radar_session` do dashboard (obtido em `GET /auth?token=<RADAR_DASHBOARD_TOKEN>`). Sem credencial: `401`. Sem token interno configurado no servidor: `503 internal_token_not_configured`.
+- O `Host` precisa estar em `RADAR_ALLOWED_HOSTS`; rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
-- Não envie `Authorization`, chave da API ou `X-Project-Id`: a instalação usa o projeto fixo `busca-emprego` e aceita requisições de qualquer cliente que alcance a porta na LAN.
+- Não envie `Authorization` nem `X-Project-Id`: a instalação usa o projeto fixo `busca-emprego` e a única credencial de agente é `x-radar-service-token`.
 - Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. O servidor confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
 - O aplicativo não cria dados exemplificativos: o banco inicia vazio e só recebe vagas de agentes, rodadas ou uso real do dashboard. A anonimização legada permanece opt-in e deve ficar desabilitada em produção.
 
 ## Capacidades e allowlist
 
-As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`. A capacidade efetiva é a interseção entre contrato do papel e versão publicada da configuração. Negação é o padrão para o agente, embora a API HTTP seja aberta na LAN.
+As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup`. A capacidade efetiva é a interseção entre contrato do papel e versão publicada da configuração. Negação é o padrão para o agente, independentemente da credencial HTTP.
 
 `agent_configs.source_ids` identifica fontes/conectores lógicos. `agent_configs.allowed_domains` contém hosts autorizados. Um não concede o outro. `browser_enabled=true` exige `browser.read` e `allowed_domains` não vazio. A URL de criação, enriquecimento, consulta salarial ou evidência deve pertencer à allowlist da versão do agente, inclusive após redirecionamentos; URL fora dela retorna 403 e não é persistida.
 
@@ -35,7 +36,7 @@ As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.cre
 | `jobs.enrich` | Propor atualização descritiva com proveniência por campo | Sobrescrever silenciosamente dado humano/mais confiável |
 | `salary.lookup` | Consultar e registrar salário com moeda, período, confiança e evidência | Inventar valor ou converter sem taxa/configuração auditada |
 
-Administrar configurações pelo dashboard não exige login. As capacidades acima continuam limitando a execução dos agentes, mas não são uma fronteira entre usuários da LAN.
+Administrar configurações exige a sessão do dashboard (ou o token interno). As capacidades acima limitam a execução dos agentes; não há perfis de usuário dentro do dashboard.
 
 ## Regras de preenchimento
 
@@ -95,10 +96,10 @@ Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, 
 
 | Método | Endpoint | Acesso HTTP | Uso |
 | --- | --- | --- | --- |
-| `GET` | `/api/agents` | LAN, sem login | Listar agentes do projeto |
-| `POST` | `/api/agents` | LAN, sem login | Criar agente |
-| `PATCH` | `/api/agents/{id}` | LAN, sem login | Editar, habilitar ou pausar agente |
-| `DELETE` | `/api/agents/{id}` | LAN, sem login | Excluir agente sem histórico; com histórico, deve ser pausado |
+| `GET` | `/api/agents` | sessão do dashboard ou token interno | Listar agentes do projeto |
+| `POST` | `/api/agents` | sessão do dashboard ou token interno | Criar agente |
+| `PATCH` | `/api/agents/{id}` | sessão do dashboard ou token interno | Editar, habilitar ou pausar agente |
+| `DELETE` | `/api/agents/{id}` | sessão do dashboard ou token interno | Excluir agente sem histórico; com histórico, deve ser pausado |
 
 Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browser_enabled`, `tool_scopes`, `can_create_jobs`, `can_edit_jobs`, `editable_fields`, `concurrency`, `timeout_seconds` e `prompt`. `source_ids` e `allowed_domains` são listas distintas. A API retorna 422 para capacidade/campo desconhecido, limites inválidos ou Browser habilitado sem allowlist. Toda edição cria uma versão imutável em rascunho; publicação e rollback são explícitos e cada execução fica presa ao snapshot publicado.
 
@@ -275,7 +276,7 @@ Exige vaga de interesse e currículo aprovado vinculado à vaga. O servidor acei
 
 Atualiza `resume_id`, `status`, `current_step`, `submitted_at` e `notes`. Não permite mudar diretamente `automation_mode`. Marcar `submitted` só é permitido após selecionar o modo manual ou autorizar explicitamente o modo automático; a vaga também precisa continuar como de interesse. Se `submitted_at` for omitido, o servidor usa o horário atual. Marcar `submitted`, `accepted` ou `rejected` atualiza a vaga para `status: "applied"` e `decision: "applied"`.
 
-`in_progress` exige uma autorização automática vigente e só pode ser iniciado uma vez. Um envio automático só pode virar `submitted` enquanto está em andamento. `failed` só pode ser registrado para um envio automático autorizado; `accepted` e `rejected` exigem uma candidatura previamente enviada. A seleção manual pode confirmar um envio depois que o usuário o realizou no portal.
+Reenviar o `status` atual (por exemplo, ao editar só as notas) não é transição e é ignorado. O PATCH nunca aceita `in_progress` (use o claim do executor, `application.claim.required`) nem, em candidaturas `authorized_auto`, `submitted` ou `failed`: esses resultados só entram pelas rotas internas `POST /api/applications/{id}/submit` e `/fail`, chamadas pelo worker dono do claim (`application.internal_route_required`). `accepted` e `rejected` exigem uma candidatura previamente enviada. A seleção manual pode confirmar um envio depois que o usuário o realizou no portal.
 
 Resposta `200` com `Application` atualizado ou `null` se não existir.
 
@@ -303,12 +304,12 @@ A vaga deve estar marcada como de interesse, o currículo associado deve estar a
 | `list` | `GET /api/authorized-applications` | exige `RADAR_AUTO_APPLICATION_ENABLED=true` e o token interno; mostra `nonce`, hash da URL e TTL |
 | `claim --application <id>` | `POST /api/applications/{id}/claim` | usa o `nonce` da fila, grava o estado local em `.radar/executor/<id>.json` |
 | `verify --observed-url <url>` | — (mesma `canonicalizeJobUrl` de `dist/src/domain.js`) | aborta se a URL aberta difere da autorizada |
-| `submit --evidence-ref <ref>` | `PATCH /api/applications/{id}` | recusa sem `claim` local e sem evidência observada no portal |
-| `fail --reason <código>` | `PATCH /api/applications/{id}` | grava só o código do motivo; a vaga volta para revisão |
+| `submit --evidence-ref <ref>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id` e sem evidência observada no portal |
+| `fail --reason <código>` | `POST /api/applications/{id}/fail` | grava só o código do motivo; a vaga volta para revisão |
 | `ask --field-ref <campo> --question <texto>` | `POST /api/applications/{id}/questions` | pausa a candidatura; a ponte Telegram entrega |
 | `status` | `GET /api/bootstrap` | estado local + estado no app |
 
-O PDF do currículo aprovado sai de `GET /api/resumes/{id}/files/pdf` (não exige token). `submit` sem evidência não é aceito: o app recusa `submitted` fora de `in_progress` e sem `evidence_ref`, e o script recusa antes disso.
+O PDF do currículo aprovado sai de `GET /api/resumes/{id}/files/pdf` (com o token interno, como as demais rotas). Em modo `authorized_auto`, `PATCH /api/applications/{id}` recusa `submitted`/`failed` (`application.internal_route_required`); use as rotas internas acima. `submit` sem evidência não é aceito: o app recusa `submitted` fora de `in_progress` e sem `evidence_ref`, e o script recusa antes disso.
 
 ### Perguntas humanas (dúvida correlacionada)
 
@@ -319,15 +320,15 @@ O PDF do currículo aprovado sai de `GET /api/resumes/{id}/files/pdf` (não exig
 | `POST /api/human-questions/{id}/delivery` | Marca a entrega: `{ "delivered": true, "message_ref": "..." }` ou `{ "delivered": false, "error": "..." }` |
 | `POST /api/human-questions/{id}/answer` | Registra a resposta humana correlacionada àquela pergunta |
 
-Criar a pergunta move a candidatura para `needs_review`; ela volta a `in_progress` quando todas as perguntas obrigatórias estiverem respondidas. A entrega aceita `pending` e `delivery_failed` — um reenvio depois de falha real atualiza a mesma pergunta em vez de duplicá-la — e nunca reabre pergunta `answered` ou `cancelled`. A resposta exige a identidade vinculada (`HERMES_LINKED_RECIPIENT_ID` ou `HERMES_TELEGRAM_CHAT_ID`), só é aceita em `pending` ou `delivered` e é recusada com `human_question.reply_not_correlated` quando `reply_to_message_ref` não corresponde à mensagem entregue. Respostas usam `action: answer`, `skip`, `manual` ou `stop`: `skip` é recusado em pergunta obrigatória, `manual` revoga a autorização e devolve a candidatura ao envio manual e `stop` encerra a execução como `failed`. Uma resposta resolve somente o `human_question_id` correspondente e nunca concede `AUTORIZO`.
+Criar a pergunta move a candidatura para `needs_review`; ela volta a `in_progress` quando todas as perguntas obrigatórias estiverem respondidas. A entrega aceita `pending` e `delivery_failed` — um reenvio depois de falha real atualiza a mesma pergunta em vez de duplicá-la — e nunca reabre pergunta `answered` ou `cancelled`. A resposta exige uma identidade autorizada (`TELEGRAM_ALLOWED_USERS`/`TELEGRAM_HOME_CHANNEL`, nomes oficiais do Hermes; `HERMES_LINKED_RECIPIENT_ID`/`HERMES_TELEGRAM_CHAT_ID` continuam aceitos como fallback), só é aceita em `pending` ou `delivered` e é recusada com `human_question.reply_not_correlated` quando `reply_to_message_ref` não corresponde à mensagem entregue. Respostas usam `action: answer`, `skip`, `manual` ou `stop`: `skip` é recusado em pergunta obrigatória, `manual` revoga a autorização e devolve a candidatura ao envio manual e `stop` encerra a execução como `failed`. Uma resposta resolve somente o `human_question_id` correspondente e nunca concede `AUTORIZO`.
 
-A entrega na conversa do Telegram é feita pela capability já vinculada ao Hermes (`scripts/ops/notify-human-questions.mjs`), que marca esta rota; o plugin não recebe bot token, chat id ou destinatário.
+A entrega na conversa do Telegram é feita por `scripts/ops/notify-human-questions.mjs`, que usa `hermes send --to telegram` (credenciais do gateway do Hermes, sem LLM) e marca esta rota; o Radar não recebe bot token.
 
 ### `POST /api/agent-events`
 
 Endpoint de entrada recomendado para sub-agentes. O campo `event` seleciona um dos formatos abaixo.
 
-`job.discovered` exige `jobs.create`; `job.updated` exige `jobs.enrich`. A credencial HTTP precisa de `jobs.write`, e o corpo precisa identificar uma configuração de agente habilitada. URLs são conferidas contra `allowed_domains`.
+`job.discovered` exige `jobs.create`; `job.updated` exige `jobs.enrich`. A requisição precisa do token interno, e o corpo precisa identificar uma configuração de agente habilitada. URLs são conferidas contra `allowed_domains`.
 
 #### Descoberta: `job.discovered`
 

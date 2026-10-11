@@ -1,61 +1,50 @@
 # Radar de Vagas + Hermes Agent
 
-Dashboard local para descoberta e acompanhamento de vagas, preparação de currículos ATS e registro de candidaturas. A interface usa HTML, CSS e TypeScript; o backend usa SQLite nativo do Node.js 24.
+Dashboard local para descoberta e acompanhamento de vagas, preparação de currículos ATS e registro de candidaturas. A interface usa HTML, CSS e TypeScript; o backend usa SQLite nativo do Node.js (`node:sqlite`, Node 22.16+; `DatabaseSync.isTransaction` é usado nas transações aninhadas).
 
 ## Executar no ambiente Hermes
 
-O processo roda no ambiente existente do Hermes e não cria outro container. Existe uma única instalação com configuração de produção; o usuário não escolhe ambiente ou variante. Requer Node.js 24 ou superior e npm.
+O processo roda no container existente do Hermes Agent como serviço s6 e não cria outro container. Existe uma única instalação com configuração de produção. Requer Node.js 22.16 ou superior (`node:sqlite`; a CI usa Node 24) e npm.
 
 ```bash
 npm ci
 npm test
-RADAR_OPERATOR_ID=operador-responsavel \
-RADAR_DB_PATH=/caminho/persistente/radar.sqlite \
-PORT=8787 npm start
+cp ops/hermes/radar.env.example .env.local && chmod 600 .env.local   # preencha os valores
+sh ops/hermes/radar-s6-run.sh                                        # ou pelo serviço s6
 ```
 
-Não existe login, token de acesso ou chave da API. O Telegram é reutilizado automaticamente da conta/capability já vinculada ao Hermes; não há configuração de bot ou destinatário. O fluxo completo de fontes, Glassdoor e primeiro start está no [`onboarding do Hermes`](hermes-plugin/ONBOARDING.md); o contrato legível pelo host está em [`hermes-plugin/onboarding.json`](hermes-plugin/onboarding.json).
+`ops/hermes/radar.env.example` é o modelo **único** do `.env.local`. A porta canônica é **8787**; uma instalação pode trocá-la definindo `PORT` no `.env.local` — nenhum script usa outro padrão. O passo a passo completo (s6, skill, MCP, navegador, cofre de credenciais, Telegram, watchdog) está em [`ops/hermes/ONBOARDING.md`](ops/hermes/ONBOARDING.md).
 
-O servidor escuta em `0.0.0.0:8787`. Abra `http://IP-DO-HERMES:8787` em qualquer dispositivo da rede doméstica; agentes no mesmo container usam `http://127.0.0.1:8787`. Mantenha o SQLite em armazenamento persistente. Como não há autenticação, restrinja a porta 8787 à LAN no roteador/firewall e nunca faça port forwarding ou exposição direta à internet.
+Instale o app sob `/opt/data` (volume persistente do Hermes, padrão `/opt/data/dashboard/busca_emprego`); `/opt/hermes` é do root e somente leitura na imagem oficial. Mantenha o SQLite em armazenamento persistente.
 
 O banco inicia vazio e o aplicativo não cria dados exemplificativos em nenhuma configuração: vagas, currículos e candidaturas surgem somente de agentes, da importação de rodadas ou do uso real do dashboard. A manutenção legada de anonimização só roda quando solicitada explicitamente com `RADAR_RUN_LEGACY_ANONYMIZATION=true`; não a habilite em produção.
 
-## Instalação atual (esta máquina)
+## Acesso e autenticação
 
-Valores reais desta instalação, diferentes dos padrões de exemplo do Hermes:
+- O servidor escuta em `RADAR_BIND_HOST` (padrão `127.0.0.1`) e só aceita os hosts de `RADAR_ALLOWED_HOSTS` (padrão `127.0.0.1,localhost`).
+- Toda rota `/api/*`, exceto `GET /api/health` e `GET /api/ready`, exige o header `x-radar-service-token` com `RADAR_INTERNAL_SERVICE_TOKEN` (agentes e scripts) **ou** o cookie de sessão do dashboard. Sem token interno configurado, as rotas internas respondem `503 internal_token_not_configured`.
+- O dashboard abre por um link de sessão: `node scripts/ops/dashboard-link.mjs` imprime `http://<host>:<PORT>/auth?token=...` (ou o envia pelo Telegram do Hermes com `--send`); `GET /auth` troca `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` HttpOnly/SameSite=Strict.
+- Rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
+- Detalhes em [`docs/security.md`](docs/security.md).
 
-| Item | Valor |
-| --- | --- |
-| Raiz do repositório | `/opt/data/dashboard/busca_emprego` |
-| Porta | `666` — `http://192.168.1.183:666` na LAN (sem login), `http://127.0.0.1:666` dentro do container |
-| Banco | `data/radar.sqlite` (WAL, `busy_timeout` 5000 ms) |
-| Start | `set -a && . ./.env.local && set +a && npm start` (log em `server-666.log`) |
-| Operador | `RADAR_OPERATOR_ID=operador-local` |
-| Token interno | `RADAR_INTERNAL_SERVICE_TOKEN` em `.env.local` (modo 600); enviado no header `x-radar-service-token` |
-| CLI do Hermes | `/opt/hermes/bin/hermes` (não está no `PATH`) |
-
-As rotas internas (`POST /api/agent-events`, `/api/rounds/*`, `/api/jobs/{id}/score`, `/api/applications/{id}/claim|questions`, `/api/human-questions/{id}/delivery|answer` e `GET /api/authorized-applications`) exigem o token interno. O dashboard aberto na LAN não usa essas rotas e continua funcionando sem login.
-
-Verificação desta instalação:
+Verificação:
 
 ```bash
 node scripts/ops/smoke-agents.mjs                # agentes em instância isolada (mesmo artefato compilado)
-node scripts/ops/live-prod-check.mjs             # token interno, execução de agente e vaga sintética descartada na produção
+node scripts/ops/live-prod-check.mjs             # verificação da instalação de produção
 node scripts/ops/notify-human-questions.mjs      # simulação da entrega Telegram das perguntas humanas
-node scripts/ops/telegram-diagnose.mjs           # capability Telegram do Hermes (sem expor segredo)
+node scripts/ops/telegram-diagnose.mjs           # gateway Telegram do Hermes (sem expor segredo)
 node scripts/ops/apply-authorized.mjs list       # fila de candidaturas autorizadas (executor do Hermes)
 node test/executor.test.mjs                      # guarda do protocolo do executor (claim, URL, evidência, falha)
 ```
 
-MCP e skill locais já registrados: `hermes mcp add radar-vagas --command node --env RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` e `hermes skills trust /opt/data/dashboard/busca_emprego`.
-
-Estado dos gates nesta máquina: `RADAR_AUTO_APPLICATION_ENABLED=true` — o executor existe (`scripts/ops/apply-authorized.mjs`, testado em `test/executor.test.mjs` e provado ao vivo com o Browser Harness do Hermes) e a fila autorizada responde `200` com o token interno (`401` sem ele). A entrega Telegram está vinculada ao chat do operador e o envio real foi confirmado (`hermes send`); sem conversa iniciada com o bot, a entrega de perguntas fica em `delivery_failed` e é reenviada com `--retry-failed`.
+O gate `RADAR_AUTO_APPLICATION_ENABLED` vem desligado; ligue-o somente com o executor testado. Com ele ligado, a fila autorizada exige o token interno.
 
 ## Agentes, permissões e navegação
 
-O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfil de administrador: qualquer dispositivo que alcance a API pode administrar agentes. Cada alteração gera uma versão imutável em rascunho; publicação e rollback são explícitos, e cada execução guarda a versão/snapshot publicado.
+O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfis de usuário: quem tem sessão do dashboard (ou o token interno) administra agentes. Cada alteração gera uma versão imutável em rascunho; publicação e rollback são explícitos, e cada execução guarda a versão/snapshot publicado.
 
-As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. Esses limites funcionais permanecem mesmo sem autenticação HTTP.
+As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. Esses limites funcionais valem além da autenticação HTTP.
 
 `browser.read` é estritamente leitura. Ele não compartilha sessão com o Browser Harness de candidatura e não permite preencher nem enviar formulário. A candidatura automatizada usa executor separado e requer `AUTORIZO` vigente para a vaga e versão exata do currículo; essa confirmação não concede permissões gerais ao agente.
 
@@ -79,12 +68,13 @@ O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcad
 
 ## API Hermes
 
-O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs/agent-api.md). Principais rotas:
+O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs/agent-api.md). Exceto health/ready e `/auth`, todas exigem token interno ou sessão do dashboard. Principais rotas:
 
 | Método | Endpoint | Uso |
 | --- | --- | --- |
 | `GET` | `/api/health` | Verificar se o processo responde |
 | `GET` | `/api/ready` | Verificar banco, ambiente e operador |
+| `GET` | `/auth?token=...` | Trocar `RADAR_DASHBOARD_TOKEN` pelo cookie de sessão do dashboard |
 | `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, métricas e metadados dos PDFs |
 | `POST` | `/api/agent-events` | Registrar vaga descoberta/atualizada ou estado do agente |
 | `POST` | `/api/jobs/{id}/decision` | Registrar decisão explícita do usuário |
@@ -96,32 +86,34 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `GET` | `/api/authorized-applications` | Entregar ao executor apenas candidaturas explicitamente autorizadas |
 | `GET` | `/api/preferences` | Consultar regras, sinais e sugestões de preferências |
 | `POST` | `/api/applications/{id}/questions` | Pausar candidatura por dúvida humana correlacionada |
-| `GET` / `POST` | `/api/sources` | Configurar fontes e referências de credenciais do Hermes |
+| `GET` / `POST` | `/api/sources` | Configurar fontes e a referência de login (sem segredo) |
 | `GET` | `/api/agents/{id}/versions` | Consultar histórico imutável de configuração |
 | `POST` | `/api/agents/{id}/publish` | Publicar um rascunho para novas execuções |
 | `POST` | `/api/agents/{id}/rollback` | Republicar uma configuração anterior como nova versão |
 | `GET` | `/api/jobs/{id}/provenance` | Consultar evidências e conflitos por campo |
 
-Salários precisam de fonte e data verificáveis. Os 16 portais padrão começam ativos; credenciais ficam no Hermes e o banco guarda apenas `secret_ref` ou `browser_profile_id`. Login, MFA ou CAPTCHA pausam somente a execução afetada para ação humana.
+Salários precisam de fonte e data verificáveis. Os 16 portais padrão começam ativos; logins de portais ficam no cofre de credenciais do Hermes (`hermes vault add`) e o banco guarda apenas `secret_ref` ou `browser_profile_id`. Login, MFA ou CAPTCHA pausam somente a execução afetada para ação humana.
 
 ## Hermes via MCP
 
-O dashboard é a fonte de verdade. O Hermes usa o servidor MCP oficial deste projeto e a skill local, sem carregar todas as vagas no contexto de um único agente:
+O dashboard é a fonte de verdade. O Hermes usa o servidor MCP deste projeto e a skill de projeto, sem carregar todas as vagas no contexto de um único agente. Layout:
+
+| Caminho | Uso |
+| --- | --- |
+| `.hermes/skills/radar-vagas/SKILL.md` | Skill de projeto (fonte única); ativada com `hermes skills trust <raiz>` |
+| `hermes/config.example.yaml` | Fragmentos do `config.yaml`: `mcp_servers.radar-vagas` (`tools.include`, `trust: untrusted`), `browser.cdp_url` |
+| `hermes/plugin/` | Pacote portátil Agent Plugins v1 opcional (`plugin.json`, `mcp.json` sem credenciais, `skills/` gerada por `scripts/ops/build-hermes-plugin.mjs`) |
+| `hermes/cron/radar-watchdog.sh` | Watchdog para `hermes cron create "every 10m" --no-agent --script radar-watchdog.sh --deliver telegram` |
 
 ```sh
-npm ci
-npm run build
-RADAR_ROOT="$(pwd)"
-hermes skills trust "$RADAR_ROOT"
-hermes mcp add radar-vagas \
-  --command node \
-  --env RADAR_DB_PATH=/var/lib/hermes/busca-emprego/radar.sqlite \
-  --args "$RADAR_ROOT/dist/src/mcp-server.js"
+npm ci && npm run build
+hermes skills trust /opt/data/dashboard/busca_emprego
+# mescle hermes/config.example.yaml em /opt/data/config.yaml e então:
 hermes mcp test radar-vagas
 ```
 
-Cada coletor usa contexto novo e uma única fonte. Normalizador, pesquisa salarial, avaliação, entrevista, currículo ATS, revisão e candidatura permanecem papéis separados. A entrevista faz uma pergunta por mensagem, oferece alternativas e inclui `Outro` para resposta livre.
+Com `trust: untrusted`, toda ferramenta MCP que grava pede aprovação humana antes de rodar. Cada coletor usa contexto novo e uma única fonte. Normalizador, pesquisa salarial, avaliação, entrevista, currículo ATS, revisão e candidatura permanecem papéis separados. A entrevista faz uma pergunta por mensagem, oferece alternativas e inclui `Outro` para resposta livre.
 
 ## Operação
 
-O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` executa também E2E HTTP, segurança, carga de 10 fontes/500 resultados/20 workers e restore. Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A ativação continua bloqueada até conectar endpoints, perfis e secrets reais do Hermes e executar os testes no mesmo artefato de produção.
+O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` executa também E2E HTTP, segurança, carga de 10 fontes/500 resultados/20 workers e restore. Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A ativação continua bloqueada até configurar skill, MCP, navegador, cofre e Telegram do Hermes conforme o onboarding e executar os testes no mesmo artefato de produção.

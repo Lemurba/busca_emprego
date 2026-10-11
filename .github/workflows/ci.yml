@@ -17,29 +17,51 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions fixadas por SHA de commit (tags são mutáveis).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Auditar dependências de produção
+        run: npm audit --omit=dev --audit-level=high
+      # npm test já executa test/ops.test.mjs (backup/restore SQLite).
       - run: npm test
-      - name: Instalar e testar plugin Hermes
-        working-directory: hermes-plugin
-        run: npm ci && npm test
-      - name: Testar backup e restore SQLite
-        run: node test/ops.test.mjs
+      - name: Smoke dos agentes (instância isolada)
+        run: node scripts/ops/smoke-agents.mjs
       - name: Validar CLIs operacionais
         run: |
           node scripts/ops/backup-sqlite.mjs --help
           node scripts/ops/restore-sqlite.mjs --help
           node scripts/ops/health-check.mjs --help
+      - name: Conferir pacote Hermes (skill em sincronia, JSON e shell válidos)
+        run: |
+          node scripts/ops/build-hermes-plugin.mjs --check
+          for f in hermes/plugin/plugin.json hermes/plugin/mcp.json; do
+            node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$f"
+          done
+          for f in hermes/cron/*.sh ops/hermes/*.sh; do sh -n "$f"; done
       - name: Verificar ausência de secrets versionados
         run: |
-          # Mira valor atribuído, não o identificador: código que apenas lê a variável de
-          # ambiente (ex.: scripts/ops/telegram-diagnose.mjs) não é secret versionado, mas
-          # qualquer `NOME=valor` plausível continua barrado.
-          if git grep -nE '(TELEGRAM_BOT_TOKEN|GLASSDOOR_PASSWORD)[[:space:]]*[=:][[:space:]]*[[:punct:]]?[A-Za-z0-9_:-]{16,}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer [A-Za-z0-9_-]{24,}' -- ':!package-lock.json' ':!.github/workflows/ci.yml'; then
+          # Procura VALORES atribuídos, não identificadores: código que só lê a variável de
+          # ambiente não é secret versionado, mas qualquer `NOME=valor` plausível é barrado.
+          # Lockfiles ficam de fora (hashes de integridade geram falsos positivos).
+          names='TELEGRAM_BOT_TOKEN|RADAR_INTERNAL_SERVICE_TOKEN|RADAR_DASHBOARD_TOKEN|GLASSDOOR_PASSWORD|AWS_SECRET_ACCESS_KEY'
+          patterns=(
+            "(${names})[[:space:]]*[=:][[:space:]]*[\"']?[A-Za-z0-9_:+/-]{16,}"
+            '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+            '(AKIA|ASIA)[0-9A-Z]{16}'
+            '[0-9]{8,10}:[A-Za-z0-9_-]{35}'
+            'Bearer [A-Za-z0-9_-]{24,}'
+          )
+          found=0
+          for pattern in "${patterns[@]}"; do
+            if git grep -nE -e "$pattern" -- . ':!package-lock.json' ':!**/package-lock.json' ':!npm-shrinkwrap.json' ':!.github/workflows/ci.yml'; then
+              found=1
+            fi
+          done
+          if [ "$found" -ne 0 ]; then
             echo 'Possível secret versionado' >&2
             exit 1
           fi

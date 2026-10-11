@@ -642,3 +642,19 @@ body[data-theme="dark"] .leaflet-popup-tip { color: var(--ink); background: #131
 @media (hover: none) {
   .chart-control[data-tooltip]::after { display: none; }
 }
+
+/* Acesso (sessão do dashboard) */
+#logout-button { width: auto; padding: 0 10px; font-size: var(--type-sm); font-weight: 600; }
+body.auth-required .app-shell,
+body.auth-required .mobile-tabbar { display: none; }
+.auth-screen { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 16px; background: var(--soft); }
+.auth-screen[hidden] { display: none; }
+.auth-card { max-width: 440px; width: 100%; padding: 28px 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--white); box-shadow: var(--shadow); text-align: center; }
+.auth-card h1 { margin: 10px 0 8px; font-size: 22px; }
+.auth-card p { margin: 0 0 12px; color: var(--muted); }
+.auth-card .auth-hint { font-size: var(--type-sm); }
+.auth-card code, .field-hint code { overflow-wrap: anywhere; }
+.field-hint { display: block; margin-top: 6px; color: var(--muted); font-size: var(--type-sm); }
+.link-blocked { opacity: .6; cursor: not-allowed; text-decoration: line-through; }
+body[data-theme="dark"] .auth-screen { background: #0b1120; }
+body[data-theme="dark"] .auth-card { background: #121a2c; border-color: #26324a; }

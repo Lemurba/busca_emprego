@@ -12,15 +12,17 @@
  *   2. claim   → reserva a candidatura com o nonce da fila (status in_progress)
  *   3. verify  → confere a URL observada contra o hash autorizado (mesma
  *                canonicalização do app, importada de dist/src/domain.js)
- *   4. submit  → registra o envio COM evidência (recusa sem --evidence-ref)
- *      fail    → registra falha higienizada (a vaga volta para revisão)
+ *   4. submit  → registra o envio COM evidência e URL observada pela rota interna
+ *                POST /api/applications/{id}/submit (contrato C1); recusa sem
+ *                --evidence-ref, sem --observed-url ou com URL divergente da autorizada
+ *      fail    → POST /api/applications/{id}/fail: falha higienizada (volta para revisão)
  *      ask     → abre pergunta humana (a ponte Telegram entrega)
  *
  * Uso:
  *   node scripts/ops/apply-authorized.mjs list [--json]
  *   node scripts/ops/apply-authorized.mjs claim  --application <id> [--worker <id>]
  *   node scripts/ops/apply-authorized.mjs verify --application <id> --observed-url <url>
- *   node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <ref> [--observed-url <url>] [--step <texto>]
+ *   node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <ref> --observed-url <url>
  *   node scripts/ops/apply-authorized.mjs fail   --application <id> --reason <codigo>
  *   node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref <campo> --question <texto> [--choices "a,b"]
  *   node scripts/ops/apply-authorized.mjs status --application <id>
@@ -28,10 +30,14 @@
  * `--dry-run` mostra o corpo que seria enviado sem chamar a rota.
  *
  * Variáveis:
- *   RADAR_BASE_URL                 base do Radar (padrão: PORT de .env.local em 127.0.0.1)
- *   RADAR_INTERNAL_SERVICE_TOKEN   token interno (padrão: lido de .env.local)
+ *   RADAR_BASE_URL                 base do Radar (padrão: http://127.0.0.1:$PORT; PORT do env/.env.local, 8787)
+ *   RADAR_INTERNAL_SERVICE_TOKEN   token interno (env ou .env.local) — obrigatório, enviado sempre
+ *   RADAR_EXECUTOR_STATE_DIR       diretório do estado local (padrão: .radar/executor)
  *   RADAR_EXECUTOR_WORKER_ID       identidade do executor (padrão: RADAR_OPERATOR_ID)
  *   RADAR_FORWARDED_PROTO          ex.: "https" quando o processo exige TLS de proxy
+ *
+ * `--application` precisa casar com ^[A-Za-z0-9_-]{1,128}$ (o id vira nome de arquivo e
+ * segmento de URL; nada fora do diretório de estado é lido ou gravado).
  *
  * Estado local: .radar/executor/<application_id>.json guarda a autorização usada no
  * claim (URL, hash, currículo e versão, worker). `submit`/`fail`/`ask` recusam
@@ -49,17 +55,26 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
+const unquote = (raw) => {
+  const value = raw.trim();
+  return /^(["']).*\1$/su.test(value) ? value.slice(1, -1) : value;
+};
+
 function readLocalEnv() {
   const path = resolve(repoRoot, ".env.local");
   if (!existsSync(path)) return {};
   return Object.fromEntries(
     readFileSync(path, "utf8").split("\n")
       .filter((line) => line.includes("=") && !line.trim().startsWith("#"))
-      .map((line) => [line.slice(0, line.indexOf("=")).trim(), line.slice(line.indexOf("=") + 1).trim()]),
+      .map((line) => [line.slice(0, line.indexOf("=")).replace(/^\s*export\s+/u, "").trim(), unquote(line.slice(line.indexOf("=") + 1))]),
   );
 }
 
 const localEnv = readLocalEnv();
+const env = (name) => {
+  const fromProcess = process.env[name];
+  return fromProcess != null && fromProcess !== "" ? fromProcess : (localEnv[name] ?? "");
+};
 const argv = process.argv.slice(2);
 const command = argv.find((item) => !item.startsWith("--")) ?? "list";
 const flag = (name) => argv.includes(name);
@@ -70,22 +85,24 @@ const value = (name, fallback) => {
 
 const asJson = flag("--json");
 const dryRun = flag("--dry-run");
-const base = value("--base", process.env.RADAR_BASE_URL ?? `http://127.0.0.1:${localEnv.PORT ?? 8787}`);
-const token = process.env.RADAR_INTERNAL_SERVICE_TOKEN ?? localEnv.RADAR_INTERNAL_SERVICE_TOKEN ?? "";
+const base = value("--base", process.env.RADAR_BASE_URL || `http://127.0.0.1:${env("PORT") || 8787}`).replace(/\/+$/u, "");
+const token = env("RADAR_INTERNAL_SERVICE_TOKEN");
 const forwardedProto = value("--forwarded-proto", process.env.RADAR_FORWARDED_PROTO ?? "");
-const workerId = value("--worker", process.env.RADAR_EXECUTOR_WORKER_ID ?? process.env.RADAR_OPERATOR_ID ?? localEnv.RADAR_OPERATOR_ID ?? "hermes-executor");
+const workerId = value("--worker", process.env.RADAR_EXECUTOR_WORKER_ID || env("RADAR_OPERATOR_ID") || "hermes-executor");
 const applicationId = value("--application", "");
-const stateDir = process.env.RADAR_EXECUTOR_STATE_DIR ?? resolve(repoRoot, ".radar/executor");
+const stateDir = resolve(process.env.RADAR_EXECUTOR_STATE_DIR || resolve(repoRoot, ".radar/executor"));
+const APPLICATION_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 
 const headers = {
   "content-type": "application/json",
-  ...(token ? { "x-radar-service-token": token } : {}),
+  "x-radar-service-token": token,
   ...(forwardedProto ? { "x-forwarded-proto": forwardedProto } : {}),
 };
 
 const out = (payload) => { if (asJson) console.log(JSON.stringify(payload, null, 2)); };
 const fail = (message, code = 1) => { console.error(`erro: ${message}`); out({ ok: false, error: message }); process.exit(code); };
 
+if (!token) fail("RADAR_INTERNAL_SERVICE_TOKEN ausente (env ou .env.local) — as rotas internas exigem o token.", 2);
 if (!existsSync(resolve(repoRoot, "dist/src/domain.js"))) fail("dist/ ausente — rode `npm run build` antes de usar o executor.", 2);
 const { canonicalizeJobUrl } = await import(`../../dist/src/domain.js`);
 
@@ -99,7 +116,14 @@ const call = async (method, path, body) => {
   return { status: res.status, data };
 };
 
-const statePath = (id) => resolve(stateDir, `${id}.json`);
+const statePath = (id) => {
+  if (!APPLICATION_ID.test(String(id))) fail("--application inválido (use ^[A-Za-z0-9_-]{1,128}$).");
+  const path = resolve(stateDir, `${id}.json`);
+  if (dirname(path) !== stateDir) fail("caminho de estado fora do diretório do executor — recusado.");
+  return path;
+};
+const appPath = (id, suffix = "") => `/api/applications/${encodeURIComponent(id)}${suffix}`;
+const urlHash = (url) => createHash("sha256").update(canonicalizeJobUrl(String(url))).digest("hex");
 const readState = (id) => {
   const path = statePath(id);
   if (!existsSync(path)) fail(`sem claim registrado para ${id} — rode \`claim\` antes (arquivo esperado: ${path}).`);
@@ -123,7 +147,8 @@ const ttlMinutes = (expiresAt) => Math.max(0, Math.round((new Date(String(expire
 
 if (command === "list") {
   const items = await queue();
-  if (asJson) { out({ ok: true, base, total: items.length, applications: items }); process.exit(0); }
+  // O nonce só é usado internamente pelo claim; nunca vai para a saída.
+  if (asJson) { out({ ok: true, base, total: items.length, applications: items.map(({ nonce, ...item }) => ({ ...item, nonce_prefix: `${String(nonce ?? "").slice(0, 8)}…` })) }); process.exit(0); }
   console.log(`base: ${base} | fila autorizada: ${items.length}`);
   for (const item of items) {
     console.log(`\n${item.id}\n  vaga: ${item.job_title} — ${item.job_company}\n  url autorizada: ${item.application_url}`
@@ -136,14 +161,15 @@ if (command === "list") {
 }
 
 if (!applicationId) fail("--application <id> é obrigatório para este comando.");
+if (!APPLICATION_ID.test(applicationId)) fail("--application inválido (use ^[A-Za-z0-9_-]{1,128}$).");
 
 if (command === "claim") {
   const items = await queue();
   const entry = entryOf(items, applicationId);
   if (!entry) fail(`candidatura ${applicationId} não está na fila autorizada (autorização ausente, expirada ou já reservada).`);
   const payload = { worker_id: workerId, nonce: String(entry.nonce) };
-  if (dryRun) { out({ ok: true, dry_run: true, path: `/api/applications/${applicationId}/claim`, payload: { ...payload, nonce: `${payload.nonce.slice(0, 8)}…` } }); process.exit(0); }
-  const res = await call("POST", `/api/applications/${applicationId}/claim`, payload);
+  if (dryRun) { out({ ok: true, dry_run: true, path: appPath(applicationId, "/claim"), payload: { ...payload, nonce: `${payload.nonce.slice(0, 8)}…` } }); process.exit(0); }
+  const res = await call("POST", appPath(applicationId, "/claim"), payload);
   if (res.status !== 200) fail(`claim recusado: HTTP ${res.status} ${JSON.stringify(res.data)}`, 1);
   writeState(applicationId, {
     application_id: applicationId,
@@ -156,7 +182,7 @@ if (command === "claim") {
     resume_version: entry.resume_version,
     expires_at: entry.expires_at,
   });
-  const resumeUrl = `${base}/api/resumes/${entry.resume_id}/files/pdf`;
+  const resumeUrl = `${base}/api/resumes/${encodeURIComponent(String(entry.resume_id))}/files/pdf`;
   out({ ok: true, application_id: applicationId, status: res.data?.status, application_url: entry.application_url, resume_pdf: resumeUrl, expires_at: entry.expires_at });
   if (!asJson) {
     console.log(`claim ok — candidatura ${applicationId} em andamento (worker ${workerId})`);
@@ -166,7 +192,7 @@ if (command === "claim") {
     console.log(`  2. preencher o formulário com o currículo aprovado e enviar o PDF`);
     console.log("  3. capturar a evidência do envio (URL de confirmação/protocolo) e rodar:");
     console.log(`     verify --application ${applicationId} --observed-url <url final>`);
-    console.log(`     submit --application ${applicationId} --evidence-ref <referência observada>`);
+    console.log(`     submit --application ${applicationId} --evidence-ref <referência observada> --observed-url <url final>`);
   }
   process.exit(0);
 }
@@ -191,20 +217,18 @@ if (command === "verify") {
 if (command === "submit") {
   const state = readState(applicationId);
   const evidenceRef = value("--evidence-ref", "").trim();
-  const observed = value("--observed-url", "");
+  const observed = value("--observed-url", "").trim();
   if (!evidenceRef || evidenceRef.length < 6) fail("--evidence-ref é obrigatório (referência observada no portal; mínimo 6 caracteres).");
-  if (observed) {
-    const authorized = canonicalizeJobUrl(String(state.application_url));
-    if (canonicalizeJobUrl(observed) !== authorized) fail(`URL observada divergente da autorizada — envio não registrado (autorizada: ${authorized}).`);
+  if (!observed) fail("--observed-url é obrigatório para submit (URL final observada no portal; conferida contra o hash autorizado).");
+  if (String(state.worker_id) !== workerId) fail(`claim local pertence ao worker ${state.worker_id}, não a ${workerId} — envio não registrado.`);
+  let observedHash = "";
+  try { observedHash = urlHash(observed); } catch { fail("--observed-url inválida — envio não registrado."); }
+  if (observedHash !== String(state.application_url_hash) || observedHash !== urlHash(state.application_url)) {
+    fail(`URL observada divergente da autorizada — envio não registrado (autorizada: ${canonicalizeJobUrl(String(state.application_url))}).`);
   }
-  const payload = {
-    status: "submitted",
-    submitted_at: new Date().toISOString(),
-    evidence_ref: evidenceRef.slice(0, 200),
-    current_step: value("--step", "Envio confirmado pelo executor autorizado"),
-  };
-  if (dryRun) { out({ ok: true, dry_run: true, path: `/api/applications/${applicationId}`, payload }); process.exit(0); }
-  const res = await call("PATCH", `/api/applications/${applicationId}`, payload);
+  const payload = { worker_id: workerId, evidence_ref: evidenceRef.slice(0, 500), observed_url: observed };
+  if (dryRun) { out({ ok: true, dry_run: true, path: appPath(applicationId, "/submit"), payload }); process.exit(0); }
+  const res = await call("POST", appPath(applicationId, "/submit"), payload);
   if (res.status !== 200) fail(`envio não registrado: HTTP ${res.status} ${JSON.stringify(res.data)}`, 1);
   out({ ok: true, application_id: applicationId, status: res.data?.status, evidence_ref: res.data?.evidence_ref });
   if (!asJson) console.log(`envio registrado — candidatura ${applicationId}: ${res.data?.status} | evidência: ${res.data?.evidence_ref}`);
@@ -212,12 +236,13 @@ if (command === "submit") {
 }
 
 if (command === "fail") {
-  readState(applicationId);
+  const state = readState(applicationId);
   const reason = value("--reason", "").trim().replace(/\s+/gu, " ").slice(0, 120);
   if (!reason) fail("--reason <codigo> é obrigatório (ex.: captcha_manual, portal_offline, formulario_mudou).");
-  const payload = { status: "failed", current_step: `Falha no envio autorizado: ${reason}` };
-  if (dryRun) { out({ ok: true, dry_run: true, path: `/api/applications/${applicationId}`, payload }); process.exit(0); }
-  const res = await call("PATCH", `/api/applications/${applicationId}`, payload);
+  if (String(state.worker_id) !== workerId) fail(`claim local pertence ao worker ${state.worker_id}, não a ${workerId} — falha não registrada.`);
+  const payload = { worker_id: workerId, reason };
+  if (dryRun) { out({ ok: true, dry_run: true, path: appPath(applicationId, "/fail"), payload }); process.exit(0); }
+  const res = await call("POST", appPath(applicationId, "/fail"), payload);
   if (res.status !== 200) fail(`falha não registrada: HTTP ${res.status} ${JSON.stringify(res.data)}`, 1);
   out({ ok: true, application_id: applicationId, status: res.data?.status });
   if (!asJson) console.log(`falha registrada — candidatura ${applicationId}: ${res.data?.status} (${reason}); a vaga volta para revisão humana.`);
@@ -235,8 +260,8 @@ if (command === "ask") {
     ...(choices.length ? { choices } : {}),
     ...(value("--step", "") ? { step: value("--step", "") } : {}),
   };
-  if (dryRun) { out({ ok: true, dry_run: true, path: `/api/applications/${applicationId}/questions`, payload }); process.exit(0); }
-  const res = await call("POST", `/api/applications/${applicationId}/questions`, payload);
+  if (dryRun) { out({ ok: true, dry_run: true, path: appPath(applicationId, "/questions"), payload }); process.exit(0); }
+  const res = await call("POST", appPath(applicationId, "/questions"), payload);
   if (res.status !== 201) fail(`pergunta não criada: HTTP ${res.status} ${JSON.stringify(res.data)}`, 1);
   out({ ok: true, application_id: applicationId, question_id: res.data?.id, status: res.data?.status });
   if (!asJson) {

@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 function usage(exitCode = 0) {
-  console.log(`Uso: node scripts/ops/backup-sqlite.mjs [--db CAMINHO] [--out DIRETORIO]\n\n` +
+  console.log(`Uso: node scripts/ops/backup-sqlite.mjs [--db CAMINHO] [--out DIRETORIO] [--timeout-ms N]\n\n` +
     `Variáveis equivalentes: RADAR_DB_PATH e RADAR_BACKUP_DIR.\n` +
     `Cria um snapshot SQLite consistente com VACUUM INTO, valida-o e grava manifesto SHA-256.`);
   process.exit(exitCode);
@@ -22,6 +22,12 @@ function option(name, fallback) {
 if (process.argv.includes("--help") || process.argv.includes("-h")) usage();
 
 const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));
+const timeoutValue = option("--timeout-ms", "10000");
+const timeoutMs = Number(timeoutValue);
+if (!/^\d+$/u.test(String(timeoutValue)) || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+  console.error(JSON.stringify({ ok: false, error: "invalid_numeric_argument", argument: "--timeout-ms", message: "--timeout-ms precisa ser um inteiro positivo (ms)" }));
+  process.exit(1);
+}
 const backupDir = resolve(option("--out", process.env.RADAR_BACKUP_DIR ?? join(dirname(dbPath), "backups")));
 
 if (!existsSync(dbPath) || !statSync(dbPath).isFile()) {
@@ -39,7 +45,7 @@ const manifestPath = `${finalPath}.json`;
 let source;
 let snapshot;
 try {
-  source = new DatabaseSync(dbPath, { timeout: 10_000 });
+  source = new DatabaseSync(dbPath, { timeout: timeoutMs });
   const sourceCheck = source.prepare("PRAGMA quick_check").all();
   if (sourceCheck.length !== 1 || sourceCheck[0].quick_check !== "ok") throw new Error("source_integrity_check_failed");
   source.prepare("VACUUM INTO ?").run(tempPath);

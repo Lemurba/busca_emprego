@@ -7,7 +7,7 @@
     <meta name="description" content="Dashboard leve para descobrir, avaliar e acompanhar vagas." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
     <title>Radar de Vagas</title>
   </head>
   <body>
@@ -43,6 +43,7 @@
             <span class="sync-status"><i></i><span id="sync-label">SQLite local</span></span>
             <button class="icon-button" id="theme-toggle" title="Alternar tema" aria-label="Alternar tema" aria-pressed="false">◐</button>
             <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
+            <button class="icon-button" id="logout-button" title="Sair" aria-label="Sair do dashboard">Sair</button>
             <button class="primary-button compact" id="top-add-job" data-action="add-job"><span>＋</span> Nova vaga</button>
           </div>
         </header>
@@ -71,9 +72,18 @@
     </div>
     <button class="mobile-sheet-backdrop" data-close-mobile-more aria-label="Fechar mais opções" hidden></button>
 
+    <section id="auth-screen" class="auth-screen" role="dialog" aria-modal="true" aria-labelledby="auth-title" hidden>
+      <div class="auth-card">
+        <span class="brand-mark" aria-hidden="true">◈</span>
+        <h1 id="auth-title">Acesso ao Radar de Vagas</h1>
+        <p>Sua sessão não foi encontrada ou expirou. Abra o <strong>link de acesso enviado pelo Hermes</strong> no Telegram neste navegador.</p>
+        <p class="auth-hint">Sem o link? Na máquina do Radar, rode <code>node scripts/ops/dashboard-link.mjs --send</code> para receber um novo pelo Telegram.</p>
+        <button class="primary-button" id="auth-retry" type="button">Tentar novamente</button>
+      </div>
+    </section>
+
     <div id="modal-root" class="modal-root" hidden></div>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

@@ -11,20 +11,23 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 ## CI e qualidade
 
 - [ ] GitHub Actions verde no commit exato
-- [ ] `npm test` e `node test/ops.test.mjs` verdes
+- [ ] `npm test` verde (inclui `test/ops.test.mjs`) e `npm audit --omit=dev --audit-level=high` sem achados
+- [ ] `node scripts/ops/build-hermes-plugin.mjs --check` verde (skill do pacote Hermes em sincronia)
 - [ ] Cobertura >=80% nos módulos exigidos pelo SDD, com relatório anexado
 - [ ] Todos os cenários BDD/TDD obrigatórios executados sem skip
 - [ ] Teste de carga 10 fontes/500 resultados/20 workers aprovado no ambiente de referência
 
 ## Segurança e secrets
 
-- [ ] Porta 8787 acessível pela LAN confiável e bloqueada na WAN, sem port forwarding ou UPnP
-- [ ] Dashboard e API abrem sem login/token em outro dispositivo doméstico; risco de controle total pela LAN foi aceito
+- [ ] Porta do Radar (padrão 8787) escutando em `RADAR_BIND_HOST` esperado e bloqueada na WAN, sem port forwarding ou UPnP
+- [ ] `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_DASHBOARD_TOKEN` definidos em `.env.local` (modo 600), gerados na máquina e nunca impressos
+- [ ] `/api/*` (exceto health/ready) responde 401 sem token nem sessão; link de `scripts/ops/dashboard-link.mjs` abre o dashboard
+- [ ] Host fora de `RADAR_ALLOWED_HOSTS` e `Origin` divergente são recusados
 - [ ] `browser.read`, `jobs.create`, `jobs.enrich` e `salary.lookup` são negados por padrão e conferidos em cada operação
 - [ ] `source_ids` e `allowed_domains` permanecem distintos; `browser_enabled` com allowlist vazia é rejeitado
 - [ ] URLs de criação, enriquecimento, salário e evidência fora da allowlist, inclusive após redirect, são rejeitadas
 - [ ] Nenhum secret, CV, prompt integral ou dado pessoal nos logs/build/artefatos
-- [ ] Credenciais injetadas pelo secret store do Hermes, com rotação e responsáveis definidos
+- [ ] Logins de portais no cofre do Hermes (`hermes vault add`), bot token só em `/opt/data/.env`; rotação e responsáveis definidos
 - [ ] Dashboard não exposto à internet; HTTP privado ou TLS/proxy doméstico validado
 - [ ] Permissões do volume e banco restritas ao usuário do processo
 
@@ -38,7 +41,7 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 
 ## Telegram e candidaturas
 
-- [ ] Capability e identidade Telegram são herdadas do vínculo do Hermes; nenhum bot token, chat ID ou destinatário é configurado no plugin
+- [ ] Telegram pelo gateway do Hermes (`TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL`); nenhum bot token no repositório ou no `.env.local`
 - [ ] Chat/usuário autorizado validado no ambiente real
 - [ ] Pergunta vinculada a uma única vaga/campo e resposta ambígua não libera execução
 - [ ] Falha/timeout mantém `needs_review` e impede submissão
@@ -55,6 +58,13 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 - [ ] `source_url` e `application_url` têm botões/rótulos distintos; não existe fallback silencioso entre eles
 - [ ] Todo campo produzido por agente possui proveniência/evidência com URL, horário, agente e execução
 - [ ] Conflito não sobrescreve dado humano/mais confiável; histórico superseded/stale permanece inspecionável
+
+## Hermes
+
+- [ ] Skill `radar-vagas` carregada (`hermes skills trust` ou pacote `hermes/plugin` habilitado — não os dois)
+- [ ] `mcp_servers.radar-vagas` com `tools.include` e `trust: untrusted`; `hermes mcp test radar-vagas` verde
+- [ ] `browser.cdp_url` aponta para o Chrome do serviço; nenhum navegador paralelo para candidatura
+- [ ] Watchdog `radar-watchdog.sh` instalado em `/opt/data/scripts` e agendado com `hermes cron create ... --no-agent`; silencioso com o app no ar
 
 ## Dados, backup e rollback
 
