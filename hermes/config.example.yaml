@@ -7,6 +7,7 @@
 # Pré-requisito em ~/.hermes/.env (não secreto, mas por máquina):
 #   RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
 #   RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+#   RADAR_AUTO_APPLICATION_ENABLED=false   # "true" só com executor testado
 # TELEGRAM_ALLOWED_USERS / TELEGRAM_HOME_CHANNEL já são definidos pelo setup do Telegram do Hermes.
 #
 # Depois de mesclar: `hermes mcp test radar-vagas`.
@@ -22,32 +23,36 @@ mcp_servers:
       RADAR_ENVIRONMENT: production
       TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
       TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
+      # Gate da candidatura automática: sem "true" a fila, claim/verify/submit/fail e as
+      # perguntas humanas respondem automation_disabled.
+      RADAR_AUTO_APPLICATION_ENABLED: "${env:RADAR_AUTO_APPLICATION_ENABLED}"
     # untrusted: toda ferramenta sem `readOnlyHint: true` pede aprovação antes de rodar e
     # falha fechada onde ninguém pode aprovar (cron, execução desassistida).
     # "MCP Config Reference" → "Server keys" → `trust`.
     trust: untrusted
     tools:
       # Só estas ferramentas são registradas ("MCP Config Reference" → "Filtering semantics").
-      # Nomes ainda não implementados no servidor são simplesmente ignorados até existirem.
+      # A lista é exatamente a registrada em src/mcp-server.ts (RADAR_MCP_TOOLS); o teste
+      # test/mcp-server.test.mjs falha se divergirem.
       include:
-        # existentes (src/mcp-server.ts)
+        # leitura (readOnlyHint: não pedem aprovação)
         - radar_list_agents
         - radar_list_sources
         - radar_get_job
+        - radar_list_authorized_applications
+        - radar_verify_application
+        - radar_list_open_questions
+        # escrita (exigem agent_id de agente publicado/ativo com o escopo do papel)
         - radar_discover_job
         - radar_enrich_job
         - radar_create_resume
         - radar_propose_agent_prompt
-        - radar_list_authorized_applications
-        # planejadas
-        - radar_list_open_questions
-        - radar_answer_question
         - radar_record_score
         - radar_claim_application
-        - radar_verify_application
         - radar_submit_application
         - radar_fail_application
         - radar_ask_human
+        - radar_answer_question
       resources: false
       prompts: false
 
