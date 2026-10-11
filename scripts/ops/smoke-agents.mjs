@@ -509,7 +509,8 @@ try {
   const shimOut = join(directory, "telegram-shim.ndjson");
   const notifyEnv = (extra = {}) => ({
     ...process.env, RADAR_BASE_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_OPERATOR_ID: "smoke-operator",
-    RADAR_FORWARDED_PROTO: "https", RADAR_TELEGRAM_SEND_COMMAND: `${process.execPath} ${shimPath}`, ...extra,
+    RADAR_FORWARDED_PROTO: "https", RADAR_TELEGRAM_SEND_COMMAND: JSON.stringify([process.execPath, shimPath]),
+    RADAR_NOTIFY_LOCK: join(directory, "notify.lock"), RADAR_TELEGRAM_REFS_PATH: join(directory, "telegram-refs.json"), ...extra,
   });
   const runNotify = (env, ...flags) => spawnSync(
     process.execPath, ["scripts/ops/notify-human-questions.mjs", "--send", ...flags],
@@ -580,8 +581,10 @@ try {
   });
 
   await t("envio registrado com evidência e vaga marcada como candidatada", async () => {
-    const r = await api("PATCH", `/api/applications/${applicationId}`, {
-      status: "submitted", submitted_at: new Date().toISOString(), evidence_ref: "portal:smoke:confirmation",
+    // C1: envio autorizado só pela rota interna, com o worker do claim e a URL observada.
+    const authorizedUrl = expect("job", await api("GET", `/api/jobs/${job0}`), 200).application_url;
+    const r = await api("POST", `/api/applications/${applicationId}/submit`, {
+      worker_id: "smoke-worker", evidence_ref: "portal:smoke:confirmation", observed_url: authorizedUrl,
     });
     const application = expect("enviar", r, 200);
     assert.equal(application.status, "submitted");
