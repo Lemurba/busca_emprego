@@ -1,4 +1,5 @@
-// Diagnóstico da capability Telegram do Hermes (nunca imprime o token nem o chat id).
+// Diagnóstico da capability Telegram do Hermes (nunca imprime o token nem o chat id
+// completo: ids aparecem mascarados, só com os 3 últimos dígitos).
 //
 // Uso:
 //   node scripts/ops/telegram-diagnose.mjs            # getMe + conferência do home channel
@@ -12,14 +13,29 @@
 import { readFileSync } from "node:fs";
 
 const envFile = process.env.HERMES_ENV_FILE ?? "/opt/data/.env";
-const env = Object.fromEntries(
-  readFileSync(envFile, "utf8").split("\n")
-    .filter((line) => line.includes("=") && !line.trim().startsWith("#"))
-    .map((line) => [line.slice(0, line.indexOf("=")).trim(), line.slice(line.indexOf("=") + 1).trim()]),
-);
+function readEnvFile(path) {
+  const vars = {};
+  for (const raw of readFileSync(path, "utf8").split(/\r?\n/u)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
+    if (!match || raw.trim().startsWith("#")) continue;
+    let value = match[2];
+    if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
+    vars[match[1]] = value;
+  }
+  return vars;
+}
+
+const env = readEnvFile(envFile);
 const token = env.TELEGRAM_BOT_TOKEN;
-const home = process.env.TELEGRAM_CHAT_ID ?? env.TELEGRAM_HOME_CHANNEL;
-const allowed = env.TELEGRAM_ALLOWED_USERS;
+const home = process.env.TELEGRAM_CHAT_ID ?? env.TELEGRAM_HOME_CHANNEL ?? env.HERMES_TELEGRAM_CHAT_ID;
+const allowed = env.TELEGRAM_ALLOWED_USERS ?? env.HERMES_LINKED_RECIPIENT_ID;
+// Mantém sinal e os 3 últimos dígitos: suficiente para conferir, inútil para endereçar.
+const maskChatId = (value) => {
+  const text = String(value ?? "");
+  const sign = text.startsWith("-") ? "-" : "";
+  const digits = sign ? text.slice(1) : text;
+  return digits.length <= 3 ? `${sign}***` : `${sign}${"*".repeat(digits.length - 3)}${digits.slice(-3)}`;
+};
 const looksLikeChatId = (value) => /^-?\d{6,}$/.test(String(value ?? ""));
 
 console.log(`arquivo: ${envFile}`);
@@ -58,6 +74,6 @@ if (process.argv.includes("--updates")) {
       if (c) chats.set(c.id, `${c.type}${c.username ? ` @${c.username}` : ""}`);
     }
     console.log(`getUpdates: ${chats.size} conversa(s) visível(is)${chats.size ? ` — ids com ${String([...chats.keys()][0]).length} caracteres` : ""}`);
-    for (const [id, label] of chats) console.log(`  ${id} (${label})${String(id) === String(home) ? "  <-- coincide com o home channel" : ""}`);
+    for (const [id, label] of chats) console.log(`  ${maskChatId(id)} (${label})${String(id) === String(home) ? "  <-- coincide com o home channel" : ""}`);
   }
 }
