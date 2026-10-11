@@ -89,6 +89,8 @@ async function preparedApplication(label, applicationUrl) {
   })).data;
   await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: `CV ${label}`, content: "Experiência confirmada" })).data;
+  // SDD-ATS-003: APROVO requires an ATS review of the current version for every resume.
+  await api("POST", `/api/resumes/${resume.id}/review`, { verdict: "pass" });
   await api("POST", `/api/resumes/${resume.id}/approve`, { confirmation: "APROVO" });
   const application = (await api("POST", "/api/applications", { job_id: job.id, resume_id: resume.id })).data;
   await api("POST", `/api/applications/${application.id}/authorize-auto`, { resume_id: resume.id, confirmation: "AUTORIZO" });
