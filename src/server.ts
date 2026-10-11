@@ -3,8 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as db from "./db.js";
-import { addProfileFact, answerHumanQuestion, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { addProfileFact, answerHumanQuestion, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -141,14 +140,6 @@ type Route = { method: string; pattern: RegExp; handler: (ctx: Ctx) => unknown |
 
 const ok = (res: ServerResponse, status: number, body: unknown) => sendJson(res, status, body);
 const notFound = (what = "Recurso não encontrado.") => new HttpError(404, "not_found", what);
-
-/** Funções do C1 (núcleo) podem ainda não existir nesta build: devolve 501 em vez de quebrar a compilação. */
-type CoreFn = (id: string, input: Record<string, unknown>) => unknown;
-function coreFunction(name: "submitAuthorizedApplication" | "failAuthorizedApplication"): CoreFn {
-  const fn = (db as unknown as Record<string, unknown>)[name];
-  if (typeof fn !== "function") throw new HttpError(501, "not_implemented", "Operação ainda não disponível nesta versão do servidor.");
-  return fn as CoreFn;
-}
 
 function attachment(res: ServerResponse, mimeType: string, fileName: string, data: Buffer | Uint8Array) {
   const filename = encodeURIComponent(fileName).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16).toUpperCase());
@@ -296,13 +287,11 @@ const routes: Route[] = [
   } },
   { method: "POST", pattern: r("/api/applications/{id}/submit"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationSubmit, body);
-    const submit = coreFunction("submitAuthorizedApplication");
-    ok(res, 200, submit(params[0]!, { worker_id: input.worker_id, evidence_ref: input.evidence_ref, ...(input.observed_url ? { observed_url: input.observed_url } : {}) }));
+    ok(res, 200, submitAuthorizedApplication(params[0]!, { worker_id: input.worker_id, evidence_ref: input.evidence_ref, ...(input.observed_url ? { observed_url: input.observed_url } : {}) }));
   } },
   { method: "POST", pattern: r("/api/applications/{id}/fail"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationFail, body);
-    const fail = coreFunction("failAuthorizedApplication");
-    ok(res, 200, fail(params[0]!, { worker_id: input.worker_id, reason: input.reason }));
+    ok(res, 200, failAuthorizedApplication(params[0]!, { worker_id: input.worker_id, reason: input.reason }));
   } },
   { method: "POST", pattern: r("/api/applications/{id}/select-manual"), handler: ({ res, params }) => ok(res, 200, selectManualApplication(params[0]!)) },
   { method: "POST", pattern: r("/api/applications/{id}/authorize-auto"), handler: ({ res, params, body }) => {
