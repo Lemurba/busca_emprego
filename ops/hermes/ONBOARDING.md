@@ -119,8 +119,17 @@ No Radar, a fonte autenticada fica com `auth_strategy=browser_profile` e um `bro
 
 Configure o Telegram do gateway do Hermes ("Messaging" → "Telegram Setup"): `TELEGRAM_BOT_TOKEN` e `TELEGRAM_ALLOWED_USERS` em `/opt/data/.env` (o assistente "Create with QR" do dashboard/desktop grava os dois) e o canal padrão com `/sethome` ou `TELEGRAM_HOME_CHANNEL`. O Radar usa esses mesmos nomes para identificar quem pode responder.
 
-- Entrega de perguntas humanas: `node scripts/ops/notify-human-questions.mjs --send`, que chama `hermes send --to telegram` — CLI oficial que usa as credenciais do gateway sem LLM ("Pipe Script Output to Messaging Platforms").
-- Respostas: `node scripts/ops/answer-human-questions.mjs` registra a resposta da conversa em `POST /api/human-questions/{id}/answer` (contrato em `docs/agent-api.md`).
+- Entrega de perguntas humanas: `node scripts/ops/notify-human-questions.mjs --send` executa `hermes send --to telegram:<TELEGRAM_HOME_CHANNEL> --json` (sem shell). É o CLI oficial, que usa as credenciais do gateway e não passa pelo LLM ("Pipe Script Output to Messaging Platforms"). A pergunta só fica `delivered` quando a saída traz um `message_id` real. Caso contrário, vai para `delivery_failed` (`delivery_unconfirmed`), e o reenvio é feito com `--retry-failed`. Defina `TELEGRAM_HOME_CHANNEL` para que a referência `telegram:<chat>:<message_id>` fique completa. Cada mensagem traz o código da pergunta, por exemplo `[ab12cd]`.
+- Respostas: o plugin nativo `radar_vagas` (hook `pre_gateway_dispatch`) consome **somente** `/radar responder <código> <texto>`, `/radar pular <código>`, `/radar parar <código>` ou um reply à mensagem da pergunta. Essas mensagens não chegam ao LLM, e o resto da conversa segue normal. A resposta é registrada por `scripts/ops/answer-human-questions.mjs` em `POST /api/human-questions/{id}/answer`. O registro é idempotente por `telegram:<chat>:<message_id>`, só é aceito de user ids em `TELEGRAM_ALLOWED_USERS` e recusa a mensagem se faltar `chat_id`/`user_id`. Instalação:
+
+  ```sh
+  mkdir -p /opt/data/plugins
+  cp -r hermes/native-plugin/radar_vagas /opt/data/plugins/radar_vagas
+  hermes plugins enable radar_vagas    # plugins são opt-in (plugins.enabled no config.yaml)
+  # reinicie o gateway; teste: python3 -m unittest discover -s hermes/native-plugin
+  ```
+
+  O antigo gateway hook `radar-inbound-answers` (evento `agent:start`) deve ser removido de `/opt/data/hooks/`. Esse evento só observa a mensagem, entrega o texto truncado e não traz `message_id` nem reply. Detalhes em `hermes/native-plugin/radar_vagas/README.md`.
 - Diagnóstico sem imprimir segredo: `node scripts/ops/telegram-diagnose.mjs`.
 
 ## 8. Dashboard

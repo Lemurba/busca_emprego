@@ -1,42 +1,62 @@
 /**
- * Ponte de ENTRADA das perguntas humanas: resposta no Telegram → registro no Radar.
+ * Pontes Telegram das perguntas humanas (contrato C2).
  *
- * Sobe uma instância isolada (banco temporário, produção, token interno, automação
- * ligada, identidade vinculada) e exercita `scripts/ops/answer-human-questions.mjs`
- * como processo separado — o mesmo caminho que o hook `radar-inbound-answers` dispara:
- *   - resposta da conversa vinculada registra a resposta e retoma a candidatura;
- *   - repetir a mesma resposta é no-op (pergunta já respondida sai das abertas);
- *   - chat não vinculado é recusado sem tocar o estado;
- *   - pergunta obrigatória recusa "pular" e aceita a resposta normal;
- *   - duas perguntas abertas no mesmo chat = ambíguo (nada registrado), resolvido
- *     quando a mensagem é encadeada à pergunta (`--reply-to-id`);
- *   - `--dry-run` não altera estado, `--list`/`--recent` só leem;
- *   - o handler do hook dispara o script para a conversa autorizada e ignora o resto.
+ * Parte A — servidor real (dist/src/server.js, banco temporário) exercitando
+ * `scripts/ops/answer-human-questions.mjs` como processo separado, do jeito que o plugin
+ * nativo `radar_vagas` do Hermes o chama (`--stdin-json`):
+ *   - `/radar responder <código> <texto>` do usuário autorizado registra e retoma a candidatura;
+ *   - a mesma mensagem (mesmo message_id) reentregue é no-op (`duplicate`);
+ *   - texto livre sem comando nem reply NÃO responde pergunta;
+ *   - reply à mensagem da pergunta responde exatamente aquela pergunta;
+ *   - usuário fora da allowlist é recusado; pergunta obrigatória recusa `pular`;
+ *   - `--dry-run` não altera estado, `--list`/`--recent` só leem.
+ *
+ * Parte B — API falsa em processo (test/fixtures/fake-radar-api.mjs) para conferir o que
+ * os scripts mandam na rede e os caminhos de falha fechada:
+ *   - sem chat_id/user_id/allowlist: recusa sem chamar /answer;
+ *   - `reply_to_message_ref` só vai quando há reply real; `inbound_message_id` sempre;
+ *   - `parar` só pelo comando explícito; log em uma linha; sem x-forwarded-proto por padrão;
+ *   - notify: argv sem shell (`--send-command` JSON), código e instruções na mensagem,
+ *     `delivered` só com message_id real (senão delivery_unconfirmed), lock contra
+ *     execução concorrente e --limit validado.
  *
  * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { startFakeRadarApi } from "./fixtures/fake-radar-api.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const token = `inbound-token-${randomUUID()}`;
 const LINKED = "1650486356";
-const OTHER_CHAT = "outro-chat";
+const INTRUDER = "999000111";
 const directory = mkdtempSync(join(tmpdir(), "radar-inbound-"));
 const stateDir = join(directory, "executor-state");
 const logPath = join(directory, "inbound-answers.log");
+const shimPath = join(repoRoot, "test/fixtures/telegram-send-shim.mjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res, rej) => {
   const probe = createServer();
   probe.once("error", rej);
   probe.listen(0, "127.0.0.1", () => { const a = probe.address(); probe.close(() => res(a.port)); });
+});
+
+/** spawn assíncrono: a API falsa roda neste mesmo processo, então nada de spawnSync. */
+const run = (args, { env, input } = {}) => new Promise((resolvePromise) => {
+  const child = spawn(process.execPath, args, { cwd: repoRoot, env, stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.once("close", (status) => resolvePromise({ status, stdout, stderr }));
+  child.stdin.end(input ?? "");
 });
 
 async function startServer() {
@@ -47,7 +67,7 @@ async function startServer() {
       ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "inbound.sqlite"),
       RADAR_ENVIRONMENT: "production", RADAR_OPERATOR_ID: "inbound-operator", RADAR_TRUST_PROXY_TLS: "true",
       RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: "true",
-      HERMES_LINKED_RECIPIENT_ID: LINKED,
+      HERMES_LINKED_RECIPIENT_ID: LINKED, TELEGRAM_ALLOWED_USERS: LINKED,
     },
   });
   let stderr = "";
@@ -74,14 +94,19 @@ const api = async (method, path, body) => {
   return { status: res.status, data };
 };
 
-const scriptEnv = () => ({
+const scriptEnv = (extra = {}) => ({
   ...process.env, RADAR_BASE_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: token,
-  RADAR_FORWARDED_PROTO: "https", HERMES_LINKED_RECIPIENT_ID: LINKED, RADAR_INBOUND_ANSWER_LOG: logPath,
+  RADAR_FORWARDED_PROTO: "https", TELEGRAM_ALLOWED_USERS: LINKED, RADAR_ANSWER_ALLOWED_USERS: "",
+  HERMES_LINKED_RECIPIENT_ID: "", HERMES_TELEGRAM_CHAT_ID: "", TELEGRAM_HOME_CHANNEL: "",
+  RADAR_INBOUND_ANSWER_LOG: logPath, ...extra,
 });
 
-const inbound = (payload, ...flags) => spawnSync(process.execPath, ["scripts/ops/answer-human-questions.mjs", "--stdin-json", ...flags], {
-  cwd: repoRoot, env: scriptEnv(), input: JSON.stringify(payload), encoding: "utf8",
+let nextMessageId = 5000;
+const message = (fields) => ({ platform: "telegram", chat_id: LINKED, user_id: LINKED, message_id: String(++nextMessageId), reply_to_message_id: null, ...fields });
+const inbound = (payload, flags = [], extraEnv = {}) => run(["scripts/ops/answer-human-questions.mjs", "--stdin-json", ...flags], {
+  env: scriptEnv(extraEnv), input: JSON.stringify(payload),
 });
+const codeOf = (id) => String(id).slice(0, 6);
 
 const myQuestions = async () => (await api("GET", "/api/human-questions")).data ?? [];
 const question = async (id) => (await myQuestions()).find((item) => item.id === id);
@@ -99,14 +124,14 @@ async function preparedApplication(label) {
   await api("POST", `/api/resumes/${resume.id}/approve`, { confirmation: "APROVO" });
   const application = (await api("POST", "/api/applications", { job_id: job.id, resume_id: resume.id })).data;
   await api("POST", `/api/applications/${application.id}/authorize-auto`, { resume_id: resume.id, confirmation: "AUTORIZO" });
-  const claimed = spawnSync(process.execPath, ["scripts/ops/apply-authorized.mjs", "claim", "--application", application.id], {
-    cwd: repoRoot, env: { ...scriptEnv(), RADAR_EXECUTOR_WORKER_ID: "inbound-test", RADAR_EXECUTOR_STATE_DIR: stateDir }, encoding: "utf8",
+  const claimed = await run(["scripts/ops/apply-authorized.mjs", "claim", "--application", application.id], {
+    env: { ...scriptEnv(), RADAR_EXECUTOR_WORKER_ID: "inbound-test", RADAR_EXECUTOR_STATE_DIR: stateDir },
   });
   assert.equal(claimed.status, 0, `claim saiu com ${claimed.status}: ${claimed.stderr}`);
   return { job, application };
 }
 
-/** Cria a pergunta, entrega com referência do chat vinculado e devolve a pergunta entregue. */
+/** Cria a pergunta, entrega com referência do chat vinculado e devolve o id. */
 async function askedDeliveredQuestion(application, fieldRef, messageId, questionText) {
   const created = (await api("POST", `/api/applications/${application.id}/questions`, {
     field_ref: fieldRef, question: questionText, required: true,
@@ -120,17 +145,9 @@ async function askedDeliveredQuestion(application, fieldRef, messageId, question
 }
 
 const results = [];
-// `fn` pode devolver `{ skip: "motivo" }` para um check que depende do host (ex.: hook
-// instalado só na máquina de produção). Skip é reportado à parte e não é falha — a CI roda
-// em runner sem o hook, e o contrato portável continua guardado pelos demais checks.
 const t = async (name, fn) => {
   try {
-    const outcome = await fn();
-    if (outcome && typeof outcome === "object" && outcome.skip) {
-      results.push({ name, ok: true, skipped: true });
-      console.log(`  skip ${name} (${outcome.skip})`);
-      return;
-    }
+    await fn();
     results.push({ name, ok: true });
     console.log(`  ok   ${name}`);
   } catch (error) {
@@ -140,137 +157,246 @@ const t = async (name, fn) => {
 };
 
 let instance = null;
+let fake = null;
 try {
+  // ------------------------------------------------------------ Parte A: servidor real
   instance = await startServer();
   base = instance.baseUrl;
   const alpha = await preparedApplication("alpha");
+  let alphaQuestion = "";
+  let alphaMessage = null;
 
-  await t("resposta no chat vinculado registra a resposta e retoma a candidatura", async () => {
-    const id = await askedDeliveredQuestion(alpha.application, "disponibilidade", 777, "Pode iniciar em 30 dias?");
+  await t("/radar responder <código> do usuário autorizado registra e retoma a candidatura", async () => {
+    alphaQuestion = await askedDeliveredQuestion(alpha.application, "disponibilidade", 777, "Pode iniciar em 30 dias?");
     assert.equal((await appState(alpha.application.id)).status, "needs_review", "pergunta aberta deveria pausar a candidatura");
-    const result = inbound({ chat_id: LINKED, text: "sim" });
+    alphaMessage = message({ text: `/radar responder ${codeOf(alphaQuestion)} sim, em 30 dias` });
+    const result = await inbound(alphaMessage);
     assert.equal(result.status, 0, `script saiu com ${result.status}: ${result.stdout}${result.stderr}`);
     assert.match(result.stdout, /resposta registrada/u);
-    const answered = await question(id);
+    const answered = await question(alphaQuestion);
     assert.equal(answered.status, "answered");
-    assert.equal(answered.answer, "sim");
+    assert.equal(answered.answer, "sim, em 30 dias");
     assert.equal(answered.answer_actor, LINKED);
     assert.equal((await appState(alpha.application.id)).status, "in_progress", "candidatura deveria retomar");
-    const logged = readFileSync(logPath, "utf8");
-    assert.match(logged, new RegExp(`registrada question=${id}`, "u"));
+    assert.match(readFileSync(logPath, "utf8"), new RegExp(`registrada question=${alphaQuestion}`, "u"));
   });
 
-  await t("repetir a resposta é no-op: pergunta respondida sai das abertas", async () => {
+  await t("mesma mensagem reentregue (mesmo message_id) é no-op duplicado", async () => {
     const before = await myQuestions();
-    const result = inbound({ chat_id: LINKED, text: "sim" });
-    assert.equal(result.status, 0, `script saiu com ${result.status}: ${result.stderr}`);
-    assert.match(result.stdout, /nenhuma pergunta aberta/u);
+    const result = await inbound(alphaMessage);
+    // A pergunta já saiu das abertas: o script responde que não há pergunta com o código.
+    assert.ok([0, 6].includes(result.status), `saída ${result.status}: ${result.stdout}${result.stderr}`);
     const after = await myQuestions();
     assert.deepEqual(after.map((q) => [q.id, q.status, q.answer]), before.map((q) => [q.id, q.status, q.answer]));
+    // Direto no app: reentrega com o mesmo inbound_message_id devolve duplicate sem mudar estado.
+    const replay = await api("POST", `/api/human-questions/${alphaQuestion}/answer`, {
+      answer: "outra", sender_id: LINKED, inbound_message_id: `telegram:${LINKED}:${alphaMessage.message_id}`,
+    });
+    assert.equal(replay.status, 200, JSON.stringify(replay.data));
+    assert.equal(replay.data.duplicate, true);
+    assert.equal((await question(alphaQuestion)).answer, "sim, em 30 dias");
   });
 
-  await t("chat não vinculado é recusado sem tocar o estado", async () => {
-    const id = await askedDeliveredQuestion(alpha.application, "cnh", 778, "Possui CNH categoria B?");
-    const result = inbound({ chat_id: OTHER_CHAT, text: "sim" });
-    assert.equal(result.status, 4, `esperava 4, veio ${result.status}: ${result.stdout}${result.stderr}`);
-    assert.equal((await question(id)).status, "delivered", "pergunta de outro chat não pode ser respondida");
-    assert.equal((await appState(alpha.application.id)).status, "needs_review");
-  });
-
-  await t("pergunta obrigatória recusa pular e aceita a resposta normal", async () => {
-    const id = (await myQuestions()).find((q) => q.status === "delivered").id;
-    const skipped = inbound({ chat_id: LINKED, text: "pular" });
-    assert.equal(skipped.status, 2, `esperava 2, veio ${skipped.status}: ${skipped.stdout}`);
-    assert.match(skipped.stderr, /required_cannot_skip|recusada/u);
-    assert.equal((await question(id)).status, "delivered", "pergunta obrigatória não pode ser pulada");
-    const answered = inbound({ chat_id: LINKED, text: "Sim, categoria B" });
-    assert.equal(answered.status, 0, `${answered.stdout}${answered.stderr}`);
-    const done = await question(id);
-    assert.equal(done.status, "answered");
-    assert.equal(done.answer, "Sim, categoria B");
-    assert.equal((await appState(alpha.application.id)).status, "in_progress");
-  });
-
-  await t("duas perguntas abertas: ambíguo não registra e a resposta encadeada escolhe a certa", async () => {
+  await t("texto livre sem comando nem reply não responde pergunta aberta", async () => {
     const beta = await preparedApplication("beta");
-    const gamma = await preparedApplication("gamma");
-    const betaId = await askedDeliveredQuestion(beta.application, "idioma", 801, "Fala inglês avançado?");
-    const gammaId = await askedDeliveredQuestion(gamma.application, "veiculo", 802, "Tem veículo próprio?");
-    const ambiguous = inbound({ chat_id: LINKED, text: "sim" });
-    assert.equal(ambiguous.status, 3, `esperava 3, veio ${ambiguous.status}: ${ambiguous.stdout}`);
-    assert.equal((await question(betaId)).status, "delivered");
-    assert.equal((await question(gammaId)).status, "delivered");
-    const correlated = inbound({ chat_id: LINKED, text: "sim, tenho", reply_to_id: 802 });
-    assert.equal(correlated.status, 0, `${correlated.stdout}${correlated.stderr}`);
-    assert.equal((await question(gammaId)).status, "answered");
-    assert.equal((await question(gammaId)).answer, "sim, tenho");
-    assert.equal((await question(betaId)).status, "delivered", "a pergunta não encadeada deveria seguir aberta");
-    const byChat = inbound({ chat_id: LINKED, text: "sim" });
-    assert.equal(byChat.status, 0, `${byChat.stdout}${byChat.stderr}`);
-    assert.equal((await question(betaId)).status, "answered");
+    const id = await askedDeliveredQuestion(beta.application, "cnh", 778, "Possui CNH categoria B?");
+    const result = await inbound(message({ text: "sim" }));
+    assert.equal(result.status, 5, `esperava 5, veio ${result.status}: ${result.stdout}${result.stderr}`);
+    const cancel = await inbound(message({ text: "cancelar" }));
+    assert.equal(cancel.status, 5, "\"cancelar\" sem comando não pode interromper a candidatura");
+    assert.equal((await question(id)).status, "delivered");
+    assert.equal((await appState(beta.application.id)).status, "needs_review");
   });
 
-  await t("--dry-run não altera estado e --list/--recent só leem", async () => {
-    const delta = await preparedApplication("delta");
-    const id = await askedDeliveredQuestion(delta.application, "documentos", 803, "Possui documentação completa?");
-    const dry = inbound({ chat_id: LINKED, text: "sim" }, "--dry-run");
-    assert.equal(dry.status, 0, `${dry.stdout}${dry.stderr}`);
-    assert.match(dry.stdout, /\[simulação\]/u);
-    assert.equal((await question(id)).status, "delivered", "dry-run não pode registrar");
-    const listed = spawnSync(process.execPath, ["scripts/ops/answer-human-questions.mjs", "--list", "--json"], { cwd: repoRoot, env: scriptEnv(), encoding: "utf8" });
-    assert.equal(listed.status, 0, listed.stderr);
-    const payload = JSON.parse(listed.stdout);
-    assert.equal(payload.total, 1);
-    assert.equal(payload.questions[0].id, id);
-    const recent = spawnSync(process.execPath, ["scripts/ops/answer-human-questions.mjs", "--recent", "3"], { cwd: repoRoot, env: scriptEnv(), encoding: "utf8" });
-    assert.equal(recent.status, 0, recent.stderr);
-    assert.match(recent.stdout, /question=/u);
+  await t("usuário fora da allowlist é recusado sem tocar o estado", async () => {
+    const id = (await myQuestions()).find((q) => q.status === "delivered").id;
+    const result = await inbound(message({ user_id: INTRUDER, chat_id: INTRUDER, text: `/radar responder ${codeOf(id)} sim` }));
+    assert.equal(result.status, 4, `esperava 4, veio ${result.status}: ${result.stdout}${result.stderr}`);
     assert.equal((await question(id)).status, "delivered");
   });
 
-  await t("hook do gateway dispara o script só para a conversa autorizada", () => {
-    const hookDir = process.env.RADAR_INBOUND_HOOK_DIR ?? "/opt/data/hooks/radar-inbound-answers";
-    if (!existsSync(join(hookDir, "HOOK.yaml")) || !existsSync(join(hookDir, "handler.py"))) {
-      return { skip: `hook ausente em ${hookDir}` };
-    }
-    const manifest = readFileSync(join(hookDir, "HOOK.yaml"), "utf8");
-    assert.match(manifest, /agent:start/u, "hook deveria escutar agent:start");
+  await t("pergunta obrigatória recusa /radar pular e aceita reply correlacionado", async () => {
+    const id = (await myQuestions()).find((q) => q.status === "delivered" && q.field_ref === "cnh").id;
+    const skipped = await inbound(message({ text: `/radar pular ${codeOf(id)}` }));
+    assert.equal(skipped.status, 2, `esperava 2, veio ${skipped.status}: ${skipped.stdout}${skipped.stderr}`);
+    assert.match(skipped.stderr, /required_cannot_skip/u);
+    assert.equal((await question(id)).status, "delivered");
+    const replied = await inbound(message({ text: "Sim, categoria B", reply_to_message_id: "778" }));
+    assert.equal(replied.status, 0, `${replied.stdout}${replied.stderr}`);
+    const done = await question(id);
+    assert.equal(done.status, "answered");
+    assert.equal(done.answer, "Sim, categoria B");
+    assert.equal(done.reply_to_message_ref, `telegram:${LINKED}:778`);
+  });
 
-    const probe = `
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("radar_hook", "${hookDir}/handler.py")
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-mod._allowed_chats = lambda: {"${LINKED}"}
-captured = []
-class FakeStdin:
-    def write(self, data): captured.append(json.loads(data))
-    def close(self): pass
-class FakePopen:
-    def __init__(self, args, **kwargs): captured.append({"args": args}); self.stdin = FakeStdin()
-mod.subprocess.Popen = FakePopen
-mod.handle("agent:start", {"platform": "telegram", "chat_id": "${LINKED}", "chat_type": "dm", "message": "sim"})
-mod.handle("agent:start", {"platform": "telegram", "chat_id": "outro", "chat_type": "dm", "message": "sim"})
-mod.handle("agent:start", {"platform": "discord", "chat_id": "${LINKED}", "message": "sim"})
-mod.handle("agent:start", {"platform": "telegram", "chat_id": "${LINKED}", "message": "/new"})
-mod.handle("agent:start", {"platform": "telegram", "chat_id": "${LINKED}", "message": ""})
-print(json.dumps(captured))
-`;
-    const result = spawnSync("python3", ["-c", probe], { encoding: "utf8" });
-    assert.equal(result.status, 0, `sonda do hook falhou: ${result.stderr}`);
-    const captured = JSON.parse(result.stdout);
-    assert.equal(captured.length, 2, `esperava 1 spawn (2 registros), veio ${JSON.stringify(captured)}`);
-    const [spawnArgs, payload] = captured;
-    assert.equal(spawnArgs.args[1], "/opt/data/dashboard/busca_emprego/scripts/ops/answer-human-questions.mjs");
-    assert.ok(spawnArgs.args.includes("--stdin-json"));
-    assert.deepEqual(payload, { chat_id: LINKED, text: "sim", message_id: null, reply_to_id: null });
+  await t("reply escolhe a pergunta certa entre duas abertas", async () => {
+    const gamma = await preparedApplication("gamma");
+    const delta = await preparedApplication("delta");
+    const gammaId = await askedDeliveredQuestion(gamma.application, "idioma", 801, "Fala inglês avançado?");
+    const deltaId = await askedDeliveredQuestion(delta.application, "veiculo", 802, "Tem veículo próprio?");
+    const replied = await inbound(message({ text: "sim, tenho", reply_to_message_id: "802" }));
+    assert.equal(replied.status, 0, `${replied.stdout}${replied.stderr}`);
+    assert.equal((await question(deltaId)).answer, "sim, tenho");
+    assert.equal((await question(gammaId)).status, "delivered", "a pergunta não encadeada deveria seguir aberta");
+    const unknownReply = await inbound(message({ text: "sim", reply_to_message_id: "4040" }));
+    assert.equal(unknownReply.status, 6, "reply a mensagem que não é pergunta não registra nada");
+    assert.equal((await question(gammaId)).status, "delivered");
+  });
+
+  await t("--dry-run não altera estado e --list/--recent só leem", async () => {
+    const open = (await myQuestions()).find((q) => q.status === "delivered");
+    const dry = await inbound(message({ text: `/radar responder ${codeOf(open.id)} sim` }), ["--dry-run"]);
+    assert.equal(dry.status, 0, `${dry.stdout}${dry.stderr}`);
+    assert.match(dry.stdout, /\[simulação\]/u);
+    assert.equal((await question(open.id)).status, "delivered", "dry-run não pode registrar");
+    const listed = await run(["scripts/ops/answer-human-questions.mjs", "--list", "--json"], { env: scriptEnv() });
+    assert.equal(listed.status, 0, listed.stderr);
+    const payload = JSON.parse(listed.stdout);
+    assert.equal(payload.total, 1);
+    assert.equal(payload.questions[0].code, codeOf(open.id));
+    const recent = await run(["scripts/ops/answer-human-questions.mjs", "--recent", "3"], { env: scriptEnv() });
+    assert.equal(recent.status, 0, recent.stderr);
+    assert.match(recent.stdout, /question=|ignorado|recusado/u);
+  });
+
+  await instance.stop();
+  instance = null;
+
+  // ------------------------------------------------------------ Parte B: API falsa
+  fake = await startFakeRadarApi({ token, allowedUsers: [LINKED] });
+  base = fake.baseUrl;
+  const answerCalls = () => fake.requests.filter((r) => r.path.endsWith("/answer"));
+
+  await t("sem chat_id ou sem user_id: recusa fechada, sem chamar o app", async () => {
+    const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:10` });
+    const before = fake.requests.length;
+    const noChat = await inbound(message({ chat_id: undefined, text: `/radar responder ${codeOf(q.id)} sim` }));
+    assert.equal(noChat.status, 4, `${noChat.stdout}${noChat.stderr}`);
+    const noUser = await inbound(message({ user_id: null, text: `/radar responder ${codeOf(q.id)} sim` }));
+    assert.equal(noUser.status, 4, `${noUser.stdout}${noUser.stderr}`);
+    const noAllowlist = await inbound(message({ text: `/radar responder ${codeOf(q.id)} sim` }), [], { TELEGRAM_ALLOWED_USERS: "*" });
+    assert.equal(noAllowlist.status, 4, "curinga/allowlist vazia não autoriza ninguém");
+    const intruder = await inbound(message({ user_id: INTRUDER, text: `/radar responder ${codeOf(q.id)} sim` }));
+    assert.equal(intruder.status, 4);
+    assert.equal(fake.requests.length, before, "nenhuma chamada ao app deveria acontecer");
+    assert.equal(q.status, "delivered");
+  });
+
+  await t("texto livre não é consumido: nenhuma chamada de resposta", async () => {
+    fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:11` });
+    const before = answerCalls().length;
+    const result = await inbound(message({ text: "qual o clima amanhã?" }));
+    assert.equal(result.status, 5);
+    assert.equal(answerCalls().length, before);
+  });
+
+  await t("comando envia inbound_message_id e sender_id, sem reply_to_message_ref; sem x-forwarded-proto", async () => {
+    const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:12` });
+    const msg = message({ text: `/radar responder ${codeOf(q.id)} linha 1\nlinha 2` });
+    const result = await inbound(msg, [], { RADAR_FORWARDED_PROTO: "" });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    const call = answerCalls().at(-1);
+    assert.equal(call.path, `/api/human-questions/${q.id}/answer`);
+    assert.deepEqual(call.body, {
+      action: "answer", answer: "linha 1\nlinha 2", actor: "telegram", sender_id: LINKED,
+      inbound_message_id: `telegram:${LINKED}:${msg.message_id}`,
+    });
+    assert.equal(call.headers["x-forwarded-proto"], undefined);
+    assert.equal(q.answer, "linha 1\nlinha 2");
+    const lines = readFileSync(logPath, "utf8").split("\n");
+    assert.ok(!lines.some((line) => line.startsWith("linha 2")), "log não pode quebrar linha com texto do usuário");
+  });
+
+  await t("mensagem duplicada (resposta {duplicate:true}) é sucesso sem efeito", async () => {
+    const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:13` });
+    const msg = message({ text: "resposta por reply", reply_to_message_id: "13" });
+    const first = await inbound(msg);
+    assert.equal(first.status, 0, `${first.stdout}${first.stderr}`);
+    assert.equal(answerCalls().at(-1).body.reply_to_message_ref, `telegram:${LINKED}:13`);
+    q.status = "delivered"; // reabre só para provar que o app decide pela idempotência
+    const again = await inbound(msg);
+    assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+    assert.match(again.stdout, /já processada/u);
+    assert.equal(q.status, "delivered", "duplicada não pode alterar o estado");
+  });
+
+  await t("/radar parar só pelo comando explícito; código inexistente não registra", async () => {
+    const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:14` });
+    const missing = await inbound(message({ text: "/radar parar zzzzzz" }));
+    assert.equal(missing.status, 6);
+    const stop = await inbound(message({ text: `/radar parar ${codeOf(q.id)}` }));
+    assert.equal(stop.status, 0, `${stop.stdout}${stop.stderr}`);
+    assert.equal(answerCalls().at(-1).body.action, "stop");
+    assert.equal(q.status, "cancelled");
+    const usage = await inbound(message({ text: `/radar responder ${codeOf(q.id)}` }));
+    assert.equal(usage.status, 1, "responder sem texto é uso inválido");
+  });
+
+  // ---------- notify ----------
+  const shimOut = join(directory, "shim.ndjson");
+  const notifyEnv = (extra = {}) => scriptEnv({
+    RADAR_TELEGRAM_SEND_COMMAND: JSON.stringify([process.execPath, shimPath]),
+    RADAR_TELEGRAM_SHIM_OUT: shimOut, RADAR_NOTIFY_LOCK: join(directory, "notify.lock"),
+    RADAR_TELEGRAM_REFS_PATH: join(directory, "telegram-refs.json"), RADAR_FORWARDED_PROTO: "", ...extra,
+  });
+  const notify = (flags, extra) => run(["scripts/ops/notify-human-questions.mjs", ...flags], { env: notifyEnv(extra) });
+  for (const q of fake.questions.values()) if (q.status !== "answered") q.status = "answered";
+
+  await t("notify: entrega com message_id real marca delivered, com código e instruções", async () => {
+    const q = fake.addQuestion({ status: "pending", question: "Pode viajar?" });
+    const result = await notify(["--send"]);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(q.status, "delivered");
+    assert.equal(q.telegram_message_ref, "telegram:424242:777");
+    const sent = readFileSync(shimOut, "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+    assert.match(sent.text, new RegExp(`\\[${codeOf(q.id)}\\]`, "u"));
+    assert.match(sent.text, new RegExp(`/radar responder ${codeOf(q.id)} `, "u"));
+    assert.match(sent.text, /não autoriza candidatura automática/u);
+    const refs = JSON.parse(readFileSync(join(directory, "telegram-refs.json"), "utf8")).refs;
+    assert.equal(refs["telegram:424242:777"].question_id, q.id);
+  });
+
+  await t("notify: sem message_id na saída marca delivery_failed (delivery_unconfirmed)", async () => {
+    const q = fake.addQuestion({ status: "pending" });
+    const result = await notify(["--send"], { RADAR_TELEGRAM_SHIM_MODE: "noid" });
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+    assert.equal(q.status, "delivery_failed");
+    assert.match(String(q.sanitized_delivery_error), /delivery_unconfirmed/u);
+    q.status = "answered";
+  });
+
+  await t("notify: --send-command só aceita argv JSON e --limit é validado", async () => {
+    const q = fake.addQuestion({ status: "pending" });
+    const shellish = await notify(["--send"], { RADAR_TELEGRAM_SEND_COMMAND: `${process.execPath} ${shimPath}; touch /tmp/pwn` });
+    assert.equal(shellish.status, 1);
+    assert.match(shellish.stderr, /array JSON/u);
+    for (const bad of ["0", "-1", "abc", "1e3"]) {
+      const result = await notify(["--limit", bad]);
+      assert.equal(result.status, 1, `--limit ${bad} deveria ser recusado`);
+    }
+    assert.equal(q.status, "pending");
+  });
+
+  await t("notify: lock de outra execução impede envio duplicado", async () => {
+    const q = [...fake.questions.values()].find((item) => item.status === "pending");
+    writeFileSync(join(directory, "notify.lock"), "12345\n");
+    const blocked = await notify(["--send"]);
+    assert.equal(blocked.status, 0);
+    assert.match(blocked.stdout, /outra execução/u);
+    assert.equal(q.status, "pending");
+    rmSync(join(directory, "notify.lock"));
+    const sent = await notify(["--send"], { TELEGRAM_HOME_CHANNEL: "424242", RADAR_TELEGRAM_SHIM_MESSAGE_ID: "778" });
+    assert.equal(sent.status, 0, `${sent.stdout}${sent.stderr}`);
+    assert.equal(q.status, "delivered");
+    assert.equal(q.telegram_message_ref, "telegram:424242:778");
+    assert.ok(!existsSync(join(directory, "notify.lock")), "lock deveria ser liberado");
   });
 } finally {
   if (instance) await instance.stop();
+  if (fake) await fake.stop();
   if (!process.env.RADAR_KEEP_TMP) rmSync(directory, { recursive: true, force: true });
 }
 
 const failures = results.filter((item) => !item.ok);
-const skipped = results.filter((item) => item.skipped);
-console.log(`\nponte de entrada: ${results.length - failures.length - skipped.length} ok, ${skipped.length} pulada(s), ${failures.length} falha(s)`);
+console.log(`\npontes Telegram: ${results.length - failures.length} ok, ${failures.length} falha(s)`);
 process.exit(failures.length ? 1 : 0);

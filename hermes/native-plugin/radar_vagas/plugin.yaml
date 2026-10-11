@@ -1,0 +1,22 @@
+name: radar_vagas
+version: 1.0.0
+description: >-
+  Radar de Vagas — consome no gateway (hook pre_gateway_dispatch) as respostas do Telegram
+  às perguntas humanas do Radar (/radar responder <código> <texto> ou reply à mensagem da
+  pergunta), registra no app local e responde ao usuário sem passar pelo LLM.
+author: Radar de Vagas
+requires_env:
+  - name: TELEGRAM_ALLOWED_USERS
+    description: "User ids do Telegram autorizados a responder perguntas do Radar (mesma lista do gateway)"
+    prompt: "User ids autorizados"
+    password: false
+optional_env:
+  - name: RADAR_APP_DIR
+    description: "Diretório do Radar instalado (padrão /opt/data/dashboard/busca_emprego)"
+    password: false
+  - name: RADAR_ANSWER_ALLOWED_USERS
+    description: "Allowlist própria do Radar (tem precedência sobre TELEGRAM_ALLOWED_USERS)"
+    password: false
+  - name: RADAR_NODE_BIN
+    description: "Binário do Node.js (padrão: node no PATH)"
+    password: false
