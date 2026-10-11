@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.16"
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --outfile=dist/public/app.js",

@@ -40,7 +40,7 @@ Ferramentas (lista exata do `tools.include` em `hermes/config.example.yaml`):
 | `radar_record_score` | escrita | `jobs.write` (avaliador de compatibilidade) |
 | `radar_propose_agent_prompt` | escrita | agente alvo publicado e ativo |
 | `radar_claim_application`, `radar_submit_application`, `radar_fail_application` | escrita | `application.prepare` + domínio da URL autorizada |
-| `radar_ask_human`, `radar_answer_question` | escrita | `telegram.question` |
+| `radar_ask_human` | escrita | `telegram.question` + dono do claim |
 
 Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e ativo cujo papel permita o escopo. Erros voltam como `isError` com `error.code` estável (ex.: `agent.disabled`, `agent.domain.forbidden`, `automation_disabled`, `application.url_mismatch`) e mensagem em pt-BR; trate o código, não tente de novo com outro agente para driblar escopo.
 
@@ -85,7 +85,7 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 ## Perguntas humanas (Telegram)
 
 - O Telegram é o do gateway do Hermes (`TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL` em `~/.hermes/.env`). Não peça bot token, chat ID nem crie outro bot.
-- Consulte pendências com `radar_list_open_questions`. Ao receber a resposta do usuário, registre com `radar_answer_question` (`sender_id` do remetente, `action` answer/skip/manual/stop e, sempre que houver, `inbound_message_id` como `telegram:<chat>:<message_id>` — repetir a mesma mensagem é no-op, `duplicate: true`).
+- Consulte pendências com `radar_list_open_questions`. **Você não registra respostas**: o usuário responde no Telegram com `/radar responder <código> <texto>` (ou respondendo à mensagem da pergunta) e o plugin `radar_vagas` do gateway grava a resposta sem passar pelo modelo. Se o usuário responder em texto livre na conversa, peça que use o comando ou o reply; não tente registrar por ele.
 - Uma resposta resolve somente a pergunta correspondente e nunca concede `AUTORIZO`.
 - Scripts do operador (fora do fluxo do agente): `node scripts/ops/notify-human-questions.mjs --send` entrega perguntas pendentes pela ponte; `node scripts/ops/answer-human-questions.mjs` registra respostas manualmente.
 

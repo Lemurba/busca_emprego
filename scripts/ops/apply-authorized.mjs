@@ -147,7 +147,8 @@ const ttlMinutes = (expiresAt) => Math.max(0, Math.round((new Date(String(expire
 
 if (command === "list") {
   const items = await queue();
-  if (asJson) { out({ ok: true, base, total: items.length, applications: items }); process.exit(0); }
+  // O nonce só é usado internamente pelo claim; nunca vai para a saída.
+  if (asJson) { out({ ok: true, base, total: items.length, applications: items.map(({ nonce, ...item }) => ({ ...item, nonce_prefix: `${String(nonce ?? "").slice(0, 8)}…` })) }); process.exit(0); }
   console.log(`base: ${base} | fila autorizada: ${items.length}`);
   for (const item of items) {
     console.log(`\n${item.id}\n  vaga: ${item.job_title} — ${item.job_company}\n  url autorizada: ${item.application_url}`

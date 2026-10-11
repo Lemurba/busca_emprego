@@ -6,7 +6,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { AGENT_ROLE_SCOPES } from "./agent-defaults.js";
 import {
-  answerHumanQuestion,
   claimAuthorizedApplication,
   createHumanQuestion,
   createJobFromAgent,
@@ -25,6 +24,7 @@ import {
   submitAuthorizedApplication,
 } from "./db.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
+import { RADAR_MCP_TOOLS } from "./mcp-tools.js";
 
 /**
  * Servidor MCP do Radar de Vagas.
@@ -254,14 +254,7 @@ const jobFields = {
   posted_at: z.string().optional(),
 };
 
-/** Nomes registrados; hermes/config.example.yaml (`tools.include`) lista exatamente estes. */
-export const RADAR_MCP_TOOLS = [
-  "radar_list_agents", "radar_list_sources", "radar_get_job", "radar_discover_job", "radar_enrich_job",
-  "radar_create_resume", "radar_propose_agent_prompt", "radar_record_score",
-  "radar_list_authorized_applications", "radar_claim_application", "radar_verify_application",
-  "radar_submit_application", "radar_fail_application", "radar_ask_human",
-  "radar_list_open_questions", "radar_answer_question",
-] as const;
+export { RADAR_MCP_TOOLS };
 
 export function createRadarMcpServer() {
   const server = new McpServer({ name: "radar-vagas", version: "0.3.0" });
@@ -465,25 +458,6 @@ export function createRadarMcpServer() {
   }, async ({ application_id }) => execute(() => ({
     questions: listHumanQuestions(application_id).filter((question) => ["pending", "delivered", "delivery_failed"].includes(String((question as Record<string, unknown>).status))),
   })));
-
-  server.registerTool("radar_answer_question", {
-    description: "Registra a resposta do usuário a uma pergunta humana. sender_id precisa ser identidade autorizada; inbound_message_id torna a repetição um no-op.",
-    inputSchema: {
-      agent_id: agentId,
-      question_id: z.string().min(1),
-      sender_id: z.string().min(1).describe("Identidade do remetente (ex.: ID do usuário no Telegram)."),
-      action: z.enum(["answer", "skip", "manual", "stop"]).default("answer"),
-      answer: z.string().max(1_000).optional(),
-      inbound_message_id: z.string().min(1).max(200).optional().describe("ID da mensagem recebida (ex.: telegram:<chat>:<message_id>)."),
-      reply_to_message_ref: z.string().max(200).optional(),
-    },
-  }, async ({ agent_id, question_id, ...input }) => execute(() => {
-    requireAutomation();
-    requireAgent(agent_id, "telegram.question");
-    const answered = answerHumanQuestion(question_id, { ...input, actor: "mcp" }) as Record<string, unknown>;
-    if (answered && answered.duplicate === true) return { duplicate: true, question: answered.question ?? null };
-    return { duplicate: false, question: answered };
-  }));
 
   return server;
 }

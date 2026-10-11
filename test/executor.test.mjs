@@ -141,13 +141,14 @@ try {
   const first = await preparedApplication("alpha", "https://portal.example.test/alpha/aplicar?utm_source=radar");
   const second = await preparedApplication("beta", "https://portal.example.test/beta/aplicar");
 
-  await t("list mostra a fila autorizada com hash, nonce e TTL", () => {
+  await t("list mostra a fila autorizada com hash, prefixo do nonce e TTL", () => {
     const result = executor("list", "--json");
     assert.equal(result.status, 0, `list saiu com ${result.status}: ${result.stderr}`);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.total, 2);
     const entry = payload.applications.find((item) => item.id === first.application.id);
-    assert.ok(entry?.nonce, "fila sem nonce");
+    assert.equal(entry?.nonce, undefined, "o nonce completo não pode aparecer na saída");
+    assert.match(entry.nonce_prefix, /^.{8}…$/u);
     assert.equal(entry.application_url_hash.length, 64);
     assert.ok(new Date(entry.expires_at).getTime() > Date.now(), "autorização já expirada");
   });

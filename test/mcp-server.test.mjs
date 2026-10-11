@@ -170,16 +170,11 @@ try {
   const questionId = asked.question.id;
   const open = (await ok("radar_list_open_questions")).questions;
   assert.ok(open.some((question) => question.id === questionId));
-  await refused("radar_answer_question", { agent_id: assistant.id, question_id: questionId, sender_id: "intruso", answer: "Sim", inbound_message_id: "telegram:1:99" }, "human_question.identity_unauthorized");
-  const answered = await ok("radar_answer_question", { agent_id: assistant.id, question_id: questionId, sender_id: "telegram-user", answer: "Sim", inbound_message_id: "telegram:1:100" });
-  assert.equal(answered.duplicate, false);
-  assert.equal(answered.question.status, "answered");
+  // Respostas humanas nunca entram pelo MCP: só o operador, via plugin do gateway → answer-human-questions.mjs.
+  assert.ok(!RADAR_MCP_TOOLS.includes("radar_answer_question"), "o agente não pode responder às próprias perguntas");
+  const answered = store.answerHumanQuestion(questionId, { answer: "Sim", sender_id: "telegram-user", inbound_message_id: "telegram:1:100" });
+  assert.equal(answered.status, "answered");
   assert.equal(store.listApplications().find((item) => item.id === first.application.id).status, "in_progress");
-  const auditBefore = store.db.prepare("SELECT COUNT(*) AS n FROM audit_events").get().n;
-  const duplicate = await ok("radar_answer_question", { agent_id: assistant.id, question_id: questionId, sender_id: "telegram-user", answer: "Não", inbound_message_id: "telegram:1:100" });
-  assert.equal(duplicate.duplicate, true);
-  assert.equal(duplicate.question.answer, "Sim");
-  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM audit_events").get().n, auditBefore);
   assert.ok(!(await ok("radar_list_open_questions")).questions.some((question) => question.id === questionId));
 
   // ---- submit ----

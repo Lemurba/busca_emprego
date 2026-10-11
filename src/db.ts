@@ -6,7 +6,7 @@ import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Jo
 import { executeWorkflowCommand, WorkflowError, type TransitionInput, type TransitionResult, type WorkflowCommand } from "./workflow.js";
 import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
 import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "./agent-defaults.js";
-import { compactProfileContext, extractPdfText, MAX_PDF_BYTES, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
+import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
 
 const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -614,7 +614,8 @@ let savepointSequence = 0;
  * rolls back only the inner work and still propagates to the outer transaction.
  */
 function tx<T>(fn: () => T): T {
-  if ((db as unknown as { isTransaction: boolean }).isTransaction) {
+  // `isTransaction` exists from Node 22.16 (engines in package.json); it also sees raw BEGINs elsewhere in this file.
+  if (db.isTransaction) {
     const name = `radar_sp_${++savepointSequence}`;
     db.exec(`SAVEPOINT ${name}`);
     try {
@@ -1760,7 +1761,9 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
   return getJob(id);
 }
 
-export function createBaseResume(input: { title: string; file_name: string; file_data: string }) {
+type BaseResumeUpload = { title: string; file_name: string; file_data: string };
+
+function prepareBaseResume(input: BaseResumeUpload) {
   const title = String(input.title ?? "").trim().slice(0, 120);
   const fileName = String(input.file_name ?? "curriculo.pdf").replace(/[\\/\r\n\0]/g, "_").slice(0, 160);
   const fileData = String(input.file_data ?? "");
@@ -1770,7 +1773,12 @@ export function createBaseResume(input: { title: string; file_name: string; file
   if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("O arquivo enviado não parece ser um PDF válido.");
   const checksum = sha256(bytes);
   if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
-  const extraction = extractPdfText(bytes);
+  return { title, fileName, fileData, bytes, checksum };
+}
+
+function insertBaseResume(prepared: ReturnType<typeof prepareBaseResume>, extraction: PdfExtraction) {
+  const { title, fileName, fileData, bytes, checksum } = prepared;
+  if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
   const id = idFor(`base-resume|${checksum}`);
   const timestamp = now();
   const hasBase = Boolean(db.prepare("SELECT id FROM base_resumes WHERE is_base = 1 LIMIT 1").get());
@@ -1779,6 +1787,17 @@ export function createBaseResume(input: { title: string; file_name: string; file
     VALUES (?,?,?,'application/pdf',?,?,?,?,?,?,?,?,?,?)`).run(id, title, fileName, fileData, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
   audit("base_resume", id, "uploaded", { bytes: bytes.length, sha256: checksum, extraction_status: extraction.status, page_count: extraction.pageCount });
   return listBaseResumes().find((resume) => resume.id === id) ?? null;
+}
+
+export function createBaseResume(input: BaseResumeUpload) {
+  const prepared = prepareBaseResume(input);
+  return insertBaseResume(prepared, extractPdfText(prepared.bytes));
+}
+
+/** Same as createBaseResume, but the PDF is parsed in a worker without blocking the event loop (HTTP upload path). */
+export async function createBaseResumeAsync(input: BaseResumeUpload) {
+  const prepared = prepareBaseResume(input);
+  return insertBaseResume(prepared, await extractPdfTextAsync(prepared.bytes));
 }
 
 export function selectBaseResume(id: string) {
@@ -2318,6 +2337,8 @@ export function updateApplication(id: string, patch: Partial<Application>) {
   const normalized = { ...patch } as Partial<Application>;
   const current = listApplications().find((application) => application.id === id);
   if (!current) return null;
+  // Re-sending the current status (e.g. a form that only edits notes) is not a transition.
+  if (normalized.status !== undefined && normalized.status === current.status) delete normalized.status;
   const validStatuses = ["queued", "in_progress", "needs_review", "submitted", "accepted", "rejected", "failed"];
   if (normalized.status !== undefined && !validStatuses.includes(String(normalized.status))) throw new Error("Status de candidatura inválido.");
   if (normalized.status === "in_progress") {

@@ -7,7 +7,7 @@ Para uma instalação nova, siga primeiro [`ops/hermes/ONBOARDING.md`](../ops/he
 ## 1. Premissas e topologia suportada
 
 - Uma única instância HTTP do Radar por arquivo SQLite. Dois servidores jamais devem abrir o mesmo `RADAR_DB_PATH` por volume compartilhado.
-- Node.js 22.5 ou superior no container Hermes (`node:sqlite`; a CI usa Node 24).
+- Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI usa Node 24).
 - Código e dados no volume persistente `/opt/data` (padrão `/opt/data/dashboard/busca_emprego`, banco em `data/radar.sqlite`); `/opt/hermes` é do root e somente leitura na imagem oficial.
 - Porta canônica 8787, escutando em `RADAR_BIND_HOST` (padrão `127.0.0.1`). Uma instalação pode trocar a porta em `.env.local`. Não publicar diretamente na internet.
 - Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`).

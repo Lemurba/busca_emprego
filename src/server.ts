@@ -1,9 +1,9 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addProfileFact, answerHumanQuestion, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResume, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { addProfileFact, answerHumanQuestion, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -264,7 +264,7 @@ const routes: Route[] = [
 
   // Currículos-base (upload JSON com PDF em base64; único corpo de até 8 MB)
   { method: "GET", pattern: r("/api/base-resumes"), handler: ({ res }) => ok(res, 200, listBaseResumes()) },
-  { method: "POST", pattern: r("/api/base-resumes"), bodyLimit: UPLOAD_BODY_LIMIT, handler: ({ res, body }) => ok(res, 201, createBaseResume(validateBody(schemas.baseResumeUpload, body) as never)) },
+  { method: "POST", pattern: r("/api/base-resumes"), bodyLimit: UPLOAD_BODY_LIMIT, handler: async ({ res, body }) => ok(res, 201, await createBaseResumeAsync(validateBody(schemas.baseResumeUpload, body) as never)) },
   { method: "GET", pattern: r("/api/base-resumes/{id}/file"), handler: ({ res, params }) => {
     const file = getBaseResumeFile(params[0]!);
     if (!file) throw notFound("Currículo-base não encontrado.");
@@ -397,7 +397,7 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: 
   }
 }
 
-const server = createServer(async (req, res) => {
+const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   try {
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("x-frame-options", "DENY");
@@ -414,13 +414,23 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     sendError(req, res, error);
   }
-});
+};
 
-server.headersTimeout = 15_000;
-server.requestTimeout = 60_000;
-server.keepAliveTimeout = 5_000;
-server.maxConnections = 256;
-server.maxRequestsPerSocket = 1000;
+function configure(instance: Server) {
+  instance.headersTimeout = 15_000;
+  instance.requestTimeout = 60_000;
+  instance.keepAliveTimeout = 5_000;
+  instance.maxConnections = 256;
+  instance.maxRequestsPerSocket = 1000;
+  return instance;
+}
+
+const server = configure(createServer(handleRequest));
+// Bound to a specific LAN address: also listen on loopback so local tooling (watchdog, health
+// check, Telegram bridges, executor) keeps reaching http://127.0.0.1:PORT.
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "0.0.0.0", "::"]);
+const loopbackServer = loopbackHosts.has(bindHost) ? null : configure(createServer(handleRequest));
+loopbackServer?.listen(port, "127.0.0.1");
 
 server.listen(port, bindHost, () => {
   console.log(JSON.stringify({ event: "server.started", service: "radar-dashboard", host: bindHost, port, environment, operator: operatorId }));
@@ -429,5 +439,5 @@ server.listen(port, bindHost, () => {
 });
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, () => { loopbackServer?.close(); server.close(() => process.exit(0)); });
 }

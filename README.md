@@ -1,10 +1,10 @@
 # Radar de Vagas + Hermes Agent
 
-Dashboard local para descoberta e acompanhamento de vagas, preparação de currículos ATS e registro de candidaturas. A interface usa HTML, CSS e TypeScript; o backend usa SQLite nativo do Node.js (`node:sqlite`, Node 22.5+).
+Dashboard local para descoberta e acompanhamento de vagas, preparação de currículos ATS e registro de candidaturas. A interface usa HTML, CSS e TypeScript; o backend usa SQLite nativo do Node.js (`node:sqlite`, Node 22.16+; `DatabaseSync.isTransaction` é usado nas transações aninhadas).
 
 ## Executar no ambiente Hermes
 
-O processo roda no container existente do Hermes Agent como serviço s6 e não cria outro container. Existe uma única instalação com configuração de produção. Requer Node.js 22.5 ou superior (`node:sqlite`; a CI usa Node 24) e npm.
+O processo roda no container existente do Hermes Agent como serviço s6 e não cria outro container. Existe uma única instalação com configuração de produção. Requer Node.js 22.16 ou superior (`node:sqlite`; a CI usa Node 24) e npm.
 
 ```bash
 npm ci

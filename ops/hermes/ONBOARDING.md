@@ -37,7 +37,7 @@ No repositório:
 mkdir -p /opt/data/dashboard
 git clone <url-do-repositorio> /opt/data/dashboard/busca_emprego
 cd /opt/data/dashboard/busca_emprego
-npm ci && npm test            # Node >= 22.5 (node:sqlite); a CI usa Node 24
+npm ci && npm test            # Node >= 22.16 (node:sqlite com isTransaction); a CI usa Node 24
 cp ops/hermes/radar.env.example .env.local && chmod 600 .env.local
 ```
 

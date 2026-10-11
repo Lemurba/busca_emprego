@@ -272,6 +272,9 @@ try {
     const run = claimed("worker-c1");
     assert.equal(store.getJob(run.job.id).status, "applying");
     assert.throws(() => store.updateApplication(run.application.id, { status: "failed" }), /application\.internal_route_required/);
+    const notesOnly = store.updateApplication(run.application.id, { status: "in_progress", notes: "aguardando portal" });
+    assert.equal(notesOnly.status, "in_progress", "re-sending the current status is a no-op, not a transition");
+    assert.equal(notesOnly.notes, "aguardando portal");
     assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "intruso", evidence_ref: "portal:ok" }), /worker_mismatch/);
     assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/outra" }), /application\.url_mismatch/);
     assert.equal(authState(run.application.id), "claimed");

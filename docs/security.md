@@ -16,7 +16,7 @@ O Radar guarda currículos, vagas e decisões do usuário e aciona um executor d
 
 ## Proteções de requisição
 
-- **Bind**: `RADAR_BIND_HOST` (padrão `127.0.0.1`). Exponha fora do container somente por proxy TLS ou, na LAN, com firewall restrito à sub-rede doméstica.
+- **Bind**: `RADAR_BIND_HOST` (padrão `127.0.0.1`). Com um IP específico de LAN, o servidor também escuta em `127.0.0.1:PORT`, para que watchdog, health check, pontes do Telegram e executor continuem funcionando. Exponha fora do container somente por proxy TLS ou, na LAN, com firewall restrito à sub-rede doméstica.
 - **Host**: só hosts de `RADAR_ALLOWED_HOSTS` são aceitos (resposta `421 host_not_allowed`) — mitiga DNS rebinding. Entradas sem porta valem também com a porta de escuta; `127.0.0.1`, `localhost` e `[::1]` são sempre aceitos.
 - **Sessão**: `radar_session` é um id aleatório de 32 bytes guardado em memória (reiniciar o serviço encerra as sessões); validade `RADAR_SESSION_TTL_DAYS` (padrão 30). `POST /api/logout` revoga a sessão.
 - **Corpo**: só objeto JSON (`400 invalid_body`), limite de 1 MB por requisição (8 MB só no upload de currículo-base, `413 payload_too_large`); campos validados com zod, URLs só `http(s)`.

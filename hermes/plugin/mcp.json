@@ -2,12 +2,15 @@
   "mcpServers": {
     "radar-vagas": {
       "command": "node",
-      "args": ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"],
+      "args": [
+        "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
+      ],
       "env": {
         "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
         "RADAR_ENVIRONMENT": "production",
         "TELEGRAM_ALLOWED_USERS": "${env:TELEGRAM_ALLOWED_USERS}",
-        "TELEGRAM_HOME_CHANNEL": "${env:TELEGRAM_HOME_CHANNEL}"
+        "TELEGRAM_HOME_CHANNEL": "${env:TELEGRAM_HOME_CHANNEL}",
+        "RADAR_AUTO_APPLICATION_ENABLED": "${env:RADAR_AUTO_APPLICATION_ENABLED}"
       }
     }
   }

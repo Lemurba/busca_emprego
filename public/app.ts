@@ -861,11 +861,22 @@ async function confirmResumeApproval(id: string) {
   closeModal(); await loadData(); toast("Currículo aprovado. Escolha agora o modo de candidatura.");
 }
 
+const applicationStatusLabels: Record<string, string> = { queued: "Na fila", needs_review: "Precisa de revisão", in_progress: "Em andamento", submitted: "Enviada", accepted: "Aceita", rejected: "Recusada", failed: "Falhou" };
+
+/** Current status plus the transitions the server accepts from the dashboard; claim and executor results stay with the authorized executor. */
+function applicationStatusOptions(application: { status: string; automation_mode?: string | null }) {
+  const manualTargets = application.status === "submitted" ? ["accepted", "rejected"]
+    : application.automation_mode === "manual" ? ["needs_review", "submitted"]
+    : ["queued", "in_progress", "failed"].includes(application.status) ? ["needs_review"] : [];
+  const statuses = [application.status, ...manualTargets.filter((status) => status !== application.status)];
+  return statuses.map((status) => `<option value="${escapeHtml(status)}" ${status === application.status ? "selected" : ""}>${escapeHtml(applicationStatusLabels[status] ?? status)}</option>`).join("");
+}
+
 function showApplicationModal(jobId: string) {
   const application = currentData().applications.find((item) => item.job_id === jobId);
   const job = currentData().jobs.find((item) => item.id === jobId);
   if (!application || !job) return;
-  openModal("Atualizar candidatura", `${job.title} · ${job.company}`, `<form data-form="application" data-application-id="${escapeHtml(application.id)}"><div class="form-grid"><div class="form-field"><label for="application-status">Status</label><select class="select" id="application-status" name="status"><option value="queued" ${application.status === "queued" ? "selected" : ""}>Na fila</option><option value="needs_review" ${application.status === "needs_review" ? "selected" : ""}>Precisa de revisão</option><option value="in_progress" ${application.status === "in_progress" ? "selected" : ""}>Em andamento</option><option value="submitted" ${application.status === "submitted" ? "selected" : ""}>Enviada</option><option value="failed" ${application.status === "failed" ? "selected" : ""}>Falhou</option></select></div><div class="form-field"><label for="application-date">Data da candidatura</label><input class="input" id="application-date" name="submitted_at" type="datetime-local" value="${escapeHtml(localFromIso(application.submitted_at))}" /></div><div class="form-field full"><label for="application-step">Etapa atual</label><input class="input" id="application-step" name="current_step" value="${escapeHtml(application.current_step)}" /></div><div class="form-field full"><label for="application-notes">Notas</label><textarea class="textarea" id="application-notes" name="notes">${escapeHtml(application.notes)}</textarea></div></div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar candidatura</button></div></form>`);
+  openModal("Atualizar candidatura", `${job.title} · ${job.company}`, `<form data-form="application" data-application-id="${escapeHtml(application.id)}"><div class="form-grid"><div class="form-field"><label for="application-status">Status</label><select class="select" id="application-status" name="status" data-current-status="${escapeHtml(application.status)}">${applicationStatusOptions(application)}</select></div><div class="form-field"><label for="application-date">Data da candidatura</label><input class="input" id="application-date" name="submitted_at" type="datetime-local" value="${escapeHtml(localFromIso(application.submitted_at))}" /></div><div class="form-field full"><label for="application-step">Etapa atual</label><input class="input" id="application-step" name="current_step" value="${escapeHtml(application.current_step)}" /></div><div class="form-field full"><label for="application-notes">Notas</label><textarea class="textarea" id="application-notes" name="notes">${escapeHtml(application.notes)}</textarea></div></div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar candidatura</button></div></form>`);
 }
 
 async function handleForm(form: HTMLFormElement) {
@@ -931,7 +942,9 @@ async function handleForm(form: HTMLFormElement) {
   }
   if (form.dataset.form === "application") {
     const status = get("status");
-    const body = { status, submitted_at: get("submitted_at") ? isoFromLocal(get("submitted_at")) : null, current_step: get("current_step"), notes: get("notes") };
+    const statusField = form.querySelector<HTMLSelectElement>("#application-status");
+    const changedStatus = status && status !== statusField?.dataset.currentStatus ? { status } : {};
+    const body = { ...changedStatus, submitted_at: get("submitted_at") ? isoFromLocal(get("submitted_at")) : null, current_step: get("current_step"), notes: get("notes") };
     await fetchJson(`/api/applications/${encodeURIComponent(form.dataset.applicationId ?? "")}`, { method: "PATCH", body: JSON.stringify(body) });
     closeModal(); await loadData(); toast("Candidatura atualizada.");
   }

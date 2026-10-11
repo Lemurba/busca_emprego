@@ -301,6 +301,28 @@ function extractWithPdfjsSync(bytes: Uint8Array): PdfjsPages {
   }
 }
 
+/** Mesmo worker, mas aguardado sem bloquear o event loop (para handlers HTTP assíncronos). */
+function extractWithPdfjsWorker(bytes: Uint8Array): Promise<PdfjsPages> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const signal = new Int32Array(new SharedArrayBuffer(4));
+    const { port1, port2 } = new MessageChannel();
+    const worker = new Worker(new URL(import.meta.url), {
+      workerData: { kind: WORKER_KIND, bytes: new Uint8Array(bytes), port: port2, signal },
+      transferList: [port2],
+    });
+    const finish = (error: Error | null, result?: PdfjsPages) => {
+      clearTimeout(timer);
+      port1.close();
+      void worker.terminate();
+      if (error) rejectPromise(error); else resolvePromise(result!);
+    };
+    const timer = setTimeout(() => finish(new Error("PDF_EXTRACTION_TIMEOUT")), PDF_EXTRACTION_TIMEOUT_MS);
+    port1.once("message", (reply: WorkerReply) => finish(reply.ok ? null : new Error(reply.error || "PDF_EXTRACTION_FAILED"), reply.ok ? reply.result : undefined));
+    worker.once("error", (error) => finish(error instanceof Error ? error : new Error(String(error))));
+    worker.once("exit", (code) => { if (code !== 0) finish(new Error("PDF_EXTRACTION_FAILED")); });
+  });
+}
+
 export interface TextQuality {
   visible: number;
   letterRatio: number;
@@ -363,11 +385,11 @@ export function extractPdfText(bytes: Uint8Array): PdfExtraction {
   return extractionFrom(result, bytes);
 }
 
-/** Variante assíncrona (sem worker thread) para chamadores que podem aguardar. */
+/** Variante assíncrona: extrai num worker thread com timeout, sem bloquear o event loop. */
 export async function extractPdfTextAsync(bytes: Uint8Array): Promise<PdfExtraction> {
   validatePdf(bytes);
   let result: PdfjsPages | Error;
-  try { result = await extractWithPdfjs(bytes); } catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
+  try { result = await extractWithPdfjsWorker(bytes); } catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
   return extractionFrom(result, bytes);
 }
 

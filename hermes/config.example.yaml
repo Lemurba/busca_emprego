@@ -52,7 +52,6 @@ mcp_servers:
         - radar_submit_application
         - radar_fail_application
         - radar_ask_human
-        - radar_answer_question
       resources: false
       prompts: false
 
