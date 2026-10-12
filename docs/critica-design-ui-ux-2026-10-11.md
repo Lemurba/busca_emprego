@@ -254,3 +254,26 @@ O tratamento de XSS está correto: `escapeHtml` aparece em todas as interpolaç�
 13. Usar rotas por hash (`#/vagas?fonte=…`) para preservar a página e os filtros.
 14. Consolidar os tokens (cores, tipografia, raio, espaçamento) e trocar os glifos Unicode por um conjunto de ícones SVG inline.
 15. Oferecer o mapa como opt-in, com aviso de terceiro, e registrar `modelContext` só com consentimento explícito.
+
+---
+
+## 12. Situação das correções (2026-10-12)
+
+Correções aplicadas em `public/app.ts`, `public/styles.css`, `public/index.html` e no novo `public/theme-init.js`. Foram conferidas no Chromium com dados de teste (desktop 1440px, tablet 800px, celular 390px, temas claro e escuro). Achados por número:
+
+**Corrigidos**
+- **Fluxos:** 2.1, 2.2 (todos os `window.prompt`/`confirm` viraram diálogos próprios; "Não tenho interesse" é um formulário único com categorias em português, contador e prévia do efeito); 2.3 (o filtro dos gráficos chega à lista de Vagas, com resumo e link "Ver vagas filtradas"); 2.4 (botões e formulários ficam bloqueados durante a requisição; duplo clique cria uma vaga só); 2.5 (descartar um formulário alterado pede confirmação); 2.6, 2.7 (o Kanban só oferece e só aceita a próxima etapa válida, destaca as colunas válidas durante o arraste, e cards sem movimento possível não são arrastáveis); 2.8 (rolagem e foco preservados ao filtrar); 2.9 (clicar no mapa não o expande mais); 2.10 (erros ficam 10s, têm botão de fechar e `role="alert"`); 2.11 (estado de carregamento inicial e de erro com "Tentar novamente"); 2.12 (o nome do agente está na primeira seção); 2.13 a 2.16.
+- **Opções:** 1.2 (agentes só na página Agentes); 1.4 (o mapa saiu da Visão geral e o donut saiu de Análises); 1.5 (avisos fixos removidos); 1.6 (formulário de vaga com o essencial visível e o resto em seções recolhíveis); 1.9 (contrato de API removido); 1.10 (**Editar vaga**, via `PATCH /api/jobs/{id}`); 1.11 (ordenação por match, prazo e salário; paginação de 50 em 50); 1.13 (o "Mover para…" aparece em todas as larguras); 1.14 (filtros por modelo de trabalho e match mínimo); 1.15 (página e filtros no endereço, ex.: `#/vagas?fonte=Gupy&ordem=deadline`); 1.16 (moeda e país editáveis); 1.17.
+- **UI:** 3.1 e 3.2 (tokens de cor e de tipografia, tema escuro só troca tokens, piso de 11px); 3.5, 3.6, 3.7; 3.8 (uma cor por situação, compartilhada por chip, donut, mapa e tabela); 3.9 (score em três faixas: ≥80, ≥50, abaixo); 3.10, 3.11, 3.14 a 3.20 (o FAB que colidia com os avisos foi removido; o tema é aplicado antes da primeira pintura).
+- **Acessibilidade:** contraste do tema claro ≥ 4,5:1 em todo texto (`--muted` passou para `#5b6880`, 5,6:1); 4.1 a 4.10 (foco preso e devolvido nos modais, Esc fecha, `aria-labelledby`, títulos e cards acionáveis por teclado, gráficos sem `role="listitem"`, `:focus-visible` global, `aria-current`, link "Pular para o conteúdo", alvos de 40–44px).
+- **Responsivo:** 5.1 a 5.5 (no celular, tabelas viram cartões com rótulos; o Kanban usa colunas de 82vw com *snap*; a tab bar tem rótulos de texto).
+- **Dados:** 6.1 a 6.6 (salários normalizados para mensal com a regra explícita no gráfico; vagas em outra moeda ficam fora e são contadas na nota; média por empresa calculada no cliente na moeda dominante; barras ordenadas com linha "Outras").
+- **Texto:** 7.1 a 7.6, 7.8 (dicionário único traduz papéis, tipos de fonte, acesso, estados de rodada, pergunta, versão, prontidão, tipo e origem de fato; regras aprendidas descritas em português; IDs e endpoints fora da tela; "Operação v2" virou "Saúde das buscas").
+- **Riscos:** 8.1 (a confirmação agora é uma caixa explícita com o resumo do que será autorizado; a proteção real continua sendo do servidor); 8.2 (as ferramentas para assistentes de IA do navegador só são registradas com consentimento em Configurações, desligadas por padrão); 8.3 (o mapa é opcional e explica o envio de dados ao OpenStreetMap antes de carregar); 8.4 (prévia do efeito da regra de supressão); 8.5 (confirmação para excluir currículo-base, mesclar duplicatas e restaurar versões); 8.6 (o campo de referência recusa valores que parecem token ou senha).
+- **Dívida:** CSS morto e o botão de menu fantasma removidos; o parâmetro `_eyebrow` foi eliminado; os rótulos de página vêm de um só mapa (`pageMeta`).
+- **Defeito encontrado durante a correção:** o formulário de currículo-base, na própria página, não tinha tratador de envio e recarregava a página. Agora envia pelo mesmo caminho dos modais.
+
+**Não corrigidos (exigem mudança no servidor ou têm escopo maior)**
+- Excluir ou arquivar vaga (1.10, parte) e **desfazer** decisões (1.12): não existem endpoints para isso. Por ora, "Não tenho interesse" faz o papel de descarte, e as regras criadas podem ser pausadas.
+- Navegação com 6 itens (11): as 10 páginas foram agrupadas em três seções na sidebar ("Acompanhar", "Entender", "Automação") e as duplicações foram removidas, mas Empresas e Análises continuam separadas.
+- Ícones SVG no lugar dos glifos Unicode (3.4) e o fim do HTML montado por concatenação de strings (§9): reescritas grandes, sem ganho funcional imediato.
