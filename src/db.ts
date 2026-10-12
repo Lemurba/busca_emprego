@@ -558,6 +558,10 @@ ensureColumn("jobs", "suppressed", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("jobs", "archived_at", "TEXT");
 ensureColumn("jobs", "archived_reason", "TEXT");
 ensureColumn("job_feedback_events", "undone_at", "TEXT");
+// Valor da faceta no momento do feedback/sinal: desfazer reverte exatamente o contador incrementado,
+// mesmo que a vaga tenha sido editada ou enriquecida depois.
+ensureColumn("job_feedback_events", "facet_value", "TEXT");
+ensureColumn("preference_signal_events", "facets_json", "TEXT");
 ensureColumn("base_resumes", "sha256", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("base_resumes", "extraction_status", "TEXT NOT NULL DEFAULT 'needs_review'");
 ensureColumn("base_resumes", "extracted_text", "TEXT NOT NULL DEFAULT ''");
@@ -805,8 +809,9 @@ export function listJobs(options: { includeArchived?: boolean } = {}): Job[] {
   return (db.prepare(`SELECT * FROM jobs ${where} ORDER BY match_score DESC, updated_at DESC`).all() as Record<string, unknown>[]).map(mapJob);
 }
 
-export function listArchivedJobs() {
-  return db.prepare("SELECT id,title,company,location,source,archived_at,archived_reason FROM jobs WHERE archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT 200").all();
+/** Todas as vagas excluídas do projeto: a lista de Configurações é o único caminho para restaurá-las. */
+export function listArchivedJobs(projectId = "busca-emprego") {
+  return db.prepare("SELECT id,title,company,location,source,archived_at,archived_reason FROM jobs WHERE archived_at IS NOT NULL AND project_id=? ORDER BY archived_at DESC").all(projectId);
 }
 
 export function listResumes(): Resume[] {
@@ -959,7 +964,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     agentConfigs: listAgentConfigs(projectId),
     sourceConfigs: listSourceConfigs(projectId),
     enrichmentEvents: listJobEnrichmentEvents(),
-    archivedJobs: listArchivedJobs(),
+    archivedJobs: listArchivedJobs(projectId),
     stats: {
       total: jobs.length,
       strongMatches: jobs.filter((job) => job.status === "strong_match" || job.match_score >= 80).length,
@@ -985,12 +990,7 @@ function expireJob(jobId: string, reason: string, sourceConfirmed: boolean, acto
   tx(() => {
     applyWorkflowCommand(jobId, "expire", { actor, data: { expired_at: timestamp, reason, ...(sourceConfirmed ? { source_confirmed: true } : { configured_rule: true }) } });
     db.prepare("UPDATE jobs SET decision = 'expired', decision_at = COALESCE(decision_at, ?), updated_at = ? WHERE id = ?").run(timestamp, timestamp, jobId);
-    for (const row of db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('queued','needs_review','failed')").all(jobId) as { id: string }[]) {
-      revokeAuthorizationRows(row.id, "job_expired");
-    }
-    db.prepare(`UPDATE applications SET automation_mode=CASE WHEN automation_mode='authorized_auto' THEN 'assisted' ELSE automation_mode END,
-      auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,updated_at=?
-      WHERE job_id=? AND status IN ('queued','needs_review','failed') AND authorization_id IS NOT NULL`).run(timestamp, jobId);
+    withdrawPendingAuthorizations(jobId, "job_expired", timestamp);
   });
   audit("job", jobId, "expired", { reason });
 }
@@ -1049,7 +1049,7 @@ const FORWARD_COMMAND: Readonly<Partial<Record<JobStatus, WorkflowCommand>>> = {
 const PRE_APPLICATION_STATUSES: readonly JobStatus[] = ["found", "validation", "strong_match", "review", "selected", "resume", "resume_approved", "ready_to_apply", "applying"];
 const ACTIVE_STATUSES: readonly JobStatus[] = [...PRE_APPLICATION_STATUSES, "applied", "interview_scheduled", "interview_completed"];
 /** Commands whose preconditions only make sense inside a domain operation (never via the generic endpoint). */
-const INTERNAL_ONLY_COMMANDS = new Set<WorkflowCommand>(["revise_resume", "abort_application"]);
+const INTERNAL_ONLY_COMMANDS = new Set<WorkflowCommand>(["revise_resume", "abort_application", "withdraw_interest"]);
 
 interface WorkflowContext {
   actor: string;
@@ -1389,8 +1389,13 @@ export function recordRoundSourceStatus(roundId: string, sourceId: string, statu
   return getRound(roundId, projectId);
 }
 
-function activeSuppression(job: Job, projectId = "busca-emprego") {
-  const rules = db.prepare("SELECT id,match_json FROM preference_rules WHERE project_id=? AND state='active'").all(projectId) as { id: string; match_json: string }[];
+type SuppressionRule = { id: string; match_json: string };
+
+function activeSuppressionRules(projectId: string) {
+  return db.prepare("SELECT id,match_json FROM preference_rules WHERE project_id=? AND state='active'").all(projectId) as SuppressionRule[];
+}
+
+function activeSuppression(job: Job, projectId = "busca-emprego", rules: SuppressionRule[] = activeSuppressionRules(projectId)) {
   const matched: string[] = [];
   for (const rule of rules) {
     const match = parseObject(rule.match_json);
@@ -1751,23 +1756,18 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
       const target: JobStatus = approved ? (application ? "ready_to_apply" : "resume_approved") : resume ? "resume" : "selected";
       advanceJobTo(id, target, { actor: "user", data: { reason: "interest_confirmed" } });
       // One positive signal per vacancy: toggling SEM TEMPO / TENHO INTERESSE must not inflate preferences.
-      const firstSignal = db.prepare("INSERT OR IGNORE INTO preference_signal_events (project_id,job_id,polarity,created_at) VALUES (?,?,'positive',?)").run(projectId, id, timestamp);
+      const facets = positiveSignalFacets(job);
+      const firstSignal = db.prepare("INSERT OR IGNORE INTO preference_signal_events (project_id,job_id,polarity,created_at,facets_json) VALUES (?,?,'positive',?,?)").run(projectId, id, timestamp, JSON.stringify(facets));
       if (firstSignal.changes) {
-        for (const [facetKey, value] of [["role_family", job.role_family ?? job.title], ["seniority", job.seniority], ["location", job.location], ["work_model", job.work_model]] as const) {
-          if (!value || value === "Não informado") continue;
+        for (const [facetKey, value] of facets) {
           db.prepare(`INSERT INTO preference_values (project_id,facet_key,normalized_value,positive_count,negative_count,updated_at)
             VALUES (?,?,?,1,0,?) ON CONFLICT(project_id,facet_key,normalized_value) DO UPDATE SET positive_count=positive_count+1,updated_at=excluded.updated_at`)
-            .run(projectId, facetKey, normalizedFacet(value), timestamp);
+            .run(projectId, facetKey, value, timestamp);
         }
       }
     } else {
       // SEM TEMPO withdraws the go-ahead: the current automatic authorization is revoked, not just hidden.
-      const applications = db.prepare("SELECT id FROM applications WHERE job_id = ? AND status IN ('queued', 'needs_review', 'failed')").all(id) as { id: string }[];
-      for (const application of applications) revokeAuthorizationRows(application.id, "decision_no_time");
-      db.prepare(`UPDATE applications SET automation_mode = CASE WHEN automation_mode = 'authorized_auto' THEN 'assisted' ELSE automation_mode END,
-        auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL, authorization_id = NULL, expires_at = NULL,
-        claimed_by = NULL, claimed_at = NULL, updated_at = ?
-        WHERE job_id = ? AND status IN ('queued', 'needs_review', 'failed')`).run(timestamp, id);
+      withdrawPendingAuthorizations(id, "decision_no_time", timestamp);
       abortApplyingJob(id, "decision_no_time", "user");
     }
     audit("job", id, "decision", { decision });
@@ -2016,6 +2016,7 @@ export function deleteBaseResume(id: string) {
 }
 
 export function createResume(input: Partial<Resume> & { job_id: string; title: string }) {
+  assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT decision FROM jobs WHERE id = ?").get(input.job_id) as { decision: string } | undefined;
   if (!job) throw new Error("Vaga não encontrada.");
   if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
@@ -2117,6 +2118,7 @@ export function reviewResume(id: string, input: Record<string, unknown> = {}, ac
 export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = "busca-emprego") {
   const job = getJob(String(input.job_id ?? ""));
   if (!job) throw new Error("job.not_found");
+  assertJobNotArchived(job.id);
   if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
   const snapshotId = String(input.profile_snapshot_id ?? getLatestProfileSnapshot(undefined, projectId)?.id ?? "");
   const snapshot = snapshotId ? db.prepare(`SELECT s.*,p.project_id,p.base_resume_id AS profile_base_resume_id
@@ -2169,6 +2171,7 @@ export function approveResume(id: string, confirmation: string, options: { overr
 }
 
 export function createApplication(input: Partial<Application> & { job_id: string }) {
+  assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT status, decision FROM jobs WHERE id = ?").get(input.job_id) as { status: string; decision: string } | undefined;
   const resumeId = input.resume_id ?? "";
   const resume = resumeId ? db.prepare("SELECT job_id, status FROM resumes WHERE id = ?").get(resumeId) as { job_id: string; status: string } | undefined : undefined;
@@ -2196,6 +2199,7 @@ export function selectManualApplication(id: string) {
     JOIN jobs ON jobs.id = applications.job_id
     WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; job_status: string; job_decision: string }) | undefined;
   if (!application) throw new Error("Candidatura ou currículo não encontrado.");
+  assertJobNotArchived(application.job_id);
   if (!["queued", "needs_review", "failed"].includes(application.status)) throw new Error("O modo só pode ser alterado antes do início do envio.");
   if (application.resume_status !== "approved" || application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) {
     throw new Error("Mantenha o interesse registrado e o currículo aprovado para escolher o modo manual.");
@@ -2220,6 +2224,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
     JOIN jobs ON jobs.id = applications.job_id
     WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; resume_version: number; job_status: string; job_decision: string }) | undefined;
   if (!application) throw new Error("Candidatura ou currículo não encontrado.");
+  assertJobNotArchived(application.job_id);
   if (application.automation_mode === "authorized_auto" || application.auto_authorized_at) throw new Error("Esta candidatura já recebeu uma autorização automática.");
   if (application.resume_id !== resumeId || application.authorized_resume_id && application.authorized_resume_id !== resumeId) throw new Error("A autorização precisa apontar para o currículo revisado desta vaga.");
   if (application.resume_status !== "approved") throw new Error("Aprove o currículo antes de autorizar a candidatura.");
@@ -2333,6 +2338,8 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
     const authorization = assertCurrentAuthorization(currentAuthorization(applicationId), "issued", timestamp);
     if (authorization.nonce !== nonce) throw new Error("application.authorization.unavailable");
     if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    // Vaga excluída nunca é enviada, mesmo que uma autorização tenha escapado da revogação.
+    assertJobNotArchived(String(authorization.job_id));
     const claimed = db.prepare(`UPDATE application_authorizations SET state='claimed',claimed_by=?,claimed_at=?
       WHERE id=? AND nonce=? AND state='issued' AND expires_at>?`).run(workerId.trim(), timestamp, String(authorization.id), nonce, timestamp);
     if (!claimed.changes) throw new Error("application.authorization.unavailable");
@@ -2488,6 +2495,12 @@ function normalizedFacet(value: unknown) {
   return String(value ?? "unknown").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/** Facetas (já normalizadas) que um interesse confirmado conta como sinal positivo. */
+function positiveSignalFacets(job: Job): [string, string][] {
+  const raw = [["role_family", job.role_family ?? job.title], ["seniority", job.seniority], ["location", job.location], ["work_model", job.work_model]] as const;
+  return raw.filter(([, value]) => value && value !== "Não informado").map(([key, value]) => [key, normalizedFacet(value)]);
+}
+
 function feedbackFacetValue(job: Job, detailKey: string) {
   const values: Record<string, unknown> = {
     title: job.title, role_family: job.role_family ?? job.title, company: job.company, seniority: job.seniority,
@@ -2523,8 +2536,8 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare(`INSERT INTO job_feedback_events
-      (id,project_id,job_id,cycle,mode,reason_code,detail_key,explanation,actor,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, jobId, cycle, mode, reasonCode, detailKey, explanation, actor, timestamp);
+      (id,project_id,job_id,cycle,mode,reason_code,detail_key,explanation,actor,created_at,facet_value)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, jobId, cycle, mode, reasonCode, detailKey, explanation, actor, timestamp, facetValue);
     db.prepare(`INSERT INTO preference_values
       (project_id,facet_key,normalized_value,positive_count,negative_count,updated_at)
       VALUES (?,?,?,0,1,?)
@@ -2550,8 +2563,7 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
       if (ACTIVE_STATUSES.includes(job.status)) {
         applyWorkflowCommand(jobId, "discard", { actor, data: { mode, reason_code: reasonCode, explanation, feedback_id: id } });
       }
-      db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('queued','needs_review','failed')").all(jobId).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "interest_withdrawn"));
-      db.prepare("UPDATE applications SET automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL WHERE job_id=? AND status IN ('queued','needs_review','failed')").run(jobId);
+      withdrawPendingAuthorizations(jobId, "interest_withdrawn", timestamp);
     }
     db.exec("COMMIT");
     audit("job", jobId, "feedback_recorded", { feedback_id: id, mode, reason_code: reasonCode, detail_key: detailKey, rule_id: ruleId });
@@ -2568,16 +2580,22 @@ export function listPreferenceState(projectId = "busca-emprego") {
   const values = db.prepare("SELECT * FROM preference_values WHERE project_id=? ORDER BY facet_key,normalized_value").all(projectId);
   const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString();
   const suggestions = db.prepare(`SELECT detail_key, COUNT(DISTINCT job_id) AS evidence_count
-    FROM job_feedback_events WHERE project_id=? AND mode='partial' AND created_at>=?
+    FROM job_feedback_events WHERE project_id=? AND mode='partial' AND undone_at IS NULL AND created_at>=?
     GROUP BY detail_key HAVING COUNT(DISTINCT job_id)>=3`).all(projectId, cutoff);
   return { rules, values, suggestions };
 }
 
 export function setPreferenceRuleState(id: string, state: string) {
   if (!['active', 'paused'].includes(state)) throw new Error("preference_rule.state.invalid");
-  const result = db.prepare("UPDATE preference_rules SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
-  if (!result.changes) throw new Error("preference_rule.not_found");
-  audit("preference_rule", id, "state_changed", { state });
+  const rule = db.prepare("SELECT project_id,state FROM preference_rules WHERE id=?").get(id) as { project_id: string; state: string } | undefined;
+  if (!rule) throw new Error("preference_rule.not_found");
+  // Uma regra desfeita junto com o feedback de origem não volta a valer por aqui.
+  if (rule.state === "undone") throw new Error("preference_rule.undone");
+  tx(() => {
+    db.prepare("UPDATE preference_rules SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
+    if (state === "paused") refreshSuppression(rule.project_id);
+    audit("preference_rule", id, "state_changed", { state });
+  });
   return db.prepare("SELECT * FROM preference_rules WHERE id=?").get(id);
 }
 
@@ -2590,7 +2608,7 @@ function assertJobNotArchived(id: string) {
   if (row?.archived_at) throw new Error("job.archived");
 }
 
-/** Revoga autorizações automáticas pendentes da vaga; usado ao excluir e ao desfazer interesse. */
+/** Revoga autorizações automáticas pendentes da vaga (excluir, expirar, sem tempo, sem interesse). */
 function withdrawPendingAuthorizations(jobId: string, reason: string, timestamp: string) {
   const applications = db.prepare("SELECT id FROM applications WHERE job_id = ? AND status IN ('queued', 'needs_review', 'failed')").all(jobId) as { id: string }[];
   for (const application of applications) revokeAuthorizationRows(application.id, reason);
@@ -2633,15 +2651,18 @@ export function restoreJob(id: string, actor = "user") {
   return getJob(id);
 }
 
-/** Recalcula a supressão das vagas depois que uma regra deixa de valer. */
+/** Recalcula a supressão das vagas depois que uma regra deixa de valer (pausada ou desfeita). */
 function refreshSuppression(projectId: string) {
+  const rules = activeSuppressionRules(projectId);
   const suppressed = (db.prepare("SELECT * FROM jobs WHERE project_id=? AND suppressed=1").all(projectId) as Record<string, unknown>[]).map(mapJob);
+  const clear = db.prepare("UPDATE jobs SET suppressed=0 WHERE id=?");
   for (const job of suppressed) {
-    if (!activeSuppression(job, projectId).length) db.prepare("UPDATE jobs SET suppressed=0 WHERE id=?").run(job.id);
+    if (!activeSuppression(job, projectId, rules).length) clear.run(job.id);
   }
 }
 
-function undoFeedbackRows(feedback: { id: string; project_id: string; mode: string; detail_key: string | null; job_id: string }, facetValue: string, timestamp: string) {
+function undoFeedbackRows(feedback: { id: string; project_id: string; mode: string; detail_key: string | null; job_id: string; facet_value: string | null }, job: Job, timestamp: string) {
+  const facetValue = feedback.facet_value ?? feedbackFacetValue(job, feedback.detail_key ?? "");
   db.prepare("UPDATE job_feedback_events SET undone_at=? WHERE id=?").run(timestamp, feedback.id);
   db.prepare(`UPDATE preference_values SET negative_count = MAX(negative_count - 1, 0), updated_at=?
     WHERE project_id=? AND facet_key=? AND normalized_value=?`).run(timestamp, feedback.project_id, feedback.detail_key ?? "", facetValue);
@@ -2675,14 +2696,14 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   const timestamp = now();
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
   const locked = activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status);
-  type FeedbackRow = { id: string; project_id: string; mode: string; detail_key: string | null; job_id: string };
+  type FeedbackRow = { id: string; project_id: string; mode: string; detail_key: string | null; job_id: string; facet_value: string | null };
 
   if (input.feedback_id) {
-    const feedback = db.prepare("SELECT id,project_id,mode,detail_key,job_id FROM job_feedback_events WHERE id=? AND job_id=? AND undone_at IS NULL").get(String(input.feedback_id), id) as FeedbackRow | undefined;
+    const feedback = db.prepare("SELECT id,project_id,mode,detail_key,job_id,facet_value FROM job_feedback_events WHERE id=? AND job_id=? AND undone_at IS NULL").get(String(input.feedback_id), id) as FeedbackRow | undefined;
     if (!feedback) throw new Error("decision.undo.feedback_not_found");
     if (feedback.mode !== "partial") throw new Error("decision.undo.use_current_decision");
     tx(() => {
-      undoFeedbackRows(feedback, feedbackFacetValue(job, feedback.detail_key ?? ""), timestamp);
+      undoFeedbackRows(feedback, job, timestamp);
       audit("job", id, "feedback_undone", { feedback_id: feedback.id, actor });
     });
     return { undone: "partial_feedback", feedback_id: feedback.id, job: getJob(id) };
@@ -2693,10 +2714,10 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   if (locked) throw new Error("decision.undo.application_locked");
 
   if (decision === "not_interested") {
-    const feedback = db.prepare("SELECT id,project_id,mode,detail_key,job_id FROM job_feedback_events WHERE job_id=? AND mode='total' AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1").get(id) as FeedbackRow | undefined;
+    const feedback = db.prepare("SELECT id,project_id,mode,detail_key,job_id,facet_value FROM job_feedback_events WHERE job_id=? AND mode='total' AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1").get(id) as FeedbackRow | undefined;
     let rulesUndone = 0;
     tx(() => {
-      if (feedback) rulesUndone = undoFeedbackRows(feedback, feedbackFacetValue(job, feedback.detail_key ?? ""), timestamp);
+      if (feedback) rulesUndone = undoFeedbackRows(feedback, job, timestamp);
       db.prepare("UPDATE jobs SET decision='pending', decision_at=?, updated_at=? WHERE id=?").run(timestamp, timestamp, id);
       if (job.status === "discarded") applyWorkflowCommand(id, "reopen", { actor, data: { reason: "decision_undone" } });
       audit("job", id, "decision_undone", { previous: decision, feedback_id: feedback?.id ?? null, rules_undone: rulesUndone, actor });
@@ -2711,12 +2732,14 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
       if (job.status === "selected") applyWorkflowCommand(id, "withdraw_interest", { actor, data: { reason: "decision_undone" } });
       db.prepare("UPDATE jobs SET decision='pending', decision_at=?, updated_at=? WHERE id=?").run(timestamp, timestamp, id);
       // Remove o sinal positivo contado quando o interesse foi registrado.
-      const signal = db.prepare("DELETE FROM preference_signal_events WHERE project_id=? AND job_id=? AND polarity='positive'").run(projectId, id);
-      if (signal.changes) {
-        for (const [facetKey, value] of [["role_family", job.role_family ?? job.title], ["seniority", job.seniority], ["location", job.location], ["work_model", job.work_model]] as const) {
-          if (!value || value === "Não informado") continue;
+      const signal = db.prepare("SELECT facets_json FROM preference_signal_events WHERE project_id=? AND job_id=? AND polarity='positive'").get(projectId, id) as { facets_json: string | null } | undefined;
+      if (signal) {
+        db.prepare("DELETE FROM preference_signal_events WHERE project_id=? AND job_id=? AND polarity='positive'").run(projectId, id);
+        // Sinais antigos (sem facets_json) caem no valor atual da vaga.
+        const facets = signal.facets_json ? JSON.parse(signal.facets_json) as [string, string][] : positiveSignalFacets(job);
+        for (const [facetKey, value] of facets) {
           db.prepare(`UPDATE preference_values SET positive_count = MAX(positive_count - 1, 0), updated_at=?
-            WHERE project_id=? AND facet_key=? AND normalized_value=?`).run(timestamp, projectId, facetKey, normalizedFacet(value));
+            WHERE project_id=? AND facet_key=? AND normalized_value=?`).run(timestamp, projectId, facetKey, value);
         }
       }
       audit("job", id, "decision_undone", { previous: decision, actor });
@@ -2724,7 +2747,8 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
     return { undone: decision, job: getJob(id) };
   }
 
-  // no_time e qualquer outra decisão simples.
+  // Só "sem tempo" volta direto; "expired"/"applied" refletem o estado da vaga e não são desfeitos.
+  if (decision !== "no_time") throw new Error("decision.undo.not_undoable");
   tx(() => {
     db.prepare("UPDATE jobs SET decision='pending', decision_at=?, updated_at=? WHERE id=?").run(timestamp, timestamp, id);
     audit("job", id, "decision_undone", { previous: decision, actor });

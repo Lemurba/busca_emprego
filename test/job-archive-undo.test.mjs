@@ -129,6 +129,73 @@ check("sem decisão não há o que desfazer; códigos viram 422 com mensagem ami
   assert.equal(errorResponse(new Error("job.archived")).status, 422);
 });
 
+check("vaga excluída não recebe currículo nem candidatura", () => {
+  const job = newJob();
+  store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
+  store.archiveJob(job.id, { confirmation: "EXCLUIR" });
+  assert.equal(codeOf(() => store.createResume({ job_id: job.id, title: "CV", content: "Experiência" })), "job.archived");
+  assert.equal(codeOf(() => store.createApplication({ job_id: job.id, resume_id: "qualquer" })), "job.archived");
+});
+
+check("regra desfeita não pode ser reativada", () => {
+  const job = newJob({ company: "Regra Desfeita SA" });
+  const feedback = store.recordJobFeedback(job.id, { mode: "total", reason_code: "company", detail_key: "company", explanation: "Não quero esta empresa", confirmation: "SEM INTERESSE" });
+  store.undoJobDecision(job.id);
+  assert.equal(codeOf(() => store.setPreferenceRuleState(feedback.rule_id, "active")), "preference_rule.undone");
+  assert.equal(store.listPreferenceState().rules.find((item) => item.id === feedback.rule_id).state, "undone");
+});
+
+check("pausar uma regra libera as vagas que só ela ocultava", () => {
+  const job = newJob({ company: "Pausa Ltda" });
+  const feedback = store.recordJobFeedback(job.id, { mode: "total", reason_code: "company", detail_key: "company", explanation: "Não quero esta empresa", confirmation: "SEM INTERESSE" });
+  const other = newJob({ company: "Pausa Ltda" });
+  store.db.prepare("UPDATE jobs SET suppressed=1 WHERE id=?").run(other.id);
+  store.setPreferenceRuleState(feedback.rule_id, "paused");
+  assert.equal(Number(store.db.prepare("SELECT suppressed FROM jobs WHERE id=?").get(other.id).suppressed), 0);
+});
+
+check("withdraw_interest é reservado ao fluxo interno", () => {
+  const job = newJob();
+  store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
+  assert.match(codeOf(() => store.transitionJob(job.id, { command: "withdraw_interest", data: { reason: "x" } })), /reservado/u);
+  assert.equal(store.getJob(job.id).status, "selected");
+});
+
+check("decisão “expirada” não é desfeita", () => {
+  const job = newJob();
+  store.db.prepare("UPDATE jobs SET decision='expired', status='expired' WHERE id=?").run(job.id);
+  assert.equal(codeOf(() => store.undoJobDecision(job.id)), "decision.undo.not_undoable");
+  assert.equal(store.getJob(job.id).decision, "expired");
+});
+
+check("feedback parcial desfeito não alimenta sugestões de regra", () => {
+  const ids = [1, 2, 3].map(() => newJob({ work_model: "Presencial" }).id);
+  const feedbacks = ids.map((id) => store.recordJobFeedback(id, { mode: "partial", reason_code: "work_model", detail_key: "work_model", explanation: "Prefiro trabalho remoto", confirmation: "REJEITAR PARCIALMENTE" }));
+  assert.ok(store.listPreferenceState().suggestions.some((item) => item.detail_key === "work_model"));
+  ids.forEach((id, index) => store.undoJobDecision(id, { feedback_id: feedbacks[index].feedback_id }));
+  assert.ok(!store.listPreferenceState().suggestions.some((item) => item.detail_key === "work_model"));
+});
+
+check("desfazer reverte o valor registrado, mesmo que a vaga mude depois", () => {
+  const job = newJob({ location: "Olinda" });
+  const negative = () => store.listPreferenceState().values.find((item) => item.facet_key === "location" && item.normalized_value === "olinda")?.negative_count ?? 0;
+  const feedback = store.recordJobFeedback(job.id, { mode: "partial", reason_code: "location", detail_key: "location", explanation: "Prefiro outra cidade", confirmation: "REJEITAR PARCIALMENTE" });
+  assert.equal(negative(), 1);
+  store.db.prepare("UPDATE jobs SET location='Olinda, PE' WHERE id=?").run(job.id);
+  store.undoJobDecision(job.id, { feedback_id: feedback.feedback_id });
+  assert.equal(negative(), 0);
+});
+
+check("desfazer interesse reverte as facetas registradas, mesmo que a vaga mude depois", () => {
+  const job = newJob({ location: "Caruaru" });
+  const positive = () => store.listPreferenceState().values.find((item) => item.facet_key === "location" && item.normalized_value === "caruaru")?.positive_count ?? 0;
+  store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
+  assert.equal(positive(), 1);
+  store.db.prepare("UPDATE jobs SET location='Caruaru, PE' WHERE id=?").run(job.id);
+  store.undoJobDecision(job.id);
+  assert.equal(positive(), 0);
+});
+
 console.log("excluir vaga e desfazer decisões:");
 console.log(results.join("\n"));
 store.db.close?.();
