@@ -198,6 +198,15 @@ const FRIENDLY: Record<string, string> = {
   PDF_SIGNATURE_INVALID: "O arquivo enviado não parece ser um PDF válido.",
   "workflow.version_conflict": "A vaga foi alterada em outra tela. Atualize e tente de novo.",
   "application.url_mismatch": "A URL observada não corresponde à URL autorizada.",
+  "job.archived": "Esta vaga foi excluída. Restaure-a antes de alterá-la.",
+  "job.not_archived": "Esta vaga não está excluída.",
+  "job.archive.confirmation_required": "Confirme a exclusão com EXCLUIR.",
+  "job.archive.application_in_progress": "A candidatura desta vaga está sendo enviada agora; aguarde antes de excluir.",
+  "decision.undo.nothing_to_undo": "Não há decisão para desfazer nesta vaga.",
+  "decision.undo.application_locked": "A decisão não pode ser desfeita: a candidatura está em andamento ou já foi enviada.",
+  "decision.undo.interest_has_progress": "O interesse já gerou currículo ou candidatura; use “Não tenho interesse” para sair do fluxo.",
+  "decision.undo.feedback_not_found": "Esse registro já foi desfeito ou não pertence a esta vaga.",
+  "decision.undo.use_current_decision": "Para desfazer o descarte, desfaça a decisão atual da vaga.",
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
   "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
   "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
@@ -212,7 +221,7 @@ const STATUS_RULES: Array<[RegExp, number]> = [
   [/(?:^|\.)not_found$/u, 404],
   [/version_conflict|\.race$|\.already_active$/u, 409],
   [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
-  [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict)\./u, 422],
+  [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict|decision)\./u, 422],
 ];
 
 const STABLE_CODE = /^(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]+)(?::[A-Za-z0-9_.,:-]{0,200})?$/u;

@@ -528,6 +528,11 @@ body.map-expanded { overflow: hidden; }
 .toast span { flex: 1; }
 .toast.error { color: var(--red-fg); border-color: var(--red-line); background: var(--red-bg); }
 .toast-close { flex: 0 0 auto; width: 28px; height: 28px; margin: -4px 0; border: 0; border-radius: 6px; color: inherit; background: transparent; font-size: 18px; }
+.toast-action { flex: 0 0 auto; min-height: 28px; margin: -4px 0; padding: 0 10px; border: 1px solid currentColor; border-radius: 6px; color: inherit; background: transparent; font-weight: 700; }
+.decision-notice { align-items: center; }
+.decision-notice > div { flex: 1; }
+.decision-notice .secondary-button { min-height: 34px; }
+.empty-state.compact { min-height: 72px; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Acesso */

@@ -120,6 +120,8 @@ export const schemas = {
   jobCreate: z.looseObject(jobFields),
   jobPatch: z.looseObject(jobFields),
   jobDecision: z.looseObject({ decision: shortText.optional(), confirmation: shortText.optional() }),
+  jobArchive: z.looseObject({ reason: optText, confirmation: optShort }),
+  jobUndoDecision: z.looseObject({ feedback_id: optShort }),
   jobFeedback: z.looseObject({ mode: optShort, reason_code: optShort, detail_key: optShort, explanation: optText, confirmation: optShort }),
   jobTransition: z.looseObject({ command: shortText.optional(), expected_version: numeric.optional(), evidence_ref: optShort, data: z.record(z.string(), z.unknown()).nullable().optional() }),
   applicationCreate: z.looseObject({ job_id: optId, resume_id: optId, automation_mode: optShort, status: optShort, current_step: optShort, notes: optText }),

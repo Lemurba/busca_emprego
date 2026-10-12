@@ -21,7 +21,8 @@ export type WorkflowCommand =
   | "abort_application"
   | "discard"
   | "expire"
-  | "reopen";
+  | "reopen"
+  | "withdraw_interest";
 
 export interface WorkflowState {
   status: JobStatus;
@@ -162,6 +163,8 @@ const RULES: Readonly<Record<WorkflowCommand, Rule>> = {
   discard: { from: ACTIVE, to: "discarded", validate: combine(required("mode", "reason_code", "explanation"), (d) => String(d.explanation ?? "").trim().length >= 10 ? [] : ["explanation"]) },
   expire: { from: PRE_APPLICATION, to: "expired", validate: combine(required("expired_at", "reason"), oneTruthy("source_confirmed", "configured_rule")) },
   reopen: { from: TERMINAL, to: "found", validate: required("reason") },
+  // Desfazer "Tenho interesse" antes de qualquer currículo: a vaga volta para revisão.
+  withdraw_interest: { from: ["selected"], to: "review", validate: required("reason") },
 };
 
 export const workflowRules = RULES;

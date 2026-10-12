@@ -273,7 +273,10 @@ Correções aplicadas em `public/app.ts`, `public/styles.css`, `public/index.htm
 - **Dívida:** CSS morto e o botão de menu fantasma removidos; o parâmetro `_eyebrow` foi eliminado; os rótulos de página vêm de um só mapa (`pageMeta`).
 - **Defeito encontrado durante a correção:** o formulário de currículo-base, na própria página, não tinha tratador de envio e recarregava a página. Agora envia pelo mesmo caminho dos modais.
 
-**Não corrigidos (exigem mudança no servidor ou têm escopo maior)**
-- Excluir ou arquivar vaga (1.10, parte) e **desfazer** decisões (1.12): não existem endpoints para isso. Por ora, "Não tenho interesse" faz o papel de descarte, e as regras criadas podem ser pausadas.
+- **Excluir vaga e desfazer decisões (1.10 e 1.12), adicionados depois:** novos endpoints `DELETE /api/jobs/{id}` (exclusão reversível), `POST /api/jobs/{id}/restore` e `POST /api/jobs/{id}/decision/undo`, documentados em `docs/agent-api.md` e cobertos por `test/job-archive-undo.test.mjs`. Na interface: "Excluir vaga…" no detalhe; "Desfazer" no aviso logo após excluir, "Sem tempo" e "Não tenho interesse"; a decisão atual aparece no detalhe com botão "Desfazer"; e a lista "Vagas excluídas" em Configurações permite restaurar.
+- **Defeito encontrado nesta etapa:** o diálogo "Não tenho interesse" deixava digitar um detalhe livre no modo parcial, mas o servidor só aceita uma lista fixa (`feedback.detail_key.incompatible`). Agora o detalhe é uma lista com as opções aceitas.
+
+**Não corrigidos (escopo maior)**
+- Desfazer "Mesclar duplicatas" e "Publicar agente": o histórico de versões já permite restaurar uma versão anterior do agente; mesclar continua definitivo e por isso pede confirmação.
 - Navegação com 6 itens (11): as 10 páginas foram agrupadas em três seções na sidebar ("Acompanhar", "Entender", "Automação") e as duplicações foram removidas, mas Empresas e Análises continuam separadas.
 - Ícones SVG no lugar dos glifos Unicode (3.4) e o fim do HTML montado por concatenação de strings (§9): reescritas grandes, sem ganho funcional imediato.
