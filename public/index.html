@@ -6,84 +6,88 @@
     <meta name="theme-color" content="#111b38" />
     <meta name="description" content="Dashboard leve para descobrir, avaliar e acompanhar vagas." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- Aplica o tema antes da primeira pintura (evita o flash do tema claro). -->
+    <script src="/theme-init.js"></script>
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
     <title>Radar de Vagas</title>
   </head>
   <body>
+    <a class="skip-link" href="#view">Pular para o conteúdo</a>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Navegação principal">
         <div class="brand">
-          <span class="brand-mark">◈</span>
+          <span class="brand-mark" aria-hidden="true">◈</span>
           <span><strong>Radar</strong><small>de vagas</small></span>
         </div>
-        <div class="sidebar-label">Workspace</div>
-        <nav class="main-nav">
-          <button class="nav-item active" data-page="overview"><span class="nav-icon">⌂</span><span>Visão geral</span></button>
-          <button class="nav-item" data-page="board"><span class="nav-icon">▦</span><span>Kanban</span><span class="nav-count" id="nav-total">0</span></button>
-          <button class="nav-item" data-page="jobs"><span class="nav-icon">⌕</span><span>Vagas</span></button>
-          <button class="nav-item" data-page="applications"><span class="nav-icon">✓</span><span>Candidaturas</span></button>
-          <button class="nav-item" data-page="resumes"><span class="nav-icon">▤</span><span>Currículos ATS</span></button>
-          <button class="nav-item" data-page="companies"><span class="nav-icon">▥</span><span>Empresas</span></button>
-          <button class="nav-item" data-page="analytics"><span class="nav-icon">◒</span><span>Análises</span></button>
-          <button class="nav-item" data-page="operations"><span class="nav-icon">◎</span><span>Operação v2</span></button>
-          <button class="nav-item" data-page="agents"><span class="nav-icon">⚙</span><span>Agentes</span></button>
+        <nav class="main-nav" aria-label="Páginas">
+          <div class="sidebar-label">Acompanhar</div>
+          <button class="nav-item active" data-page="overview"><span class="nav-icon" aria-hidden="true">⌂</span><span>Visão geral</span></button>
+          <button class="nav-item" data-page="board"><span class="nav-icon" aria-hidden="true">▦</span><span>Quadro</span></button>
+          <button class="nav-item" data-page="jobs"><span class="nav-icon" aria-hidden="true">⌕</span><span>Vagas</span><span class="nav-count" id="nav-total" aria-label="vagas no total">0</span></button>
+          <button class="nav-item" data-page="applications"><span class="nav-icon" aria-hidden="true">✓</span><span>Candidaturas</span></button>
+          <button class="nav-item" data-page="resumes"><span class="nav-icon" aria-hidden="true">▤</span><span>Currículos</span></button>
+          <div class="sidebar-label">Entender</div>
+          <button class="nav-item" data-page="analytics"><span class="nav-icon" aria-hidden="true">◒</span><span>Análises</span></button>
+          <button class="nav-item" data-page="companies"><span class="nav-icon" aria-hidden="true">▥</span><span>Empresas</span></button>
+          <div class="sidebar-label">Automação</div>
+          <button class="nav-item" data-page="agents"><span class="nav-icon" aria-hidden="true">◇</span><span>Agentes</span></button>
+          <button class="nav-item" data-page="operations"><span class="nav-icon" aria-hidden="true">◎</span><span>Saúde das buscas</span></button>
         </nav>
         <div class="sidebar-bottom">
-          <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span><span>Configurações</span></button>
-          <div class="profile-mini"><span class="avatar">RL</span><span><strong>Perfil local</strong><small>Dados privados</small></span></div>
+          <button class="nav-item" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>Configurações</span></button>
+          <div class="profile-mini"><span class="avatar" aria-hidden="true">◉</span><span><strong>Uso pessoal</strong><small>Dados guardados localmente</small></span></div>
         </div>
       </aside>
 
       <main class="main-content">
         <header class="topbar">
-          <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menu">☰</button>
-          <div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="page-title">Visão geral</strong></div>
+          <div class="breadcrumb"><span>Radar</span><b aria-hidden="true">/</b><strong id="page-title">Visão geral</strong></div>
           <div class="topbar-actions">
-            <span class="sync-status"><i></i><span id="sync-label">SQLite local</span></span>
+            <span class="sync-status" data-tone="busy"><i aria-hidden="true"></i><span id="sync-label" aria-live="polite">Carregando…</span></span>
             <button class="icon-button" id="theme-toggle" title="Alternar tema" aria-label="Alternar tema" aria-pressed="false">◐</button>
             <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
-            <button class="icon-button" id="logout-button" title="Sair" aria-label="Sair do dashboard">Sair</button>
-            <button class="primary-button compact" id="top-add-job" data-action="add-job"><span>＋</span> Nova vaga</button>
+            <button class="icon-button text-icon-button" id="logout-button" title="Sair" aria-label="Sair do painel">Sair</button>
           </div>
         </header>
-        <div id="view" class="page-content" aria-live="polite"></div>
+        <div id="view" class="page-content" tabindex="-1"><div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Carregando suas vagas…</div></div>
       </main>
     </div>
 
     <nav class="mobile-tabbar" aria-label="Navegação móvel">
-      <button class="mobile-tab active" data-page="overview" aria-label="Visão geral"><span aria-hidden="true">⌂</span></button>
-      <button class="mobile-tab" data-page="board" aria-label="Kanban"><span aria-hidden="true">▦</span></button>
-      <button class="mobile-tab" data-page="jobs" aria-label="Vagas"><span aria-hidden="true">⌕</span></button>
-      <button class="mobile-tab" data-mobile-more aria-label="Mais opções" aria-expanded="false"><span aria-hidden="true">•••</span></button>
+      <button class="mobile-tab active" data-page="overview"><span aria-hidden="true">⌂</span><small>Início</small></button>
+      <button class="mobile-tab" data-page="board"><span aria-hidden="true">▦</span><small>Quadro</small></button>
+      <button class="mobile-tab" data-page="jobs"><span aria-hidden="true">⌕</span><small>Vagas</small></button>
+      <button class="mobile-tab" data-mobile-more aria-expanded="false" aria-haspopup="dialog"><span aria-hidden="true">•••</span><small>Mais</small></button>
     </nav>
-    <div class="mobile-more-sheet" role="dialog" aria-modal="true" aria-label="Mais opções" hidden>
+    <div class="mobile-more-sheet" role="dialog" aria-modal="true" aria-label="Mais páginas" hidden>
       <div class="mobile-sheet-handle" aria-hidden="true"></div>
-      <div class="mobile-sheet-head"><strong>Mais opções</strong><button class="modal-close" data-close-mobile-more aria-label="Fechar">×</button></div>
-      <nav class="mobile-more-grid" aria-label="Outras áreas">
+      <div class="mobile-sheet-head"><strong>Mais páginas</strong><button class="modal-close" data-close-mobile-more aria-label="Fechar">×</button></div>
+      <nav class="mobile-more-grid" aria-label="Outras páginas">
         <button data-page="applications"><span aria-hidden="true">✓</span>Candidaturas</button>
         <button data-page="resumes"><span aria-hidden="true">▤</span>Currículos</button>
-        <button data-page="companies"><span aria-hidden="true">▥</span>Empresas</button>
         <button data-page="analytics"><span aria-hidden="true">◒</span>Análises</button>
-        <button data-page="operations"><span aria-hidden="true">◎</span>Operação v2</button>
-        <button data-page="agents"><span aria-hidden="true">⚙</span>Agentes</button>
+        <button data-page="companies"><span aria-hidden="true">▥</span>Empresas</button>
+        <button data-page="agents"><span aria-hidden="true">◇</span>Agentes</button>
+        <button data-page="operations"><span aria-hidden="true">◎</span>Saúde das buscas</button>
         <button data-page="settings"><span aria-hidden="true">⚙</span>Configurações</button>
       </nav>
     </div>
-    <button class="mobile-sheet-backdrop" data-close-mobile-more aria-label="Fechar mais opções" hidden></button>
+    <button class="mobile-sheet-backdrop" data-close-mobile-more aria-label="Fechar mais páginas" tabindex="-1" hidden></button>
 
     <section id="auth-screen" class="auth-screen" role="dialog" aria-modal="true" aria-labelledby="auth-title" hidden>
       <div class="auth-card">
         <span class="brand-mark" aria-hidden="true">◈</span>
         <h1 id="auth-title">Acesso ao Radar de Vagas</h1>
-        <p>Sua sessão não foi encontrada ou expirou. Abra o <strong>link de acesso enviado pelo Hermes</strong> no Telegram neste navegador.</p>
-        <p class="auth-hint">Sem o link? Na máquina do Radar, rode <code>node scripts/ops/dashboard-link.mjs --send</code> para receber um novo pelo Telegram.</p>
+        <p>Sua sessão expirou ou não foi encontrada. Abra neste navegador o <strong>link de acesso que o Hermes enviou no Telegram</strong>.</p>
+        <details class="auth-hint"><summary>Não tem o link?</summary><p>Peça um novo link ao Hermes. Quem administra o Radar pode gerar um na máquina do servidor com <code>node scripts/ops/dashboard-link.mjs --send</code>.</p></details>
         <button class="primary-button" id="auth-retry" type="button">Tentar novamente</button>
       </div>
     </section>
 
     <div id="modal-root" class="modal-root" hidden></div>
-    <div id="toast-root" class="toast-root" aria-live="polite"></div>
+    <div id="dialog-root" class="modal-root dialog-root" hidden></div>
+    <div id="toast-root" class="toast-root"></div>
     <script src="/app.js" defer></script>
   </body>
 </html>

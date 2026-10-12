@@ -211,6 +211,30 @@ Valores aceitos: `interested` + `TENHO INTERESSE` ou `no_time` + `SEM TEMPO`. Re
 
 Registra feedback explícito. `mode` é `total` ou `partial`; `reason_code`, `detail_key` e justificativa de 10–500 caracteres são obrigatórios. Total exige `SEM INTERESSE`, descarta a vaga e cria regra; parcial exige `REJEITAR PARCIALMENTE` e conserva estado/decisão.
 
+### `POST /api/jobs/{id}/decision/undo`
+
+Desfaz a decisão atual da vaga e a devolve para `pending`. Corpo opcional: `{ "feedback_id": "..." }` desfaz só aquele feedback **parcial**, sem mexer na decisão.
+
+| Decisão atual | Efeito |
+| --- | --- |
+| `not_interested` | Marca o feedback total como desfeito (`undone_at`), passa a regra de supressão criada por ele para `undone`, recalcula as vagas suprimidas, reverte o contador negativo da preferência e reabre a vaga descartada (`reopen` → `found`). |
+| `no_time` | Volta para `pending`. Autorizações revogadas pelo “Sem tempo” não voltam sozinhas. |
+| `interested` | Só antes de existir currículo ou candidatura: a vaga volta de `selected` para `review` (comando `withdraw_interest`) e o sinal positivo da preferência é removido. |
+
+Erros (`422`): `decision.undo.nothing_to_undo`, `decision.undo.application_locked` (candidatura em andamento ou enviada), `decision.undo.interest_has_progress`, `decision.undo.feedback_not_found`, `decision.undo.use_current_decision`.
+
+### `GET /api/jobs/{id}/feedback`
+
+Lista os feedbacks da vaga (`mode`, `reason_code`, `detail_key`, `explanation`, `created_at`, `undone_at`).
+
+### `DELETE /api/jobs/{id}`
+
+Exclui a vaga de forma reversível. Corpo: `{ "confirmation": "EXCLUIR", "reason": "opcional" }`. A vaga recebe `archived_at` e sai do `bootstrap` (listas, estatísticas e empresas); autorizações automáticas pendentes são revogadas. Uma nova descoberta da mesma vaga pelos agentes continua oculta, porque a deduplicação ainda enxerga vagas arquivadas. Enquanto arquivada, decisão, feedback, edição e transições respondem `422 job.archived`. Recusada com `job.archive.application_in_progress` se o executor estiver enviando a candidatura. As vagas excluídas aparecem em `archivedJobs` no `GET /api/bootstrap`.
+
+### `POST /api/jobs/{id}/restore`
+
+Restaura uma vaga excluída. `422 job.not_archived` se ela não estiver excluída.
+
 ### `POST /api/resumes`
 
 Cria um currículo vinculado a uma vaga existente.
