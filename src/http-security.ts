@@ -207,6 +207,8 @@ const FRIENDLY: Record<string, string> = {
   "decision.undo.interest_has_progress": "O interesse já gerou currículo ou candidatura; use “Não tenho interesse” para sair do fluxo.",
   "decision.undo.feedback_not_found": "Esse registro já foi desfeito ou não pertence a esta vaga.",
   "decision.undo.use_current_decision": "Para desfazer o descarte, desfaça a decisão atual da vaga.",
+  "decision.undo.not_undoable": "Esta decisão reflete o estado da vaga e não pode ser desfeita.",
+  "preference_rule.undone": "Esta regra foi desfeita junto com o feedback que a criou e não pode ser reativada.",
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
   "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
   "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
