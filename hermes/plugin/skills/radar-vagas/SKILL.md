@@ -30,13 +30,15 @@ Há um servidor MCP por papel (`hermes/config.example.yaml`, um `mcp_servers.*` 
 | Servidor | Agentes | Ferramentas |
 | --- | --- | --- |
 | `radar-vagas-coordenador` | coordenador (vinculado) | `radar_list_agents`, `radar_list_sources`, `radar_get_job`, `radar_propose_agent_prompt` |
-| `radar-vagas-coleta` | coletores e pesquisa salarial | `radar_list_sources`, `radar_get_job`, `radar_discover_job`, `radar_enrich_job` |
+| `radar-vagas-coleta` | coletores e pesquisa salarial | `radar_list_sources`, `radar_get_job`, `radar_discover_job`, `radar_ingest_batch`, `radar_enrich_job`, `radar_record_agent_run` |
 | `radar-vagas-curriculo` | redator de currículo e avaliador | `radar_get_job`, `radar_create_resume`, `radar_record_score` |
-| `radar-vagas-executor` | assistente de candidatura (vinculado) | `radar_get_job`, `radar_list_authorized_applications`, `radar_claim_application`, `radar_verify_application`, `radar_submit_application`, `radar_fail_application`, `radar_ask_human`, `radar_list_open_questions` |
+| `radar-vagas-executor` | assistente de candidatura (vinculado) | `radar_get_job`, `radar_list_authorized_applications`, `radar_claim_application`, `radar_heartbeat_application`, `radar_verify_application`, `radar_submit_application`, `radar_fail_application`, `radar_ask_human`, `radar_list_open_questions` |
 
 Servidor vinculado (`RADAR_MCP_AGENT_ID`) já sabe qual agente executa: omita `agent_id` ou passe exatamente o mesmo; outro id é recusado com `agent.binding.mismatch`. Ferramentas do executor só existem no servidor do executor.
 
 Os servidores MCP são registrados como `trust: untrusted`: toda ferramenta que grava (sem `readOnlyHint`) pede aprovação humana antes de rodar e falha fechada em execução sem ninguém para aprovar (cron). Não tente contornar a aprovação nem trocar a ferramenta MCP por `terminal` + script.
+
+A descoberta agendada em ATS com API pública (Greenhouse, Lever, Ashby, Gupy, SmartRecruiters, Workable) não passa por você: roda no cron sem agente `radar-collect-connectors.sh` (sem LLM, sem MCP) e grava pelo mesmo caminho de ingestão das rodadas. Vagas que a coleta não conseguiu descrever ficam na fila `GET /api/connectors/enrichment-queue` para o agente de enriquecimento. Use o navegador só para portais sem API. Ver `docs/coleta-conectores.md`.
 
 Ferramentas (cada servidor tem o próprio `tools.include` em `hermes/config.example.yaml`):
 

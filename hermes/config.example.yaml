@@ -40,6 +40,16 @@ mcp_servers:
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: coordenador
       RADAR_MCP_AGENT_ID: "${env:RADAR_COORDINATOR_AGENT_ID}"
+    # untrusted: toda ferramenta sem `readOnlyHint: true` pede aprovação antes de rodar e
+    # falha fechada onde ninguém pode aprovar (cron, execução desassistida).
+    # "MCP Config Reference" → "Server keys" → `trust`.
+    #
+    # Pré-aprovação (issue #16): só as ferramentas de leitura dispensam aprovação, e isso vem do
+    # `readOnlyHint: true` declarado em src/mcp-server.ts — não de afrouxar o `trust`. A ingestão
+    # agendada NÃO usa o MCP: a coleta determinística roda no cron sem agente
+    # (hermes/cron/radar-collect-connectors.sh → scripts/ops/collect-connectors.mjs) e grava pelo
+    # caminho único de ingestão (startSearchRound + ingestRoundBatch), sem pedir aprovação.
+    # Todas as demais ferramentas continuam `untrusted`. Ver docs/coleta-conectores.md.
     trust: untrusted
     tools:
       include:

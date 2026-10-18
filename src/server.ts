@@ -11,6 +11,7 @@ import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
 import { projectId } from "./config.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
+import { connectorRoutes } from "./connectors/routes.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
 
@@ -394,6 +395,9 @@ const routes: Route[] = [
     ok(res, 200, resolveFieldConflict(params[0]!, choice, actor));
   } },
 ];
+
+// Coleta determinística (issue #16): empresas curadas por conector e fila de enriquecimento por LLM.
+routes.push(...connectorRoutes(actor, projectId).map((route): Route => ({ method: route.method, pattern: r(route.path), handler: ({ res, params, body }) => ok(res, route.status, route.handler({ params, body })) })));
 
 function matchRoute(method: string, pathname: string): { route: Route; params: string[] } | null {
   for (const route of routes) {
