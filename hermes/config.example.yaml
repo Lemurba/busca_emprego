@@ -10,44 +10,112 @@
 #   RADAR_AUTO_APPLICATION_ENABLED=false   # "true" só com executor testado
 # TELEGRAM_ALLOWED_USERS / TELEGRAM_HOME_CHANNEL já são definidos pelo setup do Telegram do Hermes.
 #
-# Depois de mesclar: `hermes mcp test radar-vagas`.
+# Depois de mesclar: `hermes mcp test radar-vagas-coleta` (e os demais servidores).
+
+# Um servidor MCP por papel (issue #12): o mesmo binário, separado por RADAR_MCP_ROLE.
+# Cada papel registra só as próprias ferramentas (src/mcp-tools.ts → RADAR_MCP_ROLES) e só
+# aceita agentes do próprio papel; RADAR_MCP_AGENT_ID prende o processo a um agente e recusa
+# `agent_id` divergente (agent.binding.mismatch). Coordenador e executor exigem esse vínculo.
+# As ferramentas do executor (claim/verify/submit/fail/ask_human) só existem no servidor do executor.
+#
+# O subprocesso MCP recebe ambiente filtrado (só PATH, HOME, LANG… + o que estiver em `env`)
+# — "Security" → "MCP Credential Handling". Declare apenas o que o servidor lê.
+# untrusted: toda ferramenta sem `readOnlyHint: true` pede aprovação antes de rodar e falha
+# fechada onde ninguém pode aprovar (cron, execução desassistida) — "Server keys" → `trust`.
+# `tools.include` ("Filtering semantics") lista exatamente as ferramentas do papel; o teste
+# test/mcp-roles.test.mjs falha se divergirem.
+#
+# IDs dos agentes (dashboard → Agentes, ou `radar_list_agents`) em ~/.hermes/.env:
+#   RADAR_COORDINATOR_AGENT_ID=<id do Coordenador do Radar>
+#   RADAR_EXECUTOR_AGENT_ID=<id do Assistente de candidatura>
 
 mcp_servers:
-  radar-vagas:
+  radar-vagas-coordenador:
+    # Coordenador: lê o catálogo publicado e propõe rascunhos de prompt (escopo agents.propose).
+    # Rascunho só vale depois de publicado por um humano no dashboard.
     command: node
     args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
-    # O subprocesso MCP recebe ambiente filtrado (só PATH, HOME, LANG… + o que estiver
-    # aqui) — "Security" → "MCP Credential Handling". Declare apenas o que o servidor lê.
     env:
       RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
       RADAR_ENVIRONMENT: production
-      TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
-      TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
-      # Gate da candidatura automática: sem "true" a fila, claim/verify/submit/fail e as
-      # perguntas humanas respondem automation_disabled.
-      RADAR_AUTO_APPLICATION_ENABLED: "${env:RADAR_AUTO_APPLICATION_ENABLED}"
-    # untrusted: toda ferramenta sem `readOnlyHint: true` pede aprovação antes de rodar e
-    # falha fechada onde ninguém pode aprovar (cron, execução desassistida).
-    # "MCP Config Reference" → "Server keys" → `trust`.
+      RADAR_MCP_ROLE: coordenador
+      RADAR_MCP_AGENT_ID: "${env:RADAR_COORDINATOR_AGENT_ID}"
     trust: untrusted
     tools:
-      # Só estas ferramentas são registradas ("MCP Config Reference" → "Filtering semantics").
-      # A lista é exatamente a registrada em src/mcp-server.ts (RADAR_MCP_TOOLS); o teste
-      # test/mcp-server.test.mjs falha se divergirem.
       include:
         # leitura (readOnlyHint: não pedem aprovação)
         - radar_list_agents
         - radar_list_sources
         - radar_get_job
+        # escrita
+        - radar_propose_agent_prompt
+      resources: false
+      prompts: false
+
+  radar-vagas-coleta:
+    # Coletores e enriquecimento: agent_id precisa ser de source_scout/job_enrichment.
+    # Para isolamento total entre portais, duplique este bloco por coletor com
+    # RADAR_MCP_AGENT_ID fixo (ex.: radar-vagas-coleta-gupy).
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    env:
+      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      RADAR_ENVIRONMENT: production
+      RADAR_MCP_ROLE: coleta
+    trust: untrusted
+    tools:
+      include:
+        # leitura (readOnlyHint: não pedem aprovação)
+        - radar_list_sources
+        - radar_get_job
+        # escrita
+        - radar_discover_job
+        - radar_enrich_job
+      resources: false
+      prompts: false
+
+  radar-vagas-curriculo:
+    # Redator de currículo (resume.write) e avaliador de compatibilidade (jobs.write).
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    env:
+      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      RADAR_ENVIRONMENT: production
+      RADAR_MCP_ROLE: curriculo
+    trust: untrusted
+    tools:
+      include:
+        # leitura (readOnlyHint: não pedem aprovação)
+        - radar_get_job
+        # escrita
+        - radar_create_resume
+        - radar_record_score
+      resources: false
+      prompts: false
+
+  radar-vagas-executor:
+    # Executor de candidatura autorizada: único servidor com claim/submit/fail.
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    env:
+      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      RADAR_ENVIRONMENT: production
+      RADAR_MCP_ROLE: executor
+      RADAR_MCP_AGENT_ID: "${env:RADAR_EXECUTOR_AGENT_ID}"
+      TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
+      TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
+      # Gate da candidatura automática: sem "true" a fila, claim/verify/submit/fail e as
+      # perguntas humanas respondem automation_disabled.
+      RADAR_AUTO_APPLICATION_ENABLED: "${env:RADAR_AUTO_APPLICATION_ENABLED}"
+    trust: untrusted
+    tools:
+      include:
+        # leitura (readOnlyHint: não pedem aprovação)
+        - radar_get_job
         - radar_list_authorized_applications
         - radar_verify_application
         - radar_list_open_questions
-        # escrita (exigem agent_id de agente publicado/ativo com o escopo do papel)
-        - radar_discover_job
-        - radar_enrich_job
-        - radar_create_resume
-        - radar_propose_agent_prompt
-        - radar_record_score
+        # escrita
         - radar_claim_application
         - radar_submit_application
         - radar_fail_application

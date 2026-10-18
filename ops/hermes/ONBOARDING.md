@@ -19,7 +19,7 @@ No repositório:
 | --- | --- |
 | `.hermes/skills/radar-vagas/SKILL.md` | Skill de projeto — **fonte única** da skill. |
 | `hermes/plugin/` | Pacote portátil Agent Plugins v1 (`plugin.json` + `skills/` + `mcp.json`), opcional, para distribuir skill e MCP juntos. `skills/` é cópia gerada por `node scripts/ops/build-hermes-plugin.mjs` (a CI confere com `--check`). |
-| `hermes/config.example.yaml` | Fragmentos para mesclar no `config.yaml` do Hermes (`mcp_servers.radar-vagas`, `browser.cdp_url`, `skills.config`). |
+| `hermes/config.example.yaml` | Fragmentos para mesclar no `config.yaml` do Hermes (um `mcp_servers.radar-vagas-<papel>` por papel, `browser.cdp_url`, `skills.config`). |
 | `hermes/cron/radar-watchdog.sh` | Watchdog para o cron sem LLM. |
 | `ops/hermes/radar.env.example` | Modelo único do `.env.local` do app. |
 | `ops/hermes/radar-s6-run.sh` | `run` do serviço s6. |
@@ -72,9 +72,9 @@ hermes skills trust /opt/data/dashboard/busca_emprego
 
 Skills em `<raiz>/.hermes/skills/` só carregam depois de `hermes skills trust`, e têm a maior precedência dentro do projeto ("Skills System" → "Project-Local Skills" → "Trusting a project").
 
-Opção B — pacote portátil `hermes/plugin/` (para levar skill + MCP a outra instalação): copie o diretório para `~/.hermes/plugins/radar-vagas/`, depois `hermes plugins list` e `hermes plugins enable radar-vagas`. Pacotes portáteis instalam desabilitados; a skill fica namespaced (`agent-plugin-<slug>-<hash>`, veja `skills_list`) e o servidor MCP mantém o nome `radar-vagas`. O `mcp.json` não contém credenciais — a documentação proíbe ("Plugins" → "Portable Agent Plugins v1 packages"). O `plugin.json` pede `trust: untrusted` para o servidor pela extensão `com.nousresearch.hermes`. Valide com `hermes plugins validate hermes/plugin`.
+Opção B — pacote portátil `hermes/plugin/` (para levar skill + MCP a outra instalação): copie o diretório para `~/.hermes/plugins/radar-vagas/`, depois `hermes plugins list` e `hermes plugins enable radar-vagas`. Pacotes portáteis instalam desabilitados; a skill fica namespaced (`agent-plugin-<slug>-<hash>`, veja `skills_list`) e os servidores MCP mantêm os nomes `radar-vagas-<papel>`. O `mcp.json` não contém credenciais — a documentação proíbe ("Plugins" → "Portable Agent Plugins v1 packages"). O `plugin.json` pede `trust: untrusted` para cada servidor pela extensão `com.nousresearch.hermes`. Valide com `hermes plugins validate hermes/plugin`.
 
-Use **uma** das opções. Se as duas estiverem ativas, a entrada `mcp_servers.radar-vagas` do `config.yaml` vence a do pacote, inclusive o `trust` (mesma seção).
+Use **uma** das opções. Se as duas estiverem ativas, as entradas `mcp_servers.radar-vagas-<papel>` do `config.yaml` vencem as do pacote, inclusive o `trust` (mesma seção).
 
 ## 5. Servidor MCP
 
@@ -83,22 +83,36 @@ Acrescente ao `/opt/data/.env` (valores não secretos, por máquina):
 ```sh
 RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
 RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+# IDs no dashboard (Agentes) ou por `radar_list_agents`:
+RADAR_COORDINATOR_AGENT_ID=<id do Coordenador do Radar>
+RADAR_EXECUTOR_AGENT_ID=<id do Assistente de candidatura>
 ```
 
-Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste:
+Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste cada servidor:
 
 ```sh
-hermes mcp test radar-vagas
+for papel in coordenador coleta curriculo executor; do hermes mcp test "radar-vagas-$papel"; done
 ```
+
+Um servidor MCP por papel (mesmo `dist/src/mcp-server.js`, separado por `RADAR_MCP_ROLE`):
+
+| Servidor | `RADAR_MCP_ROLE` | Agentes aceitos | Vínculo `RADAR_MCP_AGENT_ID` |
+| --- | --- | --- | --- |
+| `radar-vagas-coordenador` | `coordenador` | `coordinator` (escopo `agents.propose`) | obrigatório |
+| `radar-vagas-coleta` | `coleta` | `source_scout`, `job_enrichment` | opcional (um bloco por coletor isola portais) |
+| `radar-vagas-curriculo` | `curriculo` | `resume_writer`, `match_evaluator` | opcional |
+| `radar-vagas-executor` | `executor` | `application_assistant` | obrigatório |
+
+Cada processo registra só as ferramentas do papel (`tools.include` igual a `RADAR_MCP_ROLES` em `src/mcp-tools.ts`); `claim`/`verify`/`submit`/`fail`/`ask_human` existem apenas no executor. Com vínculo, `agent_id` divergente no argumento é recusado (`agent.binding.mismatch`); agente de outro papel é recusado com `agent.role.forbidden`. Sem `RADAR_MCP_ROLE` o processo sobe em `leitura` (só `radar_list_agents`, `radar_list_sources`, `radar_get_job`).
 
 Pontos do fragmento ("MCP Config Reference"):
 
 - `${env:VAR}` é resolvido a partir do `.env` do perfil ("Environment variable references").
 - O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_DB_PATH` está no `env` do servidor ("Security" → "MCP Credential Handling").
-- `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics").
+- `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics"); o servidor já se limita ao papel, e o filtro é a segunda barreira.
 - `trust: untrusted`: toda chamada sem `readOnlyHint: true` pede aprovação e falha fechada em execuções desassistidas, como cron ("Server keys" → `trust`). Agendamentos que precisem gravar devem usar os scripts de `scripts/ops/` com o token interno, não o MCP.
 
-Alternativa por CLI: `hermes mcp add radar-vagas --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` e depois ajustar `env`, `trust` e `tools.include` no `config.yaml`.
+Alternativa por CLI: `hermes mcp add radar-vagas-coleta --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` (um por papel) e depois ajustar `env` (`RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`), `trust` e `tools.include` no `config.yaml`.
 
 ## 6. Navegador e logins de portais
 
@@ -161,7 +175,7 @@ Reinstale o script após atualizar o repositório (ele é copiado, não referenc
 
 1. `curl -fsS http://127.0.0.1:${PORT:-8787}/api/health` e `/api/ready`.
 2. `node scripts/ops/smoke-agents.mjs` (instância isolada) e `node scripts/ops/live-prod-check.mjs` (produção).
-3. `hermes mcp test radar-vagas`; numa sessão, `skills_list` mostra `radar-vagas`.
+3. `hermes mcp test radar-vagas-<papel>` para os quatro papéis; numa sessão, `skills_list` mostra `radar-vagas`.
 4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido.
 5. `node scripts/ops/notify-human-questions.mjs` (simulação) e `node scripts/ops/telegram-diagnose.mjs`.
 6. `node test/executor.test.mjs` antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
