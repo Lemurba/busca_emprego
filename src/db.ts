@@ -4,7 +4,9 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, WorkflowError, type TransitionInput, type TransitionResult, type WorkflowCommand } from "./workflow.js";
-import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
+import { DomainError } from "./errors.js";
+import { deadlinePassed as isDeadlinePassed, isIsoDeadline, resolveTimeZone } from "./deadline.js";
+import { DomainValidationError, isHttpsUrl, canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
 import { extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "./domain.js";
 import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "./agent-defaults.js";
 import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
@@ -848,8 +850,13 @@ function migrateCanonicalUrlsOnce() {
 
 migrateCanonicalUrlsOnce();
 
+/** Vaga com alguma URL http:// (aceita para visualização; o executor exige HTTPS, #17). */
+function hasInsecureUrl(row: Record<string, unknown>): boolean {
+  return ["application_url", "job_url", "source_url"].some((field) => /^http:/iu.test(String(row[field] ?? "").trim()));
+}
+
 function mapJob(row: Record<string, unknown>): Job {
-  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1 } as Job;
+  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1, insecure_url: hasInsecureUrl(row) } as Job;
 }
 
 function mapResume(row: Record<string, unknown>): Resume {
@@ -1052,6 +1059,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     enrichmentEvents: listJobEnrichmentEvents(),
     archivedJobs: listArchivedJobs(projectId),
     suppressedJobs,
+    timezone: radarTimeZone(),
     stats: {
       total: jobs.length,
       suppressed: suppressedJobs.length,
@@ -1245,13 +1253,14 @@ function abortApplyingJob(jobId: string, reason: string, actor: string) {
   if (row?.status === "applying") applyWorkflowCommand(jobId, "abort_application", { actor, data: { reason } });
 }
 
-/** A date-only deadline (YYYY-MM-DD) stays valid through the whole local day. */
+/** Fuso do Radar para prazos (#22): `RADAR_TZ`, padrão America/Sao_Paulo; nunca o TZ do processo. */
+export function radarTimeZone(): string {
+  return resolveTimeZone(process.env.RADAR_TZ);
+}
+
+/** A date-only deadline (YYYY-MM-DD) stays valid through 23:59:59 of that day in RADAR_TZ. */
 function deadlinePassed(deadline: string | null | undefined, nowMs = Date.now()): boolean {
-  if (!deadline) return false;
-  const value = String(deadline).trim();
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
-  const limit = dateOnly ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 23, 59, 59, 999).getTime() : Date.parse(value);
-  return Number.isFinite(limit) && limit < nowMs;
+  return isDeadlinePassed(deadline, nowMs, radarTimeZone());
 }
 
 const JOB_URL_FIELDS = ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const;
@@ -1291,6 +1300,10 @@ function validateJobFields(changed: Record<string, unknown>, current: Record<str
   if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
   if ("latitude" in changed) normalized.latitude = latitude;
   if ("longitude" in changed) normalized.longitude = longitude;
+  if ("deadline_at" in changed && changed.deadline_at != null && String(changed.deadline_at).trim() !== "") {
+    if (!isIsoDeadline(String(changed.deadline_at))) throw new DomainValidationError("Prazo inválido: use AAAA-MM-DD ou data-hora ISO 8601 com fuso.", "deadline_at");
+    normalized.deadline_at = String(changed.deadline_at).trim();
+  }
   if ("opening_status" in changed && !OPENING_STATUSES.has(String(changed.opening_status ?? "unknown"))) throw new Error("job.opening_status.invalid");
   for (const field of ["title", "company"] as const) {
     if (field in changed && !String(changed[field] ?? "").trim()) throw new Error("job.required_fields.invalid");
@@ -2529,6 +2542,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   const job = getJob(application.job_id);
   if (!job?.application_url?.trim()) throw new Error("application.url.required");
   const applicationUrl = canonicalizeJobUrl(job.application_url);
+  if (!isHttpsUrl(applicationUrl)) throw new DomainError("application.url.insecure", 422);
   const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
   // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
   const authorizationId = randomBytes(32).toString("hex");
@@ -2695,6 +2709,7 @@ function assertCurrentAuthorization(value: Record<string, unknown> | undefined, 
   const currentUrl = String(value.current_application_url ?? "").trim();
   if (!currentUrl) throw new Error("application.authorization.unavailable");
   const canonicalUrl = canonicalizeJobUrl(currentUrl);
+  if (!isHttpsUrl(canonicalUrl)) throw new DomainError("application.url.insecure", 422);
   const currentHash = createHash("sha256").update(canonicalUrl).digest("hex");
   if (value.application_url !== canonicalUrl || value.application_url_hash !== currentHash) throw new Error("application.authorization.unavailable");
   return value;

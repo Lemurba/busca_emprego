@@ -4,6 +4,7 @@
 // porque o domínio lê alguns campos opcionais além dos listados aqui.
 import { z } from "zod";
 import { HttpError } from "./http-security.js";
+import { isIsoDeadline } from "./deadline.js";
 
 export function isHttpUrl(value: string): boolean {
   try {
@@ -27,6 +28,8 @@ const optBool = z.boolean().optional();
 const stringList = z.array(z.string().max(2_000)).max(500);
 const identity = z.union([z.string().max(300), z.number().finite()]);
 /** URL opcional: vazio/nulo ou http(s). `javascript:`, `data:` etc. são recusados. */
+/** Prazo ISO 8601: `AAAA-MM-DD` ou data-hora com offset; outro formato → 422 (#22). */
+const optDeadline = z.string().max(64).refine((value) => value === "" || isIsoDeadline(value), { message: "deadline.format.invalid" }).nullable().optional();
 const optUrl = z.string().max(4_000).refine((value) => value === "" || isHttpUrl(value), { message: "url.scheme.invalid" }).nullable().optional();
 
 const jobFields = {
@@ -54,7 +57,7 @@ const jobFields = {
   application_url: optUrl,
   opening_status: optShort,
   opening_checked_at: optShort,
-  deadline_at: optShort,
+  deadline_at: optDeadline,
   closed_at: optShort,
   posted_at: optShort,
   description: optText,
@@ -152,10 +155,14 @@ export const schemas = {
   preferenceRule: z.looseObject({ state: shortText.optional() }),
 } as const;
 
+const SEMANTIC_ISSUES = new Set(["url.scheme.invalid", "deadline.format.invalid"]);
+
 export function validateBody<T extends z.ZodType>(schema: T, body: Record<string, unknown>): z.infer<T> {
   const result = schema.safeParse(body);
   if (result.success) return result.data;
-  const details = result.error.issues.slice(0, 10).map((issue) => ({ path: issue.path.join("."), code: issue.message === "url.scheme.invalid" ? "url.scheme.invalid" : issue.code }));
+  const details = result.error.issues.slice(0, 10).map((issue) => ({ path: issue.path.join("."), code: SEMANTIC_ISSUES.has(issue.message) ? issue.message : issue.code }));
   const fields = [...new Set(details.map((item) => item.path).filter(Boolean))].join(", ");
-  throw new HttpError(400, "invalid_body", fields ? `Dados inválidos nos campos: ${fields}.` : "Dados inválidos.", details);
+  // Tipo/estrutura errados → 400; só formato semântico inválido (ex.: prazo) → 422.
+  const status = details.every((item) => item.code === "deadline.format.invalid") ? 422 : 400;
+  throw new HttpError(status, "invalid_body", fields ? `Dados inválidos nos campos: ${fields}.` : "Dados inválidos.", details);
 }

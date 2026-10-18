@@ -33,6 +33,7 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_AUTO_APPLICATION_ENABLED` | não (gate) | ligar somente com executor testado; com `false` a fila responde 403 `AUTOMATION_DISABLED` |
 | `RADAR_AUTHORIZATION_SECRET` | sim (com o gate ligado) | 32 bytes aleatórios; assina (HMAC) cada `AUTORIZO`, conferido no claim; só o processo do dashboard deve ler. Sem ele vale um segredo fixo de desenvolvimento (aviso `authorization.dev_secret` no log) |
 | `RADAR_AUTHORIZATION_TTL_SECONDS` / `RADAR_AUTHORIZATION_LEASE_SECONDS` | não | validade da autorização ainda não reservada (padrão 86400) / lease do claim renovado por heartbeat (padrão 300, mínimo 30) |
+| `RADAR_TZ` | não | fuso dos prazos (padrão `America/Sao_Paulo`): prazo só com data vale até 23:59:59 nesse fuso, independente do TZ do container |
 | `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_HOME_CHANNEL` | não | vazios = herdados de `/opt/data/.env` do Hermes |
 | `RADAR_BROWSER_VIEWER_URL` | não | visualizador remoto do navegador, se existir |
 | `GEOAPIFY_API_KEY` | não implementado | o mapa usa tiles do OpenStreetMap |

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -30,6 +30,7 @@ import {
   validateSourceBatch,
 } from "./db.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
+import { statusForCode, toDomainError, userMessage } from "./errors.js";
 import { RADAR_MCP_ROLES, RADAR_MCP_TOOLS, type RadarMcpRole } from "./mcp-tools.js";
 
 /**
@@ -109,32 +110,37 @@ const SAFE_MESSAGES: Record<string, string> = {
   "human_question.answer.invalid": "Resposta vazia ou longa demais.",
 };
 
-const CODE_PATTERN = /^(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]+)$/u;
-
-/** Converte qualquer erro em resposta MCP segura: código estável + mensagem pt-BR. */
-function toolError(error: unknown) {
+/** Converte qualquer erro em resposta MCP segura: código estável + mensagem pt-BR (#29). */
+export function toolError(error: unknown) {
   let code = "internal_error";
   let message = "Erro interno ao executar a ferramenta.";
+  let status = 500;
+  let details: unknown;
+  let requestId: string | undefined;
+  const domain = error instanceof ToolError ? null : toDomainError(error);
   if (error instanceof ToolError) {
     code = error.code;
     message = error.message;
-  } else if (error instanceof DomainValidationError) {
-    code = `validation.${error.field}`;
-    message = error.message;
-  } else if (error instanceof Error && error.constructor === Error && !("code" in error)) {
-    // Erros de domínio do núcleo: ou código estável (ex.: "agent.domain.forbidden",
-    // "job.salary.invalid:min") ou frase pt-BR destinada ao usuário.
-    const raw = error.message.trim();
-    const base = raw.split(":")[0] ?? "";
-    if (CODE_PATTERN.test(base)) {
-      code = base;
-      message = SAFE_MESSAGES[base] ?? "Operação recusada pelas regras do Radar.";
-    } else if (raw && raw.length <= 300 && !/sqlite|constraint|SELECT|INSERT|UPDATE|\n/iu.test(raw)) {
-      code = "radar.rule_violation";
-      message = raw;
-    }
+    status = statusForCode(code);
+  } else if (domain) {
+    // Mapeamento só pelo código; o dicionário local do MCP tem precedência sobre o global.
+    const base = domain.code.split(":")[0] ?? domain.code;
+    code = domain instanceof DomainValidationError ? domain.code : base;
+    message = SAFE_MESSAGES[base] ?? (domain instanceof DomainValidationError ? domain.message : userMessage(domain));
+    status = domain.status;
+    details = domain.details;
+  } else if (error instanceof Error && error.constructor === Error && !("code" in error)
+    && error.message.trim() && error.message.length <= 300 && !/sqlite|constraint|SELECT|INSERT|UPDATE|\n/iu.test(error.message)) {
+    // Legado: frase pt-BR destinada ao usuário, ainda lançada como Error puro pelo núcleo.
+    code = "radar.rule_violation";
+    message = error.message.trim();
+    status = 400;
+  } else {
+    requestId = randomUUID();
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    console.error(JSON.stringify({ event: "mcp.error", request_id: requestId, error: detail }));
   }
-  const payload = { error: { code, message } };
+  const payload = { error: { code, message, status, ...(details === undefined ? {} : { details }), ...(requestId ? { request_id: requestId } : {}) } };
   return { isError: true, content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
 }
 

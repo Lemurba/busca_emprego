@@ -1,5 +1,6 @@
 import * as LeafletModule from "leaflet";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
+import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 
 // Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
 const leafletLib: any = (LeafletModule as any).default ?? LeafletModule;
@@ -28,6 +29,8 @@ type Job = {
   job_url: string;
   application_url: string;
   opening_status: "open" | "closed" | "unknown";
+  /** Alguma URL da vaga é http:// (sem TLS): o envio automático fica bloqueado. */
+  insecure_url?: boolean;
   opening_checked_at: string | null;
   deadline_at: string | null;
   closed_at: string | null;
@@ -61,7 +64,7 @@ type SourceConfig = { id: string; name: string; source_type: string; domain: str
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
 type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; stats: Record<string, any> };
 
 /* ------------------------------------------------------------------ */
 /* Vocabulário: um único lugar traduz cada enum para a interface.      */
@@ -162,7 +165,7 @@ const statusColumns = [
   { title: "Encerradas", statuses: ["expired", "discarded"], target: null }
 ];
 const movableStatusValues = ["validation", "strong_match", "review"];
-const portalNames = new Map(DEFAULT_JOB_PORTALS.map((portal) => [portal.id, portal.name]));
+const portalNames = new Map<string, string>(DEFAULT_JOB_PORTALS.map((portal) => [portal.id, portal.name]));
 type VisualFilter = { type: "source" | "status" | "lifecycle" | "location" | "job"; value: string; label: string };
 type SortKey = "match" | "deadline" | "salary" | "updated";
 
@@ -276,23 +279,22 @@ function dominantCurrency(jobs: Job[]) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "BRL";
 }
 
+// Datas e prazos usam o mesmo módulo do servidor (src/deadline.ts) e o fuso do Radar
+// informado pela API (RADAR_TZ), não o fuso do navegador.
+function radarTz() {
+  return state.data?.timezone || DEFAULT_RADAR_TZ;
+}
+
 function formatDate(value: string | null | undefined) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium" }).format(date);
+  return formatRadarDate(value, { dateStyle: "medium" }, radarTz()) ?? "—";
 }
 
 function formatShortDate(value: string | null | undefined) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(date).replace(" de ", " ");
+  return formatRadarDate(value, { day: "2-digit", month: "short" }, radarTz())?.replace(" de ", " ") ?? "—";
 }
 
 function daysUntil(value: string | null | undefined) {
-  if (!value) return null;
-  const time = new Date(value).getTime();
-  if (Number.isNaN(time)) return null;
-  return Math.ceil((time - Date.now()) / 86_400_000);
+  return daysUntilDeadline(value, Date.now(), radarTz());
 }
 
 function deadlineText(job: Job) {
@@ -394,8 +396,9 @@ function averageMonthlySalary(jobs: Job[]) {
 function visualFilteredJobs(data: Data) {
   const filter = state.visualFilter;
   if (!filter) return data.jobs;
-  if (filter.type === "job") return data.jobs.filter((job) => job.id === filter.value);
-  return data.jobs.filter((job) => String(job[filter.type]) === filter.value);
+  const field = filter.type;
+  if (field === "job") return data.jobs.filter((job) => job.id === filter.value);
+  return data.jobs.filter((job) => String(job[field]) === filter.value);
 }
 
 function visualFilterSummary(data: Data, showJobsLink = true) {
@@ -439,7 +442,7 @@ function jobCard(job: Job) {
   return `<article class="job-card ${draggable ? "is-draggable" : ""}" ${draggable ? `draggable="true" data-drag-id="${escapeHtml(job.id)}"` : ""} data-detail-id="${escapeHtml(job.id)}">
     <div class="job-card-top"><h3><button type="button" class="card-title-button" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button></h3>${scoreBadge(job.match_score)}</div>
     <p><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.location)}</p>
-    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span></div>
+    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span>${job.insecure_url ? `<span class="chip" title="O link da vaga usa http:// (sem criptografia)">Link não seguro</span>` : ""}</div>
     <div class="card-footer"><span>${escapeHtml(salaryLabel(job))}</span><span>${escapeHtml(deadlineText(job))}</span></div>
     ${moveSelect(job)}
   </article>`;
@@ -1131,6 +1134,8 @@ function isoFromLocal(value: string) {
 
 function localFromIso(value: string | null) {
   if (!value) return "";
+  // Prazo só com data vale até o fim do dia.
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(value)) return `${value}T23:59`;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const offset = date.getTimezoneOffset() * 60_000;
@@ -1187,7 +1192,7 @@ function showAgentModal(id?: string) {
   const checked = (value: boolean | undefined) => value ? "checked" : "";
   const role = agent?.role_type ?? "source_scout";
   const selectedSources = new Set(agent?.source_ids ?? []);
-  const selectedPortalDomains = new Set(DEFAULT_JOB_PORTALS.filter((portal) => selectedSources.has(portal.id)).map((portal) => portal.domain));
+  const selectedPortalDomains = new Set<string>(DEFAULT_JOB_PORTALS.filter((portal) => selectedSources.has(portal.id)).map((portal) => portal.domain));
   const customSources = (agent?.source_ids ?? []).filter((source) => !portalNames.has(source));
   const customDomains = (agent?.allowed_domains ?? []).filter((domain) => !selectedPortalDomains.has(domain));
   openModal(agent ? `Editar ${agent.name}` : "Novo agente", agent ? "Salvar cria um rascunho; a nova versão só vale depois de publicada." : "O agente nasce ativo, com instruções e portais padrão que você pode ajustar.", `
@@ -1275,7 +1280,10 @@ function showJobDetail(id: string) {
   const decisionNotice = ["interested", "no_time", "not_interested"].includes(job.decision) && !decisionLocked
     ? `<div class="notice decision-notice"><span aria-hidden="true">↺</span><div>Sua decisão: <strong>${escapeHtml(label(decisionLabels, job.decision))}</strong>${job.decision_at ? ` em ${escapeHtml(formatDate(job.decision_at))}` : ""}.${canUndoInterest ? "" : " Como já existe currículo ou candidatura, use “Não tenho interesse” para sair do fluxo."}</div>${canUndoInterest ? `<button class="secondary-button" data-action="undo-decision" data-job-id="${escapeHtml(job.id)}">Desfazer</button>` : ""}</div>`
     : "";
-  notice = decisionNotice + notice;
+  const insecureNotice = job.insecure_url
+    ? `<div class="notice warning"><span aria-hidden="true">!</span><div>O link desta vaga usa http:// (sem criptografia). O envio automático fica bloqueado; candidate-se manualmente.</div></div>`
+    : "";
+  notice = decisionNotice + insecureNotice + notice;
   const sourceLinks = `${externalLink(job.job_url, "Abrir vaga ↗")}${externalLink(job.application_url, "Página de candidatura ↗")}${externalLink(job.linkedin_post_url, "Post do LinkedIn ↗")}${externalLink(job.salary_source_url, "Fonte do salário ↗")}`;
   const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
   openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score)}</strong></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${application?.status === "in_progress" ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
