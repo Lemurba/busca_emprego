@@ -116,6 +116,24 @@ const factTypeLabels: Record<string, string> = {
   experience: "Experiência", education: "Formação", languages: "Idiomas", certifications: "Certificações", projects: "Projetos", role: "Cargo", seniority: "Senioridade", location: "Localização"
 };
 const originLabels: Record<string, string> = { pdf: "extraído do PDF", human: "informado por você", user: "informado por você", agent: "informado por agente", system: "calculado pelo sistema", legacy: "importado" };
+const historyEventLabels: Record<string, string> = {
+  "job.decision": "Decisão registrada", "job.decision_undone": "Decisão desfeita", "job.created_by_agent": "Vaga registrada", "job.enriched_by_agent": "Vaga enriquecida",
+  "job.updated": "Vaga editada", "job.archived": "Vaga excluída", "job.restored": "Vaga restaurada", "resume.created": "Currículo criado", "resume.approved": "Currículo aprovado (APROVO)",
+  "application.created": "Candidatura criada", "application.manual_selected": "Envio manual escolhido", "application.auto_authorized": "Envio automático autorizado (AUTORIZO)",
+  "application.auto_authorization_revoked": "Autorização revogada", "application.updated": "Candidatura atualizada"
+};
+/** Origem de um evento do histórico, derivada da credencial que o gravou. */
+function actorLabel(actor: string) {
+  if (actor === "human:dashboard") return "você, no dashboard";
+  if (actor.startsWith("agent:")) {
+    const id = actor.slice("agent:".length);
+    return `agente ${currentData().agentConfigs.find((agent) => agent.id === id)?.name ?? id}`;
+  }
+  if (actor.startsWith("service:")) return `serviço ${actor.slice("service:".length)}`;
+  if (actor.startsWith("worker:")) return `executor ${actor.slice("worker:".length)}`;
+  if (actor.startsWith("system")) return "sistema";
+  return "origem não identificada (registro antigo)";
+}
 const decisionLabels: Record<string, string> = { pending: "Pendente", interested: "Tenho interesse", not_interested: "Sem interesse", no_time: "Sem tempo" };
 /** [motivo, rótulo, detalhe padrão]; os detalhes aceitos pelo servidor estão em feedbackDetails. */
 const feedbackCategories: [string, string, string][] = [
@@ -1296,6 +1314,13 @@ function showJobDetail(id: string) {
       const evidenceMarkup = active.length ? `<details class="detail-section provenance"><summary>De onde veio cada informação (${active.length})</summary>${active.map((item) => `<p><strong>${escapeHtml(fieldLabels.get(item.field_path) ?? humanize(item.field_path))}</strong> · ${escapeHtml(label(originLabels, item.origin))} · confiança ${Math.round(item.confidence * 100)}% · ${escapeHtml(formatDate(item.retrieved_at))}${safeHref(item.source_url) ? ` · ${externalLink(item.source_url, "evidência ↗", "")}` : ""}</p>`).join("")}</details>` : "";
       descriptionRoot.insertAdjacentHTML("afterbegin", conflictMarkup);
       descriptionRoot.insertAdjacentHTML("beforeend", evidenceMarkup);
+    }).catch(() => { /* o detalhe principal continua disponível */ });
+    fetchJson<Array<{ kind: string; at: string; actor: string; event: string; from_status: string | null; to_status: string | null }>>(`/api/jobs/${encodeURIComponent(job.id)}/history`).then((history) => {
+      if (!descriptionRoot.isConnected || !history.length) return;
+      const describe = (item: (typeof history)[number]) => item.kind === "transition"
+        ? `${label(statusLabels, item.from_status ?? "")} → ${label(statusLabels, item.to_status ?? "")}`
+        : label(historyEventLabels, item.event);
+      descriptionRoot.insertAdjacentHTML("beforeend", `<details class="detail-section provenance"><summary>Histórico e origem (${history.length})</summary>${history.map((item) => `<p><strong>${escapeHtml(describe(item))}</strong> · ${escapeHtml(actorLabel(item.actor))} · ${escapeHtml(formatDate(item.at))}</p>`).join("")}</details>`);
     }).catch(() => { /* o detalhe principal continua disponível */ });
   }
 }

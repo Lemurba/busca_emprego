@@ -1704,7 +1704,7 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
         WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')`).run(now(), id);
       abortApplyingJob(id, "job_url_changed", options.actor ?? "system");
     }
-    audit("job", id, "updated", { changed_fields: Object.keys(requested) });
+    audit("job", id, "updated", { changed_fields: Object.keys(requested), ...(options.actor ? { actor: options.actor } : {}) });
   });
   return getJob(id);
 }
@@ -1733,7 +1733,30 @@ export function listWorkflowEvents(jobId: string) {
     .map((row) => ({ ...row, version: Number(row.version), cycle: Number(row.cycle ?? 1), data: parseObject(row.data_json) }));
 }
 
-export function recordJobDecision(id: string, decision: string, confirmation: string) {
+/**
+ * Histórico da vaga para a UI (#19): transições do workflow e decisões auditadas da vaga, dos
+ * currículos e das candidaturas dela, cada uma com o ator que a credencial identificou.
+ */
+export function listJobHistory(jobId: string) {
+  const transitions = (listWorkflowEvents(jobId) as Record<string, unknown>[]).map((event) => ({
+    kind: "transition", at: String(event.created_at), actor: String(event.actor ?? ""), event: String(event.command ?? ""),
+    from_status: event.from_status ?? null, to_status: event.to_status ?? null,
+  }));
+  const audited = (db.prepare(`SELECT entity_type, event_type, payload, created_at FROM audit_events
+      WHERE (entity_type='job' AND entity_id=?)
+        OR (entity_type='resume' AND entity_id IN (SELECT id FROM resumes WHERE job_id=?))
+        OR (entity_type='application' AND entity_id IN (SELECT id FROM applications WHERE job_id=?))
+      ORDER BY created_at, id`).all(jobId, jobId, jobId) as Record<string, unknown>[])
+    .map((row) => {
+      const payload = parseObject(row.payload);
+      return { kind: "audit", at: String(row.created_at), actor: typeof payload.actor === "string" ? payload.actor : "", event: `${row.entity_type}.${row.event_type}`, from_status: null, to_status: null };
+    })
+    // Sem ator registrado (eventos antigos ou anonimizados) não há origem a mostrar.
+    .filter((item) => item.actor);
+  return [...transitions, ...audited].sort((a, b) => a.at.localeCompare(b.at));
+}
+
+export function recordJobDecision(id: string, decision: string, confirmation: string, actor = "user") {
   assertJobNotArchived(id);
   if (decision === "not_interested") throw new Error("Use o feedback total com categoria e justificativa para rejeitar uma vaga.");
   const phrases: Record<string, string> = { interested: "TENHO INTERESSE", no_time: "SEM TEMPO" };
@@ -1754,7 +1777,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
       const approved = db.prepare("SELECT id FROM resumes WHERE job_id = ? AND status = 'approved' LIMIT 1").get(id);
       const application = db.prepare("SELECT id FROM applications WHERE job_id = ? LIMIT 1").get(id);
       const target: JobStatus = approved ? (application ? "ready_to_apply" : "resume_approved") : resume ? "resume" : "selected";
-      advanceJobTo(id, target, { actor: "user", data: { reason: "interest_confirmed" } });
+      advanceJobTo(id, target, { actor, data: { reason: "interest_confirmed" } });
       // One positive signal per vacancy: toggling SEM TEMPO / TENHO INTERESSE must not inflate preferences.
       const facets = positiveSignalFacets(job);
       const firstSignal = db.prepare("INSERT OR IGNORE INTO preference_signal_events (project_id,job_id,polarity,created_at,facets_json) VALUES (?,?,'positive',?,?)").run(projectId, id, timestamp, JSON.stringify(facets));
@@ -1768,9 +1791,9 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
     } else {
       // SEM TEMPO withdraws the go-ahead: the current automatic authorization is revoked, not just hidden.
       withdrawPendingAuthorizations(id, "decision_no_time", timestamp);
-      abortApplyingJob(id, "decision_no_time", "user");
+      abortApplyingJob(id, "decision_no_time", actor);
     }
-    audit("job", id, "decision", { decision });
+    audit("job", id, "decision", { decision, actor });
   });
   return getJob(id);
 }
@@ -2015,7 +2038,7 @@ export function deleteBaseResume(id: string) {
   return true;
 }
 
-export function createResume(input: Partial<Resume> & { job_id: string; title: string }) {
+export function createResume(input: Partial<Resume> & { job_id: string; title: string }, actor?: string) {
   assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT decision FROM jobs WHERE id = ?").get(input.job_id) as { decision: string } | undefined;
   if (!job) throw new Error("Vaga não encontrada.");
@@ -2030,8 +2053,9 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
     // review_status is never accepted from the caller: only reviewResume can record a verdict.
     db.prepare(`UPDATE resumes SET profile_snapshot_id=?,generation_source=?,facts_used=?,gaps=?,review_status='not_run',review_findings='[]' WHERE id=?`)
       .run(metadata.profile_snapshot_id == null ? null : String(metadata.profile_snapshot_id), metadata.generation_source === "writer" ? "writer" : "manual", JSON.stringify(metadata.facts_used ?? []), JSON.stringify(metadata.gaps ?? []), id);
-    advanceJobTo(input.job_id, "resume", { actor: metadata.generation_source === "writer" ? "resume_writer" : "user", data: { reason: "resume_draft_created" } });
-    audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft" });
+    const eventActor = actor ?? (metadata.generation_source === "writer" ? "resume_writer" : "user");
+    advanceJobTo(input.job_id, "resume", { actor: eventActor, data: { reason: "resume_draft_created" } });
+    audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft", actor: eventActor });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
 }
@@ -2141,7 +2165,7 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   const supported = normalizeComparableText(selectedFacts.map((fact) => printableFactValue(fact.value)).join(" "));
   if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new Error("ATS_KEYWORD_UNSUPPORTED");
   const gaps = Array.isArray(input.gaps) ? input.gaps.map(String) : [];
-  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never);
+  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never, actor === "writer" ? undefined : actor);
   audit("resume", resume?.id ?? "unknown", "generated_by_writer", { actor, profile_snapshot_id: snapshotId, base_resume_id: baseId, facts_count: factsUsed.length, gaps_count: gaps.length });
   return resume;
 }
@@ -2170,7 +2194,7 @@ export function approveResume(id: string, confirmation: string, options: { overr
   return listResumes().find((item) => item.id === id) ?? null;
 }
 
-export function createApplication(input: Partial<Application> & { job_id: string }) {
+export function createApplication(input: Partial<Application> & { job_id: string }, actor = "user") {
   assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT status, decision FROM jobs WHERE id = ?").get(input.job_id) as { status: string; decision: string } | undefined;
   const resumeId = input.resume_id ?? "";
@@ -2185,13 +2209,13 @@ export function createApplication(input: Partial<Application> & { job_id: string
     // Re-checked under the write lock: two concurrent requests cannot both create an application.
     if (db.prepare("SELECT id FROM applications WHERE job_id = ?").get(input.job_id)) throw new Error("Já existe uma candidatura para esta vaga.");
     db.prepare("INSERT INTO applications (id,job_id,resume_id,status,automation_mode,auto_authorized_at,authorized_resume_id,authorized_resume_version,current_step,submitted_at,notes,created_at,updated_at) VALUES (?,?,?,'queued',?,NULL,NULL,NULL,?,NULL,?,?,?)").run(id, input.job_id, resumeId, mode, input.current_step ?? "Aguardando decisão de candidatura", input.notes ?? "", timestamp, timestamp);
-    advanceJobTo(input.job_id, "ready_to_apply", { actor: "user", data: { reason: "application_created" } });
-    audit("application", id, "created", { job_id: input.job_id, resume_id: resumeId, automation_mode: mode });
+    advanceJobTo(input.job_id, "ready_to_apply", { actor, data: { reason: "application_created" } });
+    audit("application", id, "created", { job_id: input.job_id, resume_id: resumeId, automation_mode: mode, actor });
   });
   return listApplications().find((application) => application.id === id) ?? null;
 }
 
-export function selectManualApplication(id: string) {
+export function selectManualApplication(id: string, actor = "user") {
   const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status,
       jobs.status AS job_status, jobs.decision AS job_decision
     FROM applications
@@ -2211,11 +2235,11 @@ export function selectManualApplication(id: string) {
       authorization_id = NULL, expires_at = NULL,
       status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
       current_step = 'Fluxo manual selecionado', updated_at = ? WHERE id = ?`).run(timestamp, id);
-  audit("application", id, "manual_selected", { resume_id: application.resume_id });
+  audit("application", id, "manual_selected", { resume_id: application.resume_id, actor });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
-export function authorizeAutoApplication(id: string, resumeId: string, confirmation: string) {
+export function authorizeAutoApplication(id: string, resumeId: string, confirmation: string, actor = "user") {
   if (confirmation !== "AUTORIZO") throw new Error("Confirme digitando AUTORIZO para esta vaga.");
   const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status, resumes.version AS resume_version,
       jobs.status AS job_status, jobs.decision AS job_decision
@@ -2244,20 +2268,20 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
     if (!update.changes) throw new Error("application.authorization.race");
     db.prepare(`INSERT INTO application_authorizations
       (id,application_id,job_id,resume_id,resume_version,application_url,application_url_hash,redirect_chain_hash,actor,issued_at,expires_at,nonce,state)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued')`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, "user", timestamp, expiresAt, nonce);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued')`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, actor, timestamp, expiresAt, nonce);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("application", id, "auto_authorized", { authorization_id: authorizationId, resume_id: resumeId, resume_version: application.resume_version, application_url_hash: applicationUrlHash, expires_at: expiresAt, authorized_at: timestamp });
+  audit("application", id, "auto_authorized", { authorization_id: authorizationId, resume_id: resumeId, resume_version: application.resume_version, application_url_hash: applicationUrlHash, expires_at: expiresAt, authorized_at: timestamp, actor });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
-export function revokeAutoApplication(id: string) {
+export function revokeAutoApplication(id: string, actor = "user") {
   const application = listApplications().find((item) => item.id === id);
   if (!application) return null;
   if (application.status === "in_progress" || ["submitted", "accepted", "rejected"].includes(application.status)) throw new Error("A autorização não pode ser revogada após o início do envio.");
   revokeAuthorizationRows(id, "user_revoked");
   db.prepare("UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL, authorization_id=NULL,expires_at=NULL, current_step = 'Autorização automática revogada', updated_at = ? WHERE id = ?").run(now(), id);
-  audit("application", id, "auto_authorization_revoked", {});
+  audit("application", id, "auto_authorization_revoked", { actor });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
@@ -2353,7 +2377,7 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
   return listApplications().find((item) => item.id === applicationId) ?? null;
 }
 
-export function updateApplication(id: string, patch: Partial<Application>) {
+export function updateApplication(id: string, patch: Partial<Application>, actor = "user") {
   const allowed = ["resume_id", "status", "current_step", "submitted_at", "notes", "evidence_ref"] as const;
   const normalized = { ...patch } as Partial<Application>;
   const current = listApplications().find((application) => application.id === id);
@@ -2391,9 +2415,9 @@ export function updateApplication(id: string, patch: Partial<Application>) {
     db.prepare(`UPDATE applications SET ${set}, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), now(), id);
     if (["submitted", "accepted", "rejected"].includes(String(normalized.status))) {
       const application = listApplications().find((item) => item.id === id);
-      if (application) markJobApplied(application.job_id, application.submitted_at ?? now(), "user", application.evidence_ref ?? null);
+      if (application) markJobApplied(application.job_id, application.submitted_at ?? now(), actor, application.evidence_ref ?? null);
     }
-    audit("application", id, "updated", { changed_fields: Object.keys(patch) });
+    audit("application", id, "updated", { changed_fields: Object.keys(patch), actor });
   });
   return listApplications().find((application) => application.id === id) ?? null;
 }
@@ -3198,7 +3222,7 @@ export function createJobFromAgent(agentId: string, input: Partial<Job> & { sour
         selectEvidence(job.id, field, evidence.id, agentId, evidence.timestamp);
       }
     }
-    audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
+    audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId, actor: `agent:${agentId}` });
     return job;
   });
 }
@@ -3264,14 +3288,14 @@ export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record
         conflicts.push(conflictId);
       }
     }
-    if (Object.keys(acceptedPatch).length) updateJob(jobId, acceptedPatch, { origin: "system" });
+    if (Object.keys(acceptedPatch).length) updateJob(jobId, acceptedPatch, { origin: "system", actor: `agent:${agentId}` });
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   const job = getJob(jobId);
   const eventId = idFor(`enrichment|${agentId}|${jobId}|${Date.now()}|${Math.random()}`);
   db.prepare("INSERT INTO job_enrichment_events (id,job_id,agent_id,source_url,fields_changed,evidence_excerpt,created_at) VALUES (?,?,?,?,?,?,?)")
     .run(eventId, jobId, agentId, sourceUrl, JSON.stringify(entries.map(([key]) => key)), evidenceExcerpt.slice(0, 500), now());
-  audit("job", jobId, "enriched_by_agent", { agent_id: agentId, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });
+  audit("job", jobId, "enriched_by_agent", { agent_id: agentId, actor: `agent:${agentId}`, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });
   return { job, enrichment_event_id: eventId, selected_evidence_ids: selectedEvidenceIds, conflict_ids: conflicts };
 }
 
