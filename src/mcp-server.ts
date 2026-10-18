@@ -444,8 +444,9 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
       changes: z.array(z.string()).default([]),
     },
   }, async ({ agent_id, ...input }) => execute(() => {
-    agentFor(agent_id, "resume.write");
-    return { resume: createResume(input) };
+    const agent = agentFor(agent_id, "resume.write");
+    // Rascunho do redator: o evento registra o agente que o criou, não o usuário (#19).
+    return { resume: createResume({ ...input, generation_source: "writer" } as never, `agent:${agent.id}`) };
   }));
 
   if (has("radar_propose_agent_prompt")) server.registerTool("radar_propose_agent_prompt", {

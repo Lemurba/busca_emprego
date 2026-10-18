@@ -13,9 +13,10 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 const port = await freePort();
 const internalToken = "e2e-service-token";
+const dashboardToken = "e2e-dashboard-token";
 const child = spawn(process.execPath, ["dist/src/server.js"], {
   cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"],
-  env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "e2e.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: internalToken, RADAR_AUTO_APPLICATION_ENABLED: "true" }
+  env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "e2e.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: internalToken, RADAR_DASHBOARD_TOKEN: dashboardToken, RADAR_AUTO_APPLICATION_ENABLED: "true" }
 });
 let stderr = "";
 child.stderr.on("data", (chunk) => stderr += chunk);
@@ -33,12 +34,17 @@ const headers = { "x-forwarded-proto": "https", "content-type": "application/jso
 const authHeaders = { ...headers, "x-radar-service-token": internalToken };
 const anonymous = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
 const request = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...authHeaders, ...(init.headers ?? {}) } });
+// Portões humanos (publicar agente, interesse) só com a sessão do dashboard (#10).
+let sessionCookie = "";
+const human = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...headers, cookie: sessionCookie, ...(init.headers ?? {}) } });
 
 try {
   await waitReady(base, () => stderr);
   assert.equal((await fetch(`${base}/api/bootstrap`)).status, 426, "proxy TLS gate must fail closed");
   assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-forwarded-proto": "https" } })).status, 401, "API must require a session or the service token");
   assert.equal((await request("/api/bootstrap")).status, 200, "service token must reach dashboard routes");
+  sessionCookie = ((await fetch(`${base}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } })).headers.get("set-cookie") ?? "").split(";")[0];
+  assert.ok(sessionCookie, "dashboard login must issue a session cookie");
 
   const internalRoutes = [
     ["POST", "/api/agent-events"],
@@ -61,7 +67,7 @@ try {
   const disabledBase = `http://127.0.0.1:${disabledPort}`;
   const disabledChild = spawn(process.execPath, ["dist/src/server.js"], {
     cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, PORT: String(disabledPort), RADAR_DB_PATH: join(directory, "disabled.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: internalToken, RADAR_AUTO_APPLICATION_ENABLED: "false" }
+    env: { ...process.env, PORT: String(disabledPort), RADAR_DB_PATH: join(directory, "disabled.sqlite"), RADAR_ENVIRONMENT: "staging", RADAR_OPERATOR_ID: "ci-operator", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: internalToken, RADAR_DASHBOARD_TOKEN: dashboardToken, RADAR_AUTO_APPLICATION_ENABLED: "false" }
   });
   let disabledStderr = "";
   disabledChild.stderr.on("data", (chunk) => disabledStderr += chunk);
@@ -69,8 +75,11 @@ try {
     await waitReady(disabledBase, () => disabledStderr);
     const disabledRoutes = internalRoutes.filter(([, path]) => path === "/api/authorized-applications" || path.includes("/claim") || path.includes("/questions") || path.includes("/delivery") || path.includes("/answer"));
     disabledRoutes.push(["POST", "/api/applications/missing/authorize-auto"]);
+    // AUTORIZO é portão humano: chega à checagem de automação só com a sessão do dashboard.
+    const disabledCookie = ((await fetch(`${disabledBase}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } })).headers.get("set-cookie") ?? "").split(";")[0];
     for (const [method, path] of disabledRoutes) {
-      const response = await fetch(`${disabledBase}${path}`, { method, headers: authHeaders, body: method === "POST" ? "{}" : undefined });
+      const routeHeaders = path.endsWith("/authorize-auto") ? { ...headers, cookie: disabledCookie } : authHeaders;
+      const response = await fetch(`${disabledBase}${path}`, { method, headers: routeHeaders, body: method === "POST" ? "{}" : undefined });
       assert.equal(response.status, 403, `${method} ${path} must be disabled by default`);
       assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
     }
@@ -90,13 +99,14 @@ try {
   const sourceBody = await sourceResponse.json();
   assert.equal(sourceResponse.status, 201, JSON.stringify(sourceBody));
 
-  const agentResponse = await request("/api/agents", { method: "POST", body: JSON.stringify({ name: "E2E Enrichment", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"], allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"], browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["salary_min", "salary_max"], concurrency: 1, timeout_seconds: 120, prompt: "v1" }) });
+  const agentResponse = await human("/api/agents", { method: "POST", body: JSON.stringify({ name: "E2E Enrichment", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"], allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"], browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["salary_min", "salary_max"], concurrency: 1, timeout_seconds: 120, prompt: "v1" }) });
   const agent = await agentResponse.json();
   assert.equal(agentResponse.status, 201, JSON.stringify(agent));
   const draftResponse = await request(`/api/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({ prompt: "v2" }) });
   const draft = await draftResponse.json();
   assert.ok(draft.draft_version_id);
-  assert.equal((await request(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id }) })).status, 200);
+  assert.equal((await request(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id }) })).status, 403, "publishing an agent is a human gate");
+  assert.equal((await human(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id }) })).status, 200);
 
   const total = 500;
   const workers = 20;
@@ -112,7 +122,7 @@ try {
     }
   }));
   assert.equal(failures, 0);
-  assert.equal((await request("/api/jobs/load-0/decision", { method: "POST", body: JSON.stringify({ decision: "interested", confirmation: "TENHO INTERESSE" }) })).status, 200);
+  assert.equal((await human("/api/jobs/load-0/decision", { method: "POST", body: JSON.stringify({ decision: "interested", confirmation: "TENHO INTERESSE" }) })).status, 200);
   const resumeResponse = await request("/api/resumes", { method: "POST", body: JSON.stringify({ job_id: "load-0", title: "Currículo ATS", content: "RESUMO\nExperiência confirmada." }) });
   const generatedResume = await resumeResponse.json();
   assert.equal(resumeResponse.status, 201, JSON.stringify(generatedResume));
@@ -125,7 +135,7 @@ try {
   const bootstrap = await (await request("/api/bootstrap")).json();
   assert.equal(bootstrap.stats.total, total);
   assert.equal(new Set(bootstrap.jobs.map((job) => job.source)).size, 10);
-  assert.equal((await request(`/api/agents/${agent.id}/rollback`, { method: "POST", body: JSON.stringify({ version_id: agent.published_version_id }) })).status, 200);
+  assert.equal((await human(`/api/agents/${agent.id}/rollback`, { method: "POST", body: JSON.stringify({ version_id: agent.published_version_id }) })).status, 200);
 
   console.log("E2E authenticated access, TLS gate, publication/rollback, and 10-source 500-result/20-worker load checks passed.");
 } finally {

@@ -124,6 +124,46 @@ export function isTlsRequest(req: Pick<IncomingMessage, "headers" | "socket">, t
   return first === "https";
 }
 
+/**
+ * IP de origem para limitar tentativas. Por padrão é o par da conexão; X-Forwarded-For só é
+ * aceito quando o par é o proxy em loopback e RADAR_TRUST_PROXY_TLS=true. Vale a entrada mais
+ * à direita: é a que o proxy confiável acrescentou ($proxy_add_x_forwarded_for); as anteriores
+ * vêm do cliente e podem ser forjadas.
+ */
+export function clientAddress(req: Pick<IncomingMessage, "headers" | "socket">, trustProxy: boolean): string {
+  const peer = String(req.socket.remoteAddress ?? "").toLowerCase().replace(/^::ffff:/u, "");
+  if (!trustProxy || !isLoopbackAddress(peer)) return peer || "unknown";
+  const header = req.headers["x-forwarded-for"];
+  const forwarded = (Array.isArray(header) ? header.join(",") : header ?? "").split(",").map((item) => item.trim()).filter(Boolean).at(-1);
+  return forwarded ? forwarded.toLowerCase().replace(/^::ffff:/u, "").slice(0, 64) : peer;
+}
+
+/** Falhas de /auth por IP numa janela deslizante; o mapa tem teto para não crescer sem limite. */
+export class AuthFailureLimiter {
+  private readonly failures = new Map<string, number[]>();
+  constructor(readonly limit = 20, readonly windowMs = 10 * 60_000, readonly maxSources = 10_000) {}
+
+  private recent(source: string, now: number) {
+    const list = (this.failures.get(source) ?? []).filter((at) => at > now - this.windowMs);
+    if (list.length) this.failures.set(source, list); else this.failures.delete(source);
+    return list;
+  }
+
+  isLimited(source: string, now = Date.now()) {
+    return this.recent(source, now).length >= this.limit;
+  }
+
+  record(source: string, now = Date.now()) {
+    const list = this.recent(source, now);
+    if (!list.length && this.failures.size >= this.maxSources) {
+      const oldest = this.failures.keys().next().value;
+      if (oldest !== undefined) this.failures.delete(oldest);
+    }
+    list.push(now);
+    this.failures.set(source, list);
+  }
+}
+
 export function originMatchesHost(origin: string, host: string | undefined): boolean {
   if (!host) return false;
   const normalizedHost = host.trim().toLowerCase();

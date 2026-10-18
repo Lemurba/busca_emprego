@@ -10,14 +10,15 @@ Para uma instalação nova, siga primeiro [`ops/hermes/ONBOARDING.md`](../ops/he
 - Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI usa Node 24).
 - Código e dados no volume persistente `/opt/data` (padrão `/opt/data/dashboard/busca_emprego`, banco em `data/radar.sqlite`); `/opt/hermes` é do root e somente leitura na imagem oficial.
 - Porta canônica 8787, escutando em `RADAR_BIND_HOST` (padrão `127.0.0.1`). Uma instalação pode trocar a porta em `.env.local`. Não publicar diretamente na internet.
-- Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`).
-- O processo roda como serviço s6 do container (`ops/hermes/radar-s6-run.sh`), recriado a cada boot por um gateway hook do Hermes. `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
+- Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`). Interesse, `APROVO`, candidatura, `AUTORIZO`, revogação e demais portões humanos exigem a sessão e respondem `403 human_session_required` ao token de serviço.
+- O processo roda como serviço s6 do container (`ops/hermes/radar-s6-run.sh`) com **usuário Unix dedicado** (`s6-setuidgid radar`), nunca com o usuário do Hermes, recriado a cada boot por um gateway hook do Hermes.
+- `.env.local`, o banco (`radar.sqlite`, `-wal`, `-shm`) e os backups pertencem a `radar` com modo `600` (diretórios `700`); o `hermes` não os lê. `radar-s6-run.sh` recusa subir com `.env.local` fora do modo 600 e usa `umask 077`. Pendente: o MCP ainda abre o SQLite diretamente (ver `ops/hermes/ONBOARDING.md` §5). `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
 
 O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node recebe os sinais do supervisor. Não execute o Node desacoplado em background no entrypoint.
 
 ## 2. Variáveis e secrets
 
-O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, modo 600). Principais chaves:
+O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, modo 600, dono `radar`). Principais chaves:
 
 | Nome | Obrigatório | Observação |
 | --- | --- | --- |
@@ -63,7 +64,7 @@ Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver pr
    node scripts/ops/health-check.mjs
    ```
 
-6. Gerar o link de sessão com `node scripts/ops/dashboard-link.mjs --send`, abrir o dashboard pelo link recebido e criar uma vaga sintética removível. Confirmar que `/api/bootstrap` sem cookie nem token responde 401.
+6. Gerar o link de sessão como `radar` (`s6-setuidgid radar node scripts/ops/dashboard-link.mjs --send`), abrir o dashboard pelo link recebido e criar uma vaga sintética removível. Confirmar que `/api/bootstrap` sem cookie nem token responde 401, que `POST /api/jobs/<id>/decision` só com o token de serviço responde 403 e que `ls -l .env.local data/` mostra dono `radar` e modo 600.
 7. Executar `RADAR_PUBLIC_URL=<url do dashboard> node scripts/ops/verify-environment.mjs --environment production`. O verificador aceita HTTP somente em endereço privado/localhost.
 8. Verificar o Telegram do gateway do Hermes (`TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL`): `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e `node scripts/ops/notify-human-questions.mjs` (simulação; `--send` entrega via `hermes send`).
 9. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não ativar agendamentos ou candidatura automática com falhas, skips ou gates sem aprovação registrada.

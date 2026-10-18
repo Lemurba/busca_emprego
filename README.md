@@ -22,7 +22,7 @@ O banco inicia vazio e o aplicativo não cria dados exemplificativos em nenhuma 
 ## Acesso e autenticação
 
 - O servidor escuta em `RADAR_BIND_HOST` (padrão `127.0.0.1`) e só aceita os hosts de `RADAR_ALLOWED_HOSTS` (padrão `127.0.0.1,localhost`).
-- Toda rota `/api/*`, exceto `GET /api/health` e `GET /api/ready`, exige o header `x-radar-service-token` com `RADAR_INTERNAL_SERVICE_TOKEN` (agentes e scripts) **ou** o cookie de sessão do dashboard. Sem token interno configurado, as rotas internas respondem `503 internal_token_not_configured`.
+- Toda rota `/api/*`, exceto `GET /api/health` e `GET /api/ready`, exige o header `x-radar-service-token` com `RADAR_INTERNAL_SERVICE_TOKEN` (agentes e scripts) **ou** o cookie de sessão do dashboard. Interesse, `APROVO`, candidatura, `AUTORIZO` e demais portões humanos aceitam só a sessão (`403` para o token); o dashboard roda com usuário Unix próprio (`docs/security.md`). Sem token interno configurado, as rotas internas respondem `503 internal_token_not_configured`.
 - O dashboard abre por um link de sessão: `node scripts/ops/dashboard-link.mjs` imprime `http://<host>:<PORT>/auth?token=...` (ou o envia pelo Telegram do Hermes com `--send`); `GET /auth` troca `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` HttpOnly/SameSite=Strict.
 - Rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Detalhes em [`docs/security.md`](docs/security.md).

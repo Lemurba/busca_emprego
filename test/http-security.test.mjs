@@ -186,11 +186,11 @@ try {
 
   await t("corpo JSON que não é objeto → 400 invalid_body; JSON quebrado → 400 invalid_json", async () => {
     for (const payload of ["null", "[]", "5", "\"texto\""]) {
-      const response = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, ...svc }, body: payload });
+      const response = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, cookie }, body: payload });
       assert.equal(response.status, 400, payload);
       assert.equal((await response.json()).error, "invalid_body", payload);
     }
-    const broken = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, ...svc }, body: "{" });
+    const broken = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, cookie }, body: "{" });
     assert.equal((await broken.json()).error, "invalid_json");
   });
 
@@ -202,7 +202,7 @@ try {
     assert.match(body.message, /source_url/);
     const badPatch = await fetch(`${base}/api/jobs/utf8-job`, { method: "PATCH", headers: { ...json, ...svc }, body: JSON.stringify({ application_url: "data:text/html,oi" }) });
     assert.equal(badPatch.status, 400);
-    const badType = await fetch(`${base}/api/agents`, { method: "POST", headers: { ...json, ...svc }, body: JSON.stringify({ name: { $gt: "" }, allowed_domains: "a.com" }) });
+    const badType = await fetch(`${base}/api/agents`, { method: "POST", headers: { ...json, cookie }, body: JSON.stringify({ name: { $gt: "" }, allowed_domains: "a.com" }) });
     assert.equal(badType.status, 400);
   });
 
