@@ -36,6 +36,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const keepDb = process.argv.includes("--keep-db");
 const SMOKE_CHAT = "smoke-chat-42";
 const token = `smoke-token-${randomUUID()}`;
+const dashboardToken = `smoke-dashboard-${randomUUID()}`;
+const sessionCookies = new Map();
 const startedAt = new Date().toISOString();
 
 if (!existsSync(join(repoRoot, "dist/src/server.js"))) {
@@ -58,7 +60,7 @@ async function startServer({ dbPath, automation = "true", extraEnv = {} }) {
     env: {
       ...process.env, PORT: String(port), RADAR_DB_PATH: dbPath, RADAR_ENVIRONMENT: "production",
       RADAR_OPERATOR_ID: "smoke-operator", RADAR_TRUST_PROXY_TLS: "true",
-      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: automation,
+      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_DASHBOARD_TOKEN: dashboardToken, RADAR_AUTO_APPLICATION_ENABLED: automation,
       HERMES_LINKED_RECIPIENT_ID: SMOKE_CHAT, ...extraEnv,
     },
   });
@@ -71,6 +73,9 @@ async function startServer({ dbPath, automation = "true", extraEnv = {} }) {
     await sleep(100);
   }
   if (!ready) { child.kill("SIGTERM"); throw new Error(`servidor não ficou pronto: ${stderr.slice(0, 400)}`); }
+  // Interesse, APROVO, candidatura e AUTORIZO são portões humanos: exigem a sessão do dashboard.
+  const login = await fetch(`${baseUrl}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  sessionCookies.set(baseUrl, (login.headers.get("set-cookie") ?? "").split(";")[0]);
   return {
     baseUrl, child,
     stop: async () => { child.kill("SIGTERM"); await new Promise((r) => { child.once("exit", r); setTimeout(r, 2000); }); },
@@ -95,7 +100,7 @@ let base = "";
 const api = async (method, path, body, extraHeaders = {}) => {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, ...extraHeaders },
+    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, cookie: sessionCookies.get(base) ?? "", ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;

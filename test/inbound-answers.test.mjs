@@ -34,6 +34,8 @@ import { startFakeRadarApi } from "./fixtures/fake-radar-api.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const token = `inbound-token-${randomUUID()}`;
+const dashboardToken = `dash-${randomUUID()}`;
+const sessionCookies = new Map();
 const LINKED = "1650486356";
 const INTRUDER = "999000111";
 const directory = mkdtempSync(join(tmpdir(), "radar-inbound-"));
@@ -66,7 +68,7 @@ async function startServer() {
     env: {
       ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "inbound.sqlite"),
       RADAR_ENVIRONMENT: "production", RADAR_OPERATOR_ID: "inbound-operator", RADAR_TRUST_PROXY_TLS: "true",
-      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: "true",
+      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: "true", RADAR_DASHBOARD_TOKEN: dashboardToken,
       HERMES_LINKED_RECIPIENT_ID: LINKED, TELEGRAM_ALLOWED_USERS: LINKED,
     },
   });
@@ -79,6 +81,9 @@ async function startServer() {
     await sleep(100);
   }
   if (!ready) { child.kill("SIGTERM"); throw new Error(`servidor não ficou pronto: ${stderr.slice(0, 300)}`); }
+  // Portões humanos (interesse, APROVO, AUTORIZO) exigem a sessão do dashboard (#10).
+  const login = await fetch(`${baseUrl}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  sessionCookies.set(baseUrl, (login.headers.get("set-cookie") ?? "").split(";")[0]);
   return { baseUrl, stop: async () => { child.kill("SIGTERM"); await new Promise((r) => { child.once("exit", r); setTimeout(r, 1500); }); } };
 }
 
@@ -86,7 +91,7 @@ let base = "";
 const api = async (method, path, body) => {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token },
+    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, cookie: sessionCookies.get(base) ?? "" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;
