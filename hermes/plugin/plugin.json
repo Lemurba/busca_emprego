@@ -1,11 +1,14 @@
 {
   "name": "radar-vagas",
-  "version": "0.3.0",
-  "description": "Radar de Vagas: skill de operação e servidor MCP (stdio) para busca de vagas, currículos ATS e candidaturas autorizadas. Sem credenciais no pacote.",
+  "version": "0.4.0",
+  "description": "Radar de Vagas: skill de operação e servidores MCP (stdio, um por papel) para busca de vagas, currículos ATS e candidaturas autorizadas. Sem credenciais no pacote.",
   "extensions": {
     "com.nousresearch.hermes": {
       "servers": {
-        "radar-vagas": { "trust": "untrusted" }
+        "radar-vagas-coordenador": { "trust": "untrusted" },
+        "radar-vagas-coleta": { "trust": "untrusted" },
+        "radar-vagas-curriculo": { "trust": "untrusted" },
+        "radar-vagas-executor": { "trust": "untrusted" }
       }
     }
   }

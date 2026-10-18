@@ -21,7 +21,7 @@ export const DEFAULT_AGENT_SOURCE_IDS = DEFAULT_JOB_PORTALS.map((portal) => port
 export const DEFAULT_AGENT_ALLOWED_DOMAINS = DEFAULT_JOB_PORTALS.map((portal) => portal.domain);
 
 export const AGENT_ROLE_SCOPES: Record<string, string[]> = {
-  coordinator: ["agent.invoke", "jobs.read"],
+  coordinator: ["agent.invoke", "agents.propose", "jobs.read"],
   source_scout: ["browser.read", "jobs.read", "jobs.create"],
   job_enrichment: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"],
   normalizer_deduper: ["jobs.read", "jobs.write"],

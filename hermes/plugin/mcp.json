@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "radar-vagas": {
+    "radar-vagas-coordenador": {
       "command": "node",
       "args": [
         "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
@@ -8,6 +8,42 @@
       "env": {
         "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
         "RADAR_ENVIRONMENT": "production",
+        "RADAR_MCP_ROLE": "coordenador",
+        "RADAR_MCP_AGENT_ID": "${env:RADAR_COORDINATOR_AGENT_ID}"
+      }
+    },
+    "radar-vagas-coleta": {
+      "command": "node",
+      "args": [
+        "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
+      ],
+      "env": {
+        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_ENVIRONMENT": "production",
+        "RADAR_MCP_ROLE": "coleta"
+      }
+    },
+    "radar-vagas-curriculo": {
+      "command": "node",
+      "args": [
+        "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
+      ],
+      "env": {
+        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_ENVIRONMENT": "production",
+        "RADAR_MCP_ROLE": "curriculo"
+      }
+    },
+    "radar-vagas-executor": {
+      "command": "node",
+      "args": [
+        "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
+      ],
+      "env": {
+        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_ENVIRONMENT": "production",
+        "RADAR_MCP_ROLE": "executor",
+        "RADAR_MCP_AGENT_ID": "${env:RADAR_EXECUTOR_AGENT_ID}",
         "TELEGRAM_ALLOWED_USERS": "${env:TELEGRAM_ALLOWED_USERS}",
         "TELEGRAM_HOME_CHANNEL": "${env:TELEGRAM_HOME_CHANNEL}",
         "RADAR_AUTO_APPLICATION_ENABLED": "${env:RADAR_AUTO_APPLICATION_ENABLED}"
