@@ -54,8 +54,8 @@ try {
   }), /alterado|version/i);
 
   assert.throws(() => store.upsertJob({
-    title: "Inválida", company: "Exemplo", source: "fixture", source_url: "http://example.test/jobs/4"
-  }), /HTTPS/);
+    title: "Inválida", company: "Exemplo", source: "fixture", source_url: "ftp://example.test/jobs/4"
+  }), /HTTP/);
   assert.throws(() => store.upsertJob({
     title: "Salário inválido", company: "Exemplo", source: "fixture", source_url: "https://example.test/jobs/5", salary_min: 10, salary_max: 5, currency: "BRL"
   }), /salary/);

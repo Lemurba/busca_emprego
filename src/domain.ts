@@ -80,10 +80,15 @@ export function isPrivateDestination(hostname: string): boolean {
   return false;
 }
 
-export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly string[]): URL {
+/**
+ * URL pública http(s): credenciais, destino privado e allowlist valem para os dois esquemas.
+ * `http:` é aceito para descoberta/visualização (vaga marcada `insecure_url`); o executor
+ * exige HTTPS à parte (ver `isHttpsUrl`).
+ */
+export function assertPublicHttpUrl(input: string, allowedDomains?: readonly string[]): URL {
   let url: URL;
   try { url = new URL(normalizeUnicode(input)); } catch { throw new DomainValidationError("URL inválida", "url"); }
-  if (url.protocol !== "https:") throw new DomainValidationError("A URL deve usar HTTPS", "url");
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new DomainValidationError("A URL deve usar HTTP ou HTTPS", "url");
   if (url.username || url.password) throw new DomainValidationError("URL não pode conter credenciais", "url");
   const hostname = url.hostname.toLowerCase();
   if (isPrivateDestination(hostname)) throw new DomainValidationError("Destino privado não permitido", "url");
@@ -91,6 +96,17 @@ export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly st
     throw new DomainValidationError("Domínio não permitido", "url");
   }
   return url;
+}
+
+export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly string[]): URL {
+  const url = assertPublicHttpUrl(input, allowedDomains);
+  if (url.protocol !== "https:") throw new DomainValidationError("A URL deve usar HTTPS", "url");
+  return url;
+}
+
+/** true só para URL https: válida (o executor recusa qualquer outra). */
+export function isHttpsUrl(input: string | null | undefined): boolean {
+  try { return new URL(String(input ?? "").trim()).protocol === "https:"; } catch { return false; }
 }
 
 /** Resolves every address to avoid accepting a public hostname that points at LAN. */
@@ -105,7 +121,7 @@ export async function assertResolvablePublicHttpsUrl(input: string, allowedDomai
 
 /** Canonical form used for identity. The original URL should still be stored separately. */
 export function canonicalizeJobUrl(input: string): string {
-  const url = assertPublicHttpsUrl(input);
+  const url = assertPublicHttpUrl(input);
 
   url.hash = "";
   for (const key of [...url.searchParams.keys()]) {

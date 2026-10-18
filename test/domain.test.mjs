@@ -24,7 +24,9 @@ assert.equal(
   canonicalizeJobUrl("https://EXAMPLE.com/jobs/42/?utm_source=x&job=42&gclid=y#apply"),
   "https://example.com/jobs/42?job=42",
 );
-assert.throws(() => canonicalizeJobUrl("http://example.com/job"), /HTTPS/);
+// http:// público é aceito (vaga marcada insecure_url); bloqueios continuam valendo (#17).
+assert.equal(canonicalizeJobUrl("http://example.com/job"), "http://example.com/job");
+assert.throws(() => canonicalizeJobUrl("http://10.0.0.1/job"), /privado/);
 
 assert.deepEqual(validateSalary({ min: 5_000, max: 7_000, currency: "brl" }), {
   value: { min: 5_000, max: 7_000, currency: "BRL" }, fieldErrors: [],
