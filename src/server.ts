@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -50,8 +51,12 @@ function sendHtml(res: ServerResponse, status: number, title: string, text: stri
 function sendError(req: IncomingMessage, res: ServerResponse, error: unknown) {
   const { status, body, internal } = errorResponse(error);
   if (internal) {
+    // Erro desconhecido: 500 sem detalhes; o request_id correlaciona a resposta ao log.
+    const requestId = randomUUID();
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
-    console.error(JSON.stringify({ event: "http.error", method: req.method, path: (req.url ?? "").split("?")[0], error: detail }));
+    console.error(JSON.stringify({ event: "http.error", request_id: requestId, method: req.method, path: (req.url ?? "").split("?")[0], error: detail }));
+    sendJson(res, status, { ...body, request_id: requestId });
+    return;
   }
   sendJson(res, status, body);
 }

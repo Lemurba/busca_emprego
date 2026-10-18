@@ -3,7 +3,7 @@
 // de corpo limitada em bytes e mapeamento de erros para códigos estáveis.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { isWorkflowError } from "./workflow.js";
+import { messageForCode, toDomainError, userMessage } from "./errors.js";
 
 export class HttpError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string, public readonly details?: unknown) {
@@ -185,48 +185,6 @@ export function readJsonBody(req: IncomingMessage, limitBytes = DEFAULT_BODY_LIM
 // ---------------------------------------------------------------------------------------
 // Erros: código estável + mensagem pt-BR segura. Detalhes internos só no log do servidor.
 
-const FRIENDLY: Record<string, string> = {
-  unauthorized: "Sessão ausente ou expirada. Abra o link de acesso enviado pelo Hermes.",
-  internal_token_required: "Esta rota aceita somente o token de serviço interno.",
-  internal_token_not_configured: "O token de serviço interno não está configurado no servidor.",
-  AUTOMATION_DISABLED: "A candidatura automatizada está desligada nesta instalação.",
-  not_found: "Recurso não encontrado.",
-  not_implemented: "Operação ainda não disponível nesta versão do servidor.",
-  PDF_DUPLICATE: "Este PDF já está na biblioteca.",
-  PDF_TOO_LARGE: "O PDF deve ter no máximo 5 MB.",
-  PDF_MIME_INVALID: "Envie um arquivo PDF.",
-  PDF_SIGNATURE_INVALID: "O arquivo enviado não parece ser um PDF válido.",
-  "workflow.version_conflict": "A vaga foi alterada em outra tela. Atualize e tente de novo.",
-  "application.url_mismatch": "A URL observada não corresponde à URL autorizada.",
-  "job.archived": "Esta vaga foi excluída. Restaure-a antes de alterá-la.",
-  "job.not_archived": "Esta vaga não está excluída.",
-  "job.archive.confirmation_required": "Confirme a exclusão com EXCLUIR.",
-  "job.archive.application_in_progress": "A candidatura desta vaga está sendo enviada agora; aguarde antes de excluir.",
-  "decision.undo.nothing_to_undo": "Não há decisão para desfazer nesta vaga.",
-  "decision.undo.application_locked": "A decisão não pode ser desfeita: a candidatura está em andamento ou já foi enviada.",
-  "decision.undo.interest_has_progress": "O interesse já gerou currículo ou candidatura; use “Não tenho interesse” para sair do fluxo.",
-  "decision.undo.feedback_not_found": "Esse registro já foi desfeito ou não pertence a esta vaga.",
-  "decision.undo.use_current_decision": "Para desfazer o descarte, desfaça a decisão atual da vaga.",
-  "decision.undo.not_undoable": "Esta decisão reflete o estado da vaga e não pode ser desfeita.",
-  "preference_rule.undone": "Esta regra foi desfeita junto com o feedback que a criou e não pode ser reativada.",
-  "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
-  "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
-  "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
-};
-
-/** status por código: regras na ordem; a primeira que casar vence. */
-const STATUS_RULES: Array<[RegExp, number]> = [
-  [/^AUTOMATION_DISABLED$/u, 403],
-  [/^PDF_DUPLICATE$/u, 409],
-  [/^PDF_TOO_LARGE$/u, 413],
-  [/\.forbidden$|\.internal_route_required$/u, 403],
-  [/(?:^|\.)not_found$/u, 404],
-  [/version_conflict|\.race$|\.already_active$/u, 409],
-  [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
-  [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict|decision)\./u, 422],
-];
-
-const STABLE_CODE = /^(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]+)(?::[A-Za-z0-9_.,:-]{0,200})?$/u;
 const PT_SENTENCE = /^[^\n]{3,240}$/u;
 const PT_HINT = /[À-ÿ]|\b(?:de|da|do|para|antes|um|uma|o|a|os|as|esta|este)\b/iu;
 const INTERNAL_HINT = /sqlite|constraint|syntax|ENOENT|EACCES|undefined|null|\bat\s+\S+\s+\(|\/[a-z_]+\/[a-z_]+/iu;
@@ -238,21 +196,19 @@ export function errorResponse(error: unknown): ErrorResponse & { internal: boole
   if (error instanceof HttpError) {
     return { status: error.status, body: { error: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) }, internal: false };
   }
-  if (isWorkflowError(error)) {
-    return { status: error.httpStatus, body: { error: error.code, message: error.message, details: error.details }, internal: false };
+  // Erros de domínio (DomainError, subclasses e códigos estáveis legados): status e
+  // mensagem decididos só pelo código.
+  const domain = toDomainError(error);
+  if (domain) {
+    return { status: domain.status, body: { error: domain.code, message: userMessage(domain), ...(domain.details === undefined ? {} : { details: domain.details }) }, internal: false };
   }
-  // Somente Error "puro", lançado pelo próprio domínio (sem `code` de sistema/SQLite).
+  // Legado: frase pt-BR lançada como Error puro pelo núcleo (ainda não convertida para código).
   if (error instanceof Error && error.constructor === Error && !("code" in error)) {
     const message = error.message;
-    if (STABLE_CODE.test(message)) {
-      const base = message.split(":")[0] ?? message;
-      const status = STATUS_RULES.find(([pattern]) => pattern.test(base))?.[1] ?? 400;
-      return { status, body: { error: message, message: FRIENDLY[base] ?? FRIENDLY[message] ?? "A operação foi recusada pelas regras do Radar." }, internal: false };
-    }
     if (PT_SENTENCE.test(message) && PT_HINT.test(message) && !INTERNAL_HINT.test(message)) {
       const notFound = /não encontrad/iu.test(message);
       return { status: notFound ? 404 : 400, body: { error: notFound ? "not_found" : "request.rejected", message }, internal: false };
     }
   }
-  return { status: 500, body: { error: "internal_error", message: "Erro interno. Tente novamente; se persistir, consulte o log do servidor." }, internal: true };
+  return { status: 500, body: { error: "internal_error", message: messageForCode("internal_error") }, internal: true };
 }

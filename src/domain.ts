@@ -2,13 +2,15 @@
 
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
+import { DomainError } from "./errors.js";
 
-export class DomainValidationError extends Error {
+/** Campo inválido: sempre 422, com `field` nos detalhes e mensagem pt-BR segura. */
+export class DomainValidationError extends DomainError {
   constructor(
     message: string,
     readonly field: string,
   ) {
-    super(message);
+    super(`validation.${field}`, 422, { field }, message);
     this.name = "DomainValidationError";
   }
 }
