@@ -1,14 +1,15 @@
-import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { createHash, randomUUID } from "node:crypto";
+import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
+import { projectId } from "./config.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -21,10 +22,12 @@ const sourcePublic = join(projectRoot, "../public");
 const publicDir = resolve(existsSync(join(distPublic, "index.html")) ? distPublic : sourcePublic);
 const environment = process.env.RADAR_ENVIRONMENT ?? "development";
 const operatorId = process.env.RADAR_OPERATOR_ID ?? "unassigned";
-const projectId = "busca-emprego";
 const trustProxyTls = process.env.RADAR_TRUST_PROXY_TLS === "true";
 const allowedHosts = parseAllowedHosts(process.env.RADAR_ALLOWED_HOSTS, port);
-const sessions = new SessionStore(sessionTtlMs());
+// Sessões persistidas (hash) no SQLite: reiniciar o serviço não desloga ninguém; trocar
+// RADAR_DASHBOARD_TOKEN e reiniciar encerra todas (a impressão digital do token muda).
+const dashboardTokenFingerprint = createHash("sha256").update(`radar-session|${process.env.RADAR_DASHBOARD_TOKEN ?? ""}`).digest("hex").slice(0, 32);
+const sessions = new SessionStore(sessionTtlMs(), 1000, dashboardSessionStore(dashboardTokenFingerprint));
 const basePath = normalizeBasePath(process.env.RADAR_BASE_PATH);
 const sessionCookiePath = cookiePath(basePath);
 if (["staging", "production"].includes(environment) && operatorId === "unassigned") throw new Error("RADAR_OPERATOR_ID is required in staging/production");
@@ -56,8 +59,8 @@ function sendHtml(res: ServerResponse, status: number, title: string, text: stri
 function sendError(req: IncomingMessage, res: ServerResponse, error: unknown) {
   const { status, body, internal } = errorResponse(error);
   if (internal) {
-    // Erro desconhecido: 500 sem detalhes; o request_id correlaciona a resposta ao log.
-    const requestId = randomUUID();
+    // Erro desconhecido: 500 sem detalhes; o request_id (o mesmo do log de requisição) correlaciona a resposta ao log.
+    const requestId = String(res.getHeader("x-request-id") ?? randomUUID());
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
     console.error(JSON.stringify({ event: "http.error", request_id: requestId, method: req.method, path: (req.url ?? "").split("?")[0], error: detail }));
     sendJson(res, status, { ...body, request_id: requestId });
@@ -206,7 +209,7 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/profiles"), handler: ({ res }) => ok(res, 200, listProfiles(projectId)) },
   { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => ok(res, 201, createProfessionalProfile(body, actor, projectId)) },
   { method: "GET", pattern: r("/api/profile/active"), handler: ({ res }) => ok(res, 200, getProfile(listProfiles(projectId).find((profile) => profile.status === "confirmed")?.id ?? "", projectId)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor)) },
+  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor, params[0]!)) },
   { method: "GET", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params }) => ok(res, 200, listProfileFacts(params[0]!)) },
   { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ actor, res, params, body }) => ok(res, 201, addProfileFact(params[0]!, body, actor)) },
   { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ actor, res, params }) => ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)) },
@@ -259,7 +262,8 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => ok(res, 200, ingestRoundBatch(params[0]!, String(body.source_id ?? ""), body.batch && typeof body.batch === "object" && !Array.isArray(body.batch) ? body.batch as Record<string, unknown> : body, projectId)) },
 
   // Vagas
-  { method: "POST", pattern: r("/api/jobs"), handler: ({ res, body }) => ok(res, 201, upsertJob(validateBody(schemas.jobCreate, body) as never)) },
+  // Cadastro manual: nunca sobrescreve vaga existente/arquivada (a ingestão usa as rodadas e agent-events).
+  { method: "POST", pattern: r("/api/jobs"), handler: ({ actor, res, body }) => ok(res, 201, createJobFromHuman(validateBody(schemas.jobCreate, body), actor, projectId)) },
   { method: "POST", pattern: r("/api/jobs/{id}/decision"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.jobDecision, body);
     ok(res, 200, recordJobDecision(params[0]!, String(input.decision ?? ""), String(input.confirmation ?? ""), actor));
@@ -455,7 +459,32 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: 
   }
 }
 
+// --- Observabilidade --------------------------------------------------------------------
+
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/u;
+
+/** Usa o X-Request-Id do proxy (nginx) quando bem formado; senão gera um. Ecoa na resposta. */
+function requestIdFor(req: IncomingMessage): string {
+  const header = req.headers["x-request-id"];
+  const incoming = Array.isArray(header) ? header[0] : header;
+  return incoming && REQUEST_ID.test(incoming) ? incoming : randomUUID();
+}
+
+/** Uma linha JSON por requisição (sem query string, que pode conter o token do /auth). */
+function logRequest(req: IncomingMessage, res: ServerResponse, requestId: string, startedAt: bigint) {
+  res.once("finish", () => {
+    const path = (req.url ?? "").split("?")[0];
+    // Sondas de saúde bem-sucedidas são frequentes (watchdog) e não vão para o log.
+    if ((path === "/api/health" || path === "/api/ready") && res.statusCode < 400) return;
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    console.log(JSON.stringify({ event: "http.request", request_id: requestId, method: req.method, path, status: res.statusCode, duration_ms: Math.round(durationMs * 10) / 10 }));
+  });
+}
+
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
+  const requestId = requestIdFor(req);
+  res.setHeader("x-request-id", requestId);
+  logRequest(req, res, requestId, process.hrtime.bigint());
   try {
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("x-frame-options", "DENY");

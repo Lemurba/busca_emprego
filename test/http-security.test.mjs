@@ -163,12 +163,12 @@ try {
 
   await t("UTF-8 multibyte quebrado entre chunks chega íntegro", async () => {
     const title = "Programação ção ü 😀 — São Paulo";
-    const bytes = Buffer.from(JSON.stringify({ id: "utf8-job", title, company: "Empresa Ação", source: "manual", source_url: "https://example.com/vaga/utf8" }), "utf8");
+    const bytes = Buffer.from(JSON.stringify({ title, company: "Empresa Ação", source: "manual", source_url: "https://example.com/vaga/utf8" }), "utf8");
     const cut = bytes.indexOf(Buffer.from("ç", "utf8")) + 1; // corta no meio do "ç"
     const emoji = bytes.indexOf(Buffer.from("😀", "utf8")) + 2; // corta no meio do emoji
     const response = await raw(port, { method: "POST", path: "/api/jobs", headers: { ...json, ...svc }, chunks: [bytes.subarray(0, cut), bytes.subarray(cut, emoji), bytes.subarray(emoji)] });
     assert.equal(response.status, 201, response.text);
-    const job = await (await fetch(`${base}/api/jobs/utf8-job`, { headers: svc })).json();
+    const job = await (await fetch(`${base}/api/jobs/${encodeURIComponent(JSON.parse(response.text).id)}`, { headers: svc })).json();
     assert.equal(job.title, title);
     assert.equal(job.company, "Empresa Ação");
   });

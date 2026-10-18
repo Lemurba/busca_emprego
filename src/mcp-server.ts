@@ -34,6 +34,7 @@ import { statusForCode, toDomainError, userMessage } from "./errors.js";
 import { RADAR_MCP_ROLES, RADAR_MCP_TOOLS, type RadarMcpRole } from "./mcp-tools.js";
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
+import { projectId } from "./config.js";
 
 /**
  * Servidor MCP do Radar de Vagas.
@@ -55,7 +56,7 @@ import { registerProcess } from "./process-registry.js";
  *   (sem stack trace nem mensagem de SQL).
  */
 
-const PROJECT_ID = "busca-emprego";
+const PROJECT_ID = projectId;
 
 class ToolError extends Error {
   constructor(readonly code: string, message: string) {

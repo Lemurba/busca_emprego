@@ -34,36 +34,58 @@ export function parseCookies(header: string | undefined): Record<string, string>
 
 export const SESSION_COOKIE = "radar_session";
 
-/** Sessões do dashboard em memória: id aleatório de 32 bytes → expiração. Reiniciar o processo encerra todas. */
+/** Backend opcional das sessões (ex.: SQLite). Recebe só hashes, nunca o id do cookie. */
+export interface SessionPersistence {
+  load(now?: number): Iterable<[string, number]>;
+  save(tokenHash: string, expiresAt: number): void;
+  remove(tokenHash: string): void;
+}
+
+const sessionHash = (id: string) => createHash("sha256").update(id, "utf8").digest("hex");
+
+/**
+ * Sessões do dashboard: id aleatório de 32 bytes no cookie; aqui fica sha256(id) → expiração.
+ * Com `persistence`, as sessões sobrevivem a reinícios; sem ela, ficam só em memória.
+ */
 export class SessionStore {
   private readonly sessions = new Map<string, number>();
-  constructor(public readonly ttlMs: number, private readonly maxSessions = 1000) {}
+  constructor(public readonly ttlMs: number, private readonly maxSessions = 1000, private readonly persistence?: SessionPersistence) {
+    if (persistence) for (const [hash, expiresAt] of persistence.load()) this.sessions.set(hash, expiresAt);
+  }
 
   create(now = Date.now()): string {
     this.prune(now);
     if (this.sessions.size >= this.maxSessions) {
       const oldest = [...this.sessions.entries()].sort((left, right) => left[1] - right[1])[0];
-      if (oldest) this.sessions.delete(oldest[0]);
+      if (oldest) this.forget(oldest[0]);
     }
     const id = randomBytes(32).toString("base64url");
-    this.sessions.set(id, now + this.ttlMs);
+    const hash = sessionHash(id);
+    this.sessions.set(hash, now + this.ttlMs);
+    this.persistence?.save(hash, now + this.ttlMs);
     return id;
   }
 
   isValid(id: string | undefined, now = Date.now()): boolean {
     if (!id || !/^[A-Za-z0-9_-]{43}$/u.test(id)) return false;
-    const expiresAt = this.sessions.get(id);
+    const hash = sessionHash(id);
+    const expiresAt = this.sessions.get(hash);
     if (expiresAt == null) return false;
-    if (expiresAt <= now) { this.sessions.delete(id); return false; }
+    if (expiresAt <= now) { this.forget(hash); return false; }
     return true;
   }
 
   revoke(id: string | undefined) {
-    if (id) this.sessions.delete(id);
+    if (id) this.forget(sessionHash(id));
   }
 
   prune(now = Date.now()) {
-    for (const [id, expiresAt] of this.sessions) if (expiresAt <= now) this.sessions.delete(id);
+    for (const [hash, expiresAt] of this.sessions) if (expiresAt <= now) this.forget(hash);
+  }
+
+  private forget(hash: string) {
+    this.sessions.delete(hash);
+    this.persistence?.remove(hash);
   }
 
   get size() { return this.sessions.size; }

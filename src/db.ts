@@ -526,6 +526,31 @@ db.exec(`
 // Sightings may repeat in later rounds; round/hash uniqueness already makes retries idempotent.
 db.exec("DROP INDEX IF EXISTS idx_occurrence_source_identity");
 
+// Sessões do dashboard: só o hash (sha256) do id do cookie é gravado, nunca o id em si.
+// `token_fingerprint` amarra a sessão ao RADAR_DASHBOARD_TOKEN vigente: trocar o token e
+// reiniciar continua encerrando todas as sessões.
+db.exec(`CREATE TABLE IF NOT EXISTS dashboard_sessions (
+  token_hash TEXT PRIMARY KEY,
+  token_fingerprint TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+)`);
+
+/** Persistência das sessões do dashboard no SQLite (reiniciar o serviço não desloga ninguém). */
+export function dashboardSessionStore(tokenFingerprint: string) {
+  return {
+    load(now = Date.now()): Array<[string, number]> {
+      db.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= ? OR token_fingerprint <> ?").run(now, tokenFingerprint);
+      return (db.prepare("SELECT token_hash, expires_at FROM dashboard_sessions").all() as Array<{ token_hash: string; expires_at: number }>).map((row) => [row.token_hash, Number(row.expires_at)]);
+    },
+    save(tokenHash: string, expiresAt: number) {
+      db.prepare("INSERT INTO dashboard_sessions (token_hash, token_fingerprint, expires_at) VALUES (?, ?, ?) ON CONFLICT(token_hash) DO UPDATE SET expires_at = excluded.expires_at, token_fingerprint = excluded.token_fingerprint").run(tokenHash, tokenFingerprint, expiresAt);
+    },
+    remove(tokenHash: string) {
+      db.prepare("DELETE FROM dashboard_sessions WHERE token_hash = ?").run(tokenHash);
+    },
+  };
+}
+
 function ensureColumn(table: string, column: string, definition: string) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (!columns.some((item) => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -1329,6 +1354,10 @@ function validateJobFields(changed: Record<string, unknown>, current: Record<str
   return normalized;
 }
 
+function upsertJobId(source: string, identityUrl: string, title: string, company: string) {
+  return idFor(`${source}|${identityUrl}|${title}|${company}`);
+}
+
 export function upsertJob(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
   if (!input.title?.trim() || !input.company?.trim() || !input.source?.trim()) throw new Error("job.required_fields.invalid");
   if (!String(input.source_url ?? "").trim()) throw new Error("job.source_url.required");
@@ -1339,7 +1368,7 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
   const linkedinPostUrl = String(input.linkedin_post_url ?? "");
   const applicationUrl = String(input.application_url ?? "");
   const sourceUrl = String(input.source_url ?? "");
-  const id = input.id || idFor(`${input.source}|${jobUrl || linkedinPostUrl || applicationUrl || sourceUrl}|${input.title}|${input.company}`);
+  const id = input.id || upsertJobId(input.source, jobUrl || linkedinPostUrl || applicationUrl || sourceUrl, input.title, input.company);
   const timestamp = now();
   tx(() => {
     const current = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
@@ -1364,6 +1393,35 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
     applySuppression(id);
   });
   return getJob(id);
+}
+
+/** Campos que o cadastro manual (POST /api/jobs) não aceita: identidade, nota e estado vêm do domínio. */
+const nonCreatableJobFields = new Set(["id", "match_score", "project_id", "status", "decision", "archived_at", "version"]);
+
+/**
+ * Cadastro manual de vaga (dashboard/API). Diferente de `upsertJob` (ingestão), nunca
+ * sobrescreve uma vaga existente nem uma arquivada, e grava proveniência humana dos campos.
+ */
+export function createJobFromHuman(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
+  const forbidden = Object.keys(input).filter((key) => nonCreatableJobFields.has(key));
+  if (forbidden.length) throw new Error(`job.field.not_editable:${forbidden.join(",")}`);
+  const job = input as Partial<Job> & { source: string; title: string; company: string; source_url: string };
+  const identityUrl = String(job.job_url || job.linkedin_post_url || job.application_url || job.source_url || "");
+  const id = upsertJobId(String(job.source ?? ""), identityUrl, String(job.title ?? ""), String(job.company ?? ""));
+  return tx(() => {
+    assertJobNotArchived(id);
+    if (getJob(id)) throw new Error("job.already_exists");
+    const created = upsertJob({ ...job, project_id: projectId } as typeof job);
+    if (created) {
+      for (const [field, value] of Object.entries(input)) {
+        if (!editableJobFields.has(field) || value == null || value === "") continue;
+        const evidence = addEvidence({ projectId, jobId: created.id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
+        selectEvidence(created.id, field, evidence.id, actor, evidence.timestamp);
+      }
+    }
+    audit("job", created?.id ?? id, "created_by_human", { actor });
+    return created;
+  });
 }
 
 export function getJob(id: string) {
@@ -2200,10 +2258,11 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   return mapProfileFact(db.prepare("SELECT * FROM profile_facts WHERE id=?").get(id) as Record<string, unknown>);
 }
 
-export function reviewProfileFact(id: string, state: string, actor = "user") {
+/** Revisa um fato; com `profileId`, o fato precisa pertencer a esse perfil (senão, não encontrado). */
+export function reviewProfileFact(id: string, state: string, actor = "user", profileId?: string) {
   if (!["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
   const row = db.prepare("SELECT f.*,p.status AS profile_status FROM profile_facts f JOIN professional_profiles p ON p.id=f.profile_id WHERE f.id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row) throw new Error("profile.fact.not_found");
+  if (!row || (profileId !== undefined && row.profile_id !== profileId)) throw new Error("profile.fact.not_found");
   if (row.profile_status !== "draft") throw new Error("profile.draft_required");
   if (state === "confirmed" && row.origin !== "user" && row.evidence_page == null && !String(row.evidence_excerpt ?? "").trim()) throw new Error("profile.fact.evidence.required");
   db.prepare("UPDATE profile_facts SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
@@ -2341,6 +2400,7 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
 }
 
 export function updateResume(id: string, patch: Partial<Resume>) {
+  if (!db.prepare("SELECT id FROM resumes WHERE id = ?").get(id)) throw new Error("resume.not_found");
   if (patch.status === "approved") throw new Error("A aprovação exige confirmação humana explícita.");
   const allowed = ["base_resume_id", "title", "status", "content", "keywords", "changes"] as const;
   if (patch.base_resume_id && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(patch.base_resume_id)) throw new Error("Currículo-base selecionado não encontrado.");
@@ -2811,7 +2871,7 @@ export function updateApplication(id: string, patch: Partial<Application>, actor
   const allowed = ["resume_id", "status", "current_step", "submitted_at", "notes", "evidence_ref"] as const;
   const normalized = { ...patch } as Partial<Application>;
   const current = listApplications().find((application) => application.id === id);
-  if (!current) return null;
+  if (!current) throw new Error("application.not_found");
   // Re-sending the current status (e.g. a form that only edits notes) is not a transition.
   if (normalized.status !== undefined && normalized.status === current.status) delete normalized.status;
   const validStatuses = ["queued", "in_progress", "needs_review", "submitted", "accepted", "rejected", "failed"];

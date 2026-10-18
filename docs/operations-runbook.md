@@ -27,6 +27,7 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_INTERNAL_SERVICE_TOKEN` | sim | 32 bytes aleatórios; header `x-radar-service-token`; nunca imprimir |
 | `RADAR_DASHBOARD_TOKEN` | sim | trocado por cookie de sessão em `/auth`; link via `scripts/ops/dashboard-link.mjs` |
 | `RADAR_OPERATOR_ID` | sim | pessoa responsável (auditoria) |
+| `RADAR_PROJECT_ID` | não | projeto (tenant) do servidor HTTP e do MCP; padrão `busca-emprego` |
 | `RADAR_DB_PATH` | sim | caminho absoluto em `/opt/data`, modo 0600 |
 | `RADAR_BACKUP_DIR` | recomendado | fora do diretório do banco; copiar para destino externo criptografado |
 | `RADAR_LOG_DIR` | não | padrão `/opt/data/logs` |
