@@ -1,7 +1,7 @@
 // Schemas zod dos corpos das rotas HTTP mutantes. Checam tipos e esquemas de URL na
 // borda; as regras de negócio (enums, confirmações, máquina de estados) continuam no
-// domínio, que devolve códigos estáveis próprios. Campos extras passam (looseObject)
-// porque o domínio lê alguns campos opcionais além dos listados aqui.
+// domínio, que devolve códigos estáveis próprios. Os objetos são estritos (strictObject):
+// campo não listado é recusado com 400, em vez de chegar silenciosamente ao domínio.
 import { z } from "zod";
 import { HttpError } from "./http-security.js";
 
@@ -114,47 +114,51 @@ const resumeFields = {
   version: optNumber,
 };
 
-const versionRef = z.looseObject({ version_id: z.string().max(300).optional() });
+const versionRef = z.strictObject({ version_id: z.string().max(300).optional() });
 
 export const schemas = {
-  jobCreate: z.looseObject(jobFields),
-  jobPatch: z.looseObject(jobFields),
-  jobDecision: z.looseObject({ decision: shortText.optional(), confirmation: shortText.optional() }),
-  jobArchive: z.looseObject({ reason: optText, confirmation: optShort }),
-  jobUndoDecision: z.looseObject({ feedback_id: optShort }),
-  jobFeedback: z.looseObject({ mode: optShort, reason_code: optShort, detail_key: optShort, explanation: optText, confirmation: optShort }),
-  jobTransition: z.looseObject({ command: shortText.optional(), expected_version: numeric.optional(), evidence_ref: optShort, data: z.record(z.string(), z.unknown()).nullable().optional() }),
-  applicationCreate: z.looseObject({ job_id: optId, resume_id: optId, automation_mode: optShort, status: optShort, current_step: optShort, notes: optText }),
-  applicationPatch: z.looseObject({ resume_id: optId, automation_mode: optShort, status: optShort, current_step: optShort, submitted_at: optShort, notes: optText, evidence_ref: optShort }),
-  applicationAuthorize: z.looseObject({ resume_id: z.string().max(300).optional(), confirmation: shortText.optional() }),
-  applicationClaim: z.looseObject({ worker_id: z.string().max(300).optional(), nonce: z.string().max(300).optional() }),
-  applicationSubmit: z.looseObject({ worker_id: id, evidence_ref: z.string().min(1).max(2_000), observed_url: optUrl }),
-  applicationFail: z.looseObject({ worker_id: id, reason: z.string().min(1).max(2_000) }),
-  humanAnswer: z.looseObject({
+  // Cadastro manual: id, nota e versão não vêm do cliente (mesma regra de `updateJob`).
+  jobCreate: z.strictObject(jobFields).omit({ id: true, match_score: true, expected_version: true }),
+  jobPatch: z.strictObject(jobFields),
+  jobDecision: z.strictObject({ decision: shortText.optional(), confirmation: shortText.optional() }),
+  jobArchive: z.strictObject({ reason: optText, confirmation: optShort }),
+  jobUndoDecision: z.strictObject({ feedback_id: optShort }),
+  jobFeedback: z.strictObject({ mode: optShort, reason_code: optShort, detail_key: optShort, explanation: optText, confirmation: optShort }),
+  jobTransition: z.strictObject({ command: shortText.optional(), expected_version: numeric.optional(), evidence_ref: optShort, data: z.record(z.string(), z.unknown()).nullable().optional() }),
+  applicationCreate: z.strictObject({ job_id: optId, resume_id: optId, automation_mode: optShort, status: optShort, current_step: optShort, notes: optText }),
+  applicationPatch: z.strictObject({ resume_id: optId, automation_mode: optShort, status: optShort, current_step: optShort, submitted_at: optShort, notes: optText, evidence_ref: optShort }),
+  applicationAuthorize: z.strictObject({ resume_id: z.string().max(300).optional(), confirmation: shortText.optional() }),
+  applicationClaim: z.strictObject({ worker_id: z.string().max(300).optional(), nonce: z.string().max(300).optional() }),
+  applicationSubmit: z.strictObject({ worker_id: id, evidence_ref: z.string().min(1).max(2_000), observed_url: optUrl }),
+  applicationFail: z.strictObject({ worker_id: id, reason: z.string().min(1).max(2_000) }),
+  humanAnswer: z.strictObject({
     answer: optText, text: optText, action: optShort, actor: optShort,
     sender_id: identity.optional(), identity_id: identity.optional(), chat_id: identity.optional(),
     inbound_message_id: optShort, reply_to_message_ref: identity.nullable().optional(), reply_to: identity.nullable().optional(),
   }),
-  humanDelivery: z.looseObject({ delivered: z.boolean().optional(), message_ref: identity.nullable().optional(), error: optShort }),
-  agentCreate: z.looseObject(agentFields),
-  agentPatch: z.looseObject(agentFields),
+  humanDelivery: z.strictObject({ delivered: z.boolean().optional(), message_ref: identity.nullable().optional(), error: optShort }),
+  agentCreate: z.strictObject(agentFields),
+  agentPatch: z.strictObject(agentFields),
   agentVersion: versionRef,
-  sourceUpsert: z.looseObject(sourceFields),
-  sourceReadiness: z.looseObject({ status: optShort, reason: optShort }),
-  resumeCreate: z.looseObject(resumeFields),
-  resumePatch: z.looseObject(resumeFields),
-  resumeApprove: z.looseObject({ confirmation: shortText.optional(), override_reason: optShort }),
-  baseResumeUpload: z.looseObject({ title: optShort, file_name: z.string().max(500).optional(), file_data: z.string().max(UPLOAD_BASE64_MAX).optional() }),
-  empty: z.looseObject({}),
-  fieldConflictResolve: z.looseObject({ choice: shortText.optional() }),
-  duplicateResolve: z.looseObject({ status: shortText.optional() }),
-  preferenceRule: z.looseObject({ state: shortText.optional() }),
+  sourceUpsert: z.strictObject(sourceFields),
+  sourceReadiness: z.strictObject({ status: optShort, reason: optShort }),
+  resumeCreate: z.strictObject(resumeFields),
+  resumePatch: z.strictObject(resumeFields),
+  resumeApprove: z.strictObject({ confirmation: shortText.optional(), override_reason: optShort }),
+  baseResumeUpload: z.strictObject({ title: optShort, file_name: z.string().max(500).optional(), file_data: z.string().max(UPLOAD_BASE64_MAX).optional() }),
+  empty: z.strictObject({}),
+  fieldConflictResolve: z.strictObject({ choice: shortText.optional() }),
+  duplicateResolve: z.strictObject({ status: shortText.optional() }),
+  preferenceRule: z.strictObject({ state: shortText.optional() }),
 } as const;
 
 export function validateBody<T extends z.ZodType>(schema: T, body: Record<string, unknown>): z.infer<T> {
   const result = schema.safeParse(body);
   if (result.success) return result.data;
-  const details = result.error.issues.slice(0, 10).map((issue) => ({ path: issue.path.join("."), code: issue.message === "url.scheme.invalid" ? "url.scheme.invalid" : issue.code }));
+  // Campo não permitido (strictObject) vira um detalhe por chave, com o caminho do campo.
+  const details = result.error.issues.flatMap((issue) => issue.code === "unrecognized_keys"
+    ? issue.keys.map((key) => ({ path: [...issue.path, key].join("."), code: "field.not_allowed" }))
+    : [{ path: issue.path.join("."), code: issue.message === "url.scheme.invalid" ? "url.scheme.invalid" : issue.code }]).slice(0, 10);
   const fields = [...new Set(details.map((item) => item.path).filter(Boolean))].join(", ");
   throw new HttpError(400, "invalid_body", fields ? `Dados inválidos nos campos: ${fields}.` : "Dados inválidos.", details);
 }

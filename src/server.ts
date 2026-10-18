@@ -3,7 +3,9 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { randomUUID } from "node:crypto";
+import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, createProfessionalProfile, createProfileFromBaseResume, createResume, dashboardSessionStore, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertSourceConfig } from "./db.js";
+import { projectId } from "./config.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -16,11 +18,11 @@ const sourcePublic = join(projectRoot, "../public");
 const publicDir = resolve(existsSync(join(distPublic, "index.html")) ? distPublic : sourcePublic);
 const environment = process.env.RADAR_ENVIRONMENT ?? "development";
 const operatorId = process.env.RADAR_OPERATOR_ID ?? "unassigned";
-const projectId = "busca-emprego";
 const actor = "lan-user";
 const trustProxyTls = process.env.RADAR_TRUST_PROXY_TLS === "true";
 const allowedHosts = parseAllowedHosts(process.env.RADAR_ALLOWED_HOSTS, port);
-const sessions = new SessionStore(sessionTtlMs());
+// Sessões persistidas (hash) no SQLite: reiniciar o serviço não desloga ninguém.
+const sessions = new SessionStore(sessionTtlMs(), 1000, dashboardSessionStore);
 if (["staging", "production"].includes(environment) && operatorId === "unassigned") throw new Error("RADAR_OPERATOR_ID is required in staging/production");
 
 const serviceToken = () => process.env.RADAR_INTERNAL_SERVICE_TOKEN ?? "";
@@ -51,7 +53,7 @@ function sendError(req: IncomingMessage, res: ServerResponse, error: unknown) {
   const { status, body, internal } = errorResponse(error);
   if (internal) {
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
-    console.error(JSON.stringify({ event: "http.error", method: req.method, path: (req.url ?? "").split("?")[0], error: detail }));
+    console.error(JSON.stringify({ event: "http.error", request_id: res.getHeader("x-request-id"), method: req.method, path: (req.url ?? "").split("?")[0], error: detail }));
   }
   sendJson(res, status, body);
 }
@@ -215,7 +217,8 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => ok(res, 200, ingestRoundBatch(params[0]!, String(body.source_id ?? ""), body.batch && typeof body.batch === "object" && !Array.isArray(body.batch) ? body.batch as Record<string, unknown> : body, projectId)) },
 
   // Vagas
-  { method: "POST", pattern: r("/api/jobs"), handler: ({ res, body }) => ok(res, 201, upsertJob(validateBody(schemas.jobCreate, body) as never)) },
+  // Cadastro manual: nunca sobrescreve vaga existente/arquivada (a ingestão usa as rodadas e agent-events).
+  { method: "POST", pattern: r("/api/jobs"), handler: ({ res, body }) => ok(res, 201, createJobFromHuman(validateBody(schemas.jobCreate, body), actor, projectId)) },
   { method: "POST", pattern: r("/api/jobs/{id}/decision"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.jobDecision, body);
     ok(res, 200, recordJobDecision(params[0]!, String(input.decision ?? ""), String(input.confirmation ?? "")));
@@ -402,7 +405,32 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: 
   }
 }
 
+// --- Observabilidade --------------------------------------------------------------------
+
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/u;
+
+/** Usa o X-Request-Id do proxy (nginx) quando bem formado; senão gera um. Ecoa na resposta. */
+function requestIdFor(req: IncomingMessage): string {
+  const header = req.headers["x-request-id"];
+  const incoming = Array.isArray(header) ? header[0] : header;
+  return incoming && REQUEST_ID.test(incoming) ? incoming : randomUUID();
+}
+
+/** Uma linha JSON por requisição (sem query string, que pode conter o token do /auth). */
+function logRequest(req: IncomingMessage, res: ServerResponse, requestId: string, startedAt: bigint) {
+  res.once("finish", () => {
+    const path = (req.url ?? "").split("?")[0];
+    // Sondas de saúde bem-sucedidas são frequentes (watchdog) e não vão para o log.
+    if ((path === "/api/health" || path === "/api/ready") && res.statusCode < 400) return;
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    console.log(JSON.stringify({ event: "http.request", request_id: requestId, method: req.method, path, status: res.statusCode, duration_ms: Math.round(durationMs * 10) / 10 }));
+  });
+}
+
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
+  const requestId = requestIdFor(req);
+  res.setHeader("x-request-id", requestId);
+  logRequest(req, res, requestId, process.hrtime.bigint());
   try {
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("x-frame-options", "DENY");

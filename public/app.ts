@@ -865,6 +865,7 @@ const errorMessages: Record<string, string> = {
   "source.in_use.disable_instead": "Esta fonte está em uso: desative-a em vez de excluir.",
   "possible_duplicate.not_found": "Essa duplicidade já foi resolvida.",
   "job.not_found": "Vaga não encontrada. Atualize a página.",
+  "job.already_exists": "Esta vaga já está no radar. Edite a vaga existente.",
 };
 
 const errorPrefixMessages: Array<[string, string]> = [
@@ -1364,7 +1365,7 @@ function jobFormBody(form: HTMLFormElement, get: (name: string) => string, editi
   };
   if (get("salary_source_url")) body.salary_source = "Informado por você";
   else if (!editing) body.salary_source = "Não informado";
-  if (!editing) Object.assign(body, { source: get("source"), source_url: jobUrl, match_score: 0, opening_status: "unknown" });
+  if (!editing) Object.assign(body, { source: get("source"), source_url: jobUrl, opening_status: "unknown" });
   return Object.fromEntries(Object.entries(body).filter(([key]) => !editing || has(key) || key === "salary_source"));
 }
 

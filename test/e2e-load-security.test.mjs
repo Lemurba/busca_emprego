@@ -102,18 +102,20 @@ try {
   const workers = 20;
   let cursor = 0;
   let failures = 0;
+  let firstJobId = "";
   await Promise.all(Array.from({ length: workers }, async (_, worker) => {
     while (true) {
       const index = cursor++;
       if (index >= total) return;
       const source = index % 10;
-      const response = await request("/api/jobs", { method: "POST", body: JSON.stringify({ id: `load-${index}`, title: `Vaga ${index}`, company: `Empresa ${source}`, source: `source-${source}`, source_url: `https://jobs.example.com/${index}` }) });
+      const response = await request("/api/jobs", { method: "POST", body: JSON.stringify({ title: `Vaga ${index}`, company: `Empresa ${source}`, source: `source-${source}`, source_url: `https://jobs.example.com/${index}` }) });
       if (response.status !== 201) failures++;
+      else if (index === 0) firstJobId = (await response.json()).id;
     }
   }));
   assert.equal(failures, 0);
-  assert.equal((await request("/api/jobs/load-0/decision", { method: "POST", body: JSON.stringify({ decision: "interested", confirmation: "TENHO INTERESSE" }) })).status, 200);
-  const resumeResponse = await request("/api/resumes", { method: "POST", body: JSON.stringify({ job_id: "load-0", title: "Currículo ATS", content: "RESUMO\nExperiência confirmada." }) });
+  assert.equal((await request(`/api/jobs/${firstJobId}/decision`, { method: "POST", body: JSON.stringify({ decision: "interested", confirmation: "TENHO INTERESSE" }) })).status, 200);
+  const resumeResponse = await request("/api/resumes", { method: "POST", body: JSON.stringify({ job_id: firstJobId, title: "Currículo ATS", content: "RESUMO\nExperiência confirmada." }) });
   const generatedResume = await resumeResponse.json();
   assert.equal(resumeResponse.status, 201, JSON.stringify(generatedResume));
   const pdfResponse = await request(`/api/resumes/${generatedResume.id}/files/pdf`);

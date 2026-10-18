@@ -25,6 +25,7 @@ import {
 } from "./db.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
 import { RADAR_MCP_TOOLS } from "./mcp-tools.js";
+import { projectId } from "./config.js";
 
 /**
  * Servidor MCP do Radar de Vagas.
@@ -40,7 +41,7 @@ import { RADAR_MCP_TOOLS } from "./mcp-tools.js";
  *   (sem stack trace nem mensagem de SQL).
  */
 
-const PROJECT_ID = "busca-emprego";
+const PROJECT_ID = projectId;
 
 class ToolError extends Error {
   constructor(readonly code: string, message: string) {
