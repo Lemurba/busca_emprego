@@ -39,7 +39,7 @@ Ferramentas (lista exata do `tools.include` em `hermes/config.example.yaml`):
 | `radar_create_resume` | escrita | `resume.write` |
 | `radar_record_score` | escrita | `jobs.write` (avaliador de compatibilidade) |
 | `radar_propose_agent_prompt` | escrita | agente alvo publicado e ativo |
-| `radar_claim_application`, `radar_submit_application`, `radar_fail_application` | escrita | `application.prepare` + domínio da URL autorizada |
+| `radar_claim_application`, `radar_heartbeat_application`, `radar_submit_application`, `radar_fail_application` | escrita | `application.prepare` + domínio da URL autorizada |
 | `radar_ask_human` | escrita | `telegram.question` + dono do claim |
 
 Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e ativo cujo papel permita o escopo. Erros voltam como `isError` com `error.code` estável (ex.: `agent.disabled`, `agent.domain.forbidden`, `automation_disabled`, `application.url_mismatch`) e mensagem em pt-BR; trate o código, não tente de novo com outro agente para driblar escopo.
@@ -67,11 +67,13 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 - PDF e DOCX são gerados pelo aplicativo e ficam no Kanban para revisão e download.
 - Aprovação do currículo (`APROVO`) não autoriza candidatura. Use apenas a fila de `radar_list_authorized_applications` (itens com `AUTORIZO` vigente: id, vaga, hash da URL e validade). Com `automation_disabled`, pare: a candidatura automática está desligada.
 - Protocolo do executor autorizado, sempre pelas ferramentas MCP e com o mesmo `worker_id` do começo ao fim:
-  1. `radar_claim_application` reserva a candidatura (o servidor usa a autorização internamente; você nunca vê nem precisa de nonce).
+  1. `radar_claim_application` reserva a candidatura (o servidor usa a autorização internamente; você nunca vê nem precisa de nonce) e abre um lease curto (`lease_expires_at`).
+  - Durante o preenchimento chame `radar_heartbeat_application` a cada poucos minutos para renovar o lease. Lease vencido sem heartbeat devolve a vaga para revisão humana ("resultado desconhecido — verificar no portal").
   2. Abra a URL autorizada e confira cada URL observada com `radar_verify_application`. `match: false` aborta: use `radar_ask_human` ou `radar_fail_application`.
   3. Pergunta obrigatória sem resposta confirmada → `radar_ask_human` (uma por vez; a execução pausa até a resposta).
-  4. Só depois da confirmação observável do portal chame `radar_submit_application` com `evidence_ref` (referência vista no portal) e `observed_url`. Sem evidência o envio não é registrado.
-  5. Qualquer bloqueio (login, MFA, CAPTCHA, erro do portal) → `radar_fail_application` com motivo curto.
+  4. Imediatamente antes do clique final de envio chame `radar_heartbeat_application`; erro (autorização revogada, expirada ou lease vencido) significa **não clicar** — pare e use `radar_ask_human`.
+  5. Só depois da confirmação observável do portal chame `radar_submit_application` com `evidence_ref` (referência vista no portal) e `observed_url`. Sem evidência o envio não é registrado.
+  6. Qualquer bloqueio (login, MFA, CAPTCHA, erro do portal) → `radar_fail_application` com motivo curto.
 - O agente de candidatura precisa ter os domínios dos portais em `allowed_domains` (dashboard); fora deles claim/verify/submit são recusados com `agent.domain.forbidden`.
 - Nunca declare envio sem confirmação observável do portal.
 - `node scripts/ops/apply-authorized.mjs` continua existindo como ferramenta do operador (diagnóstico manual pelo terminal); não o use no lugar das ferramentas MCP.

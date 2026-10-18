@@ -179,6 +179,17 @@ try {
     assert.match(ok.stdout, /"matches": true/u);
   });
 
+  await t("heartbeat renova o lease do claim pela rota interna e recusa outro worker", async () => {
+    const result = executor("heartbeat", "--application", first.application.id, "--json");
+    assert.equal(result.status, 0, `heartbeat saiu com ${result.status}: ${result.stderr}`);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.authorization_valid, true);
+    assert.ok(new Date(payload.lease_expires_at).getTime() > Date.now(), "lease já vencido");
+    const other = await api("POST", `/api/applications/${first.application.id}/heartbeat`, { worker_id: "outro-worker" });
+    assert.equal(other.status, 422);
+    assert.equal(other.data?.error, "application.claim.worker_mismatch");
+  });
+
   await t("envio sem evidência é recusado", () => {
     const result = executor("submit", "--application", first.application.id);
     assert.equal(result.status, 1);

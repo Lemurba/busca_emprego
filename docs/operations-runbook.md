@@ -31,6 +31,8 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_LOG_DIR` | não | padrão `/opt/data/logs` |
 | `RADAR_TRUST_PROXY_TLS` | não | `true` só atrás de proxy TLS em loopback |
 | `RADAR_AUTO_APPLICATION_ENABLED` | não (gate) | ligar somente com executor testado; com `false` a fila responde 403 `AUTOMATION_DISABLED` |
+| `RADAR_AUTHORIZATION_SECRET` | sim (com o gate ligado) | 32 bytes aleatórios; assina (HMAC) cada `AUTORIZO`, conferido no claim; só o processo do dashboard deve ler. Sem ele vale um segredo fixo de desenvolvimento (aviso `authorization.dev_secret` no log) |
+| `RADAR_AUTHORIZATION_TTL_SECONDS` / `RADAR_AUTHORIZATION_LEASE_SECONDS` | não | validade da autorização ainda não reservada (padrão 86400) / lease do claim renovado por heartbeat (padrão 300, mínimo 30) |
 | `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_HOME_CHANNEL` | não | vazios = herdados de `/opt/data/.env` do Hermes |
 | `RADAR_BROWSER_VIEWER_URL` | não | visualizador remoto do navegador, se existir |
 | `GEOAPIFY_API_KEY` | não implementado | o mapa usa tiles do OpenStreetMap |
@@ -79,8 +81,9 @@ A candidatura automática só existe com autorização explícita do usuário (`
 
 ```bash
 node scripts/ops/apply-authorized.mjs list                      # fila autorizada: nonce, hash da URL, TTL
-node scripts/ops/apply-authorized.mjs claim --application <id>  # reserva com o nonce (status in_progress)
-#  ... Browser Harness abre a URL autorizada, preenche com o currículo aprovado e envia ...
+node scripts/ops/apply-authorized.mjs claim --application <id>  # reserva com o nonce (status in_progress) e abre o lease
+#  ... Browser Harness abre a URL autorizada e preenche com o currículo aprovado ...
+node scripts/ops/apply-authorized.mjs heartbeat --application <id>  # renova o lease; obrigatório logo antes do clique final
 node scripts/ops/apply-authorized.mjs verify --application <id> --observed-url <url aberta>
 node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <referência do portal>
 node scripts/ops/apply-authorized.mjs fail   --application <id> --reason captcha_manual
@@ -89,9 +92,11 @@ node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref cnh 
 
 Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `--evidence-ref` observado no portal o envio não é confirmado; URL observada diferente da autorizada (mesma canonicalização do app) aborta a execução — nesse caso use `ask` para revisão humana; `fail` grava apenas o código do motivo (nada de conteúdo de página, token ou URL com credencial). Pergunta humana criada com `ask` pausa a candidatura e é entregue por `notify-human-questions.mjs`.
 
+Lease: a reserva vale pelo lease (`RADAR_AUTHORIZATION_LEASE_SECONDS`), não pelo TTL da emissão; o executor renova com `heartbeat` durante o preenchimento e confere a validade imediatamente antes do clique final (falha = não enviar). Lease vencido sem heartbeat leva a candidatura para `needs_review` com o evento `lease_expired` ("resultado desconhecido — verificar no portal"): confira no portal antes de reautorizar. Pergunta humana ativa pausa o lease. Vaga presa em `applying` sem autorização válida (ex.: revogação concorrente de versões antigas) é devolvida para revisão automaticamente com o evento `applying_recovered`. Revogação e escolha manual que perdem a corrida para um claim respondem `409`.
+
 **Navegador:** o executor conduz o navegador configurado no Hermes por `browser.cdp_url: http://127.0.0.1:9222` (`hermes/config.example.yaml`), que tem precedência sobre o motor padrão; com o CDP fora do ar o Hermes não deve abrir outro navegador para candidatura — pare e corrija o serviço do Chrome. Se houver visualizador remoto da sessão, sua URL fica em `RADAR_BROWSER_VIEWER_URL` no `.env.local`. Logins de portais vêm do cofre de credenciais do Hermes (`hermes vault add`); nenhuma candidatura roda em outro perfil ou endpoint CDP.
 
-Verificação obrigatória antes de ligar o gate: `node test/executor.test.mjs` (claim, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada — 10 checagens).
+Verificação obrigatória antes de ligar o gate: `node test/executor.test.mjs` (claim, heartbeat, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada) e `node test/executor-lease.test.mjs` (revogação × claim em dois processos, lease, assinatura).
 
 Para provar o harness **no ambiente real**, use um formulário HTTPS **público** (ex.: `https://httpbin.org/forms/post`) no navegador da instância única: preencha os campos, envie e use a página de confirmação/eco do portal como `--evidence-ref`. O Hermes bloqueia URL privada/interna no navegador (`allow_private_urls: false`), então o fixture local `node test/fixtures/portal-fixture.mjs 8791` serve para checar o **formato** de portal (upload de PDF, consentimento, redirect com protocolo) fora do fluxo autorizado — nunca como URL de candidatura. Isso é coerente com o app: o Radar só autoriza `application_url` pública HTTPS.
 
