@@ -86,13 +86,15 @@ function validateCompany(input: Record<string, unknown>) {
   const connector = String(input.connector ?? "").trim().toLowerCase();
   const definition = connectorById(connector);
   if (!definition) throw new Error("connector.unknown");
-  const slug = String(input.slug ?? "").trim();
+  // Ashby e SmartRecruiters diferenciam maiúsculas no identificador; os demais não.
+  const rawSlug = String(input.slug ?? "").trim();
+  const slug = connector === "ashby" || connector === "smartrecruiters" ? rawSlug : rawSlug.toLowerCase();
   if (!definition.slugPattern.test(slug)) throw new Error("connector.company.slug_invalid");
   const name = String(input.name ?? "").replace(/\s+/gu, " ").trim() || slug;
   if (name.length > 120) throw new Error("connector.company.name_invalid");
   const query = String(input.query ?? "").replace(/\s+/gu, " ").trim();
   if (query.length > 120) throw new Error("connector.company.query_invalid");
-  return { connector, slug: connector === "ashby" || connector === "smartrecruiters" ? slug : slug.toLowerCase(), name, query, enabled: input.enabled === false ? 0 : 1 };
+  return { connector, slug, name, query, enabled: input.enabled === false ? 0 : 1 };
 }
 
 export function upsertConnectorCompany(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): ConnectorCompany {

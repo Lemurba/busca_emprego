@@ -125,7 +125,8 @@ export function normalizeGreenhouse(payload: unknown, company: ConnectorCompanyR
       work_model: workModel(location, ...asArray(job.offices).map((office) => asObject(office).name)),
       description: htmlToText(content) || null,
       posted_at: pick(job, "first_published", "updated_at") as string | undefined ?? null,
-      job_url: pick(job, "absolute_url", "url") as string,
+      // gh_src é rastreamento de origem do Greenhouse, não identidade da vaga.
+      job_url: stripParams(pick(job, "absolute_url", "url"), ["gh_src"]) as string,
       opening_status: "open",
       evidence_refs: ["connector:greenhouse"]
     };

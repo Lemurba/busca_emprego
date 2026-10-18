@@ -18,7 +18,7 @@ export interface EnrichmentOutcome {
 }
 
 /** Descrição com menos que isto é tratada como ausente. */
-export const MIN_DESCRIPTION_LENGTH = 200;
+export const MIN_DESCRIPTION_LENGTH = 120;
 
 export function needsEnrichment(item: ConnectorItem): boolean {
   return String(item.description ?? "").trim().length < MIN_DESCRIPTION_LENGTH;
