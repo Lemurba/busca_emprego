@@ -68,7 +68,7 @@ export function resolveConnectorLimits(options: ConnectorRunOptions = {}): Conne
   if (!Number.isFinite(costPerRequest) || costPerRequest < 0) throw new Error("connector.cost_per_request.invalid");
   return {
     concurrency: clampInteger(options.concurrency ?? agent.concurrency ?? env.RADAR_CONNECTOR_CONCURRENCY, 4, 1, 20),
-    timeout_seconds: clampInteger(options.timeoutSeconds ?? agent.timeout_seconds ?? env.RADAR_CONNECTOR_TIMEOUT_SECONDS, 600, 5, 3600),
+    timeout_seconds: clampInteger(options.timeoutSeconds ?? agent.timeout_seconds ?? env.RADAR_CONNECTOR_TIMEOUT_SECONDS, 600, 1, 3600),
     max_requests: clampInteger(options.maxRequests ?? env.RADAR_CONNECTOR_MAX_REQUESTS, 300, 1, 10_000),
     max_cost_per_run: maxCost,
     cost_per_request: costPerRequest,
