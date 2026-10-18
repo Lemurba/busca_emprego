@@ -203,6 +203,12 @@ try {
   assert.equal(store.listApplications().find((item) => item.id === first.application.id).status, "in_progress");
   assert.ok(!(await ok("radar_list_open_questions")).questions.some((question) => question.id === questionId));
 
+  // ---- heartbeat (#18): renova o lease e confere a validade antes do clique final ----
+  await refused("radar_heartbeat_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2" }, "application.claim.worker_mismatch");
+  const beat = await ok("radar_heartbeat_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" });
+  assert.equal(beat.authorization_valid, true);
+  assert.ok(beat.lease_expires_at > new Date().toISOString());
+
   // ---- submit ----
   await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/mcp-submit/apply" }, "application.claim.worker_mismatch");
   await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/outra" }, "application.url_mismatch");

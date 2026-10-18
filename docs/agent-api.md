@@ -327,6 +327,7 @@ A vaga deve estar marcada como de interesse, o currículo associado deve estar a
 | --- | --- | --- |
 | `list` | `GET /api/authorized-applications` | exige `RADAR_AUTO_APPLICATION_ENABLED=true` e o token interno; mostra `nonce`, hash da URL e TTL |
 | `claim --application <id>` | `POST /api/applications/{id}/claim` | usa o `nonce` da fila, grava o estado local em `.radar/executor/<id>.json` |
+| `heartbeat` | `POST /api/applications/{id}/heartbeat` | renova o lease do claim (`{worker_id}` → `lease_expires_at`); rode logo antes do clique final — erro significa não enviar |
 | `verify --observed-url <url>` | — (mesma `canonicalizeJobUrl` de `dist/src/domain.js`) | aborta se a URL aberta difere da autorizada |
 | `submit --evidence-ref <ref>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id` e sem evidência observada no portal |
 | `fail --reason <código>` | `POST /api/applications/{id}/fail` | grava só o código do motivo; a vaga volta para revisão |

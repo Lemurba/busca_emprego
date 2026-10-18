@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -580,6 +580,10 @@ ensureColumn("applications", "evidence_ref", "TEXT");
 ensureColumn("applications", "claimed_by", "TEXT");
 ensureColumn("applications", "claimed_at", "TEXT");
 ensureColumn("applications", "expires_at", "TEXT");
+// #10: assinatura HMAC da autorização; #18: lease renovável do claim (heartbeat do executor).
+ensureColumn("application_authorizations", "signature", "TEXT");
+ensureColumn("application_authorizations", "lease_expires_at", "TEXT");
+ensureColumn("application_authorizations", "heartbeat_at", "TEXT");
 ensureColumn("agent_configs", "model_id", "TEXT");
 ensureColumn("agent_configs", "reasoning_effort", "TEXT");
 ensureColumn("agent_configs", "max_input_tokens", "INTEGER");
@@ -2286,28 +2290,77 @@ export function createApplication(input: Partial<Application> & { job_id: string
   return listApplications().find((application) => application.id === id) ?? null;
 }
 
+/** Estados em que o modo da candidatura ainda pode mudar (nenhum executor reservou o envio). */
+const MODE_CHANGE_STATUSES = ["queued", "needs_review", "failed"];
+
+/** #14 — a candidatura mudou de estado em outro processo (ex.: claim do executor): 409. */
+function applicationStateConflict(message: string, status: unknown) {
+  return new WorkflowError("VERSION_CONFLICT", 409, message, { application_status: String(status ?? "") });
+}
+
 export function selectManualApplication(id: string) {
-  const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status,
-      jobs.status AS job_status, jobs.decision AS job_decision
-    FROM applications
-    JOIN resumes ON resumes.id = applications.resume_id
-    JOIN jobs ON jobs.id = applications.job_id
-    WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; job_status: string; job_decision: string }) | undefined;
-  if (!application) throw new Error("Candidatura ou currículo não encontrado.");
-  assertJobNotArchived(application.job_id);
-  if (!["queued", "needs_review", "failed"].includes(application.status)) throw new Error("O modo só pode ser alterado antes do início do envio.");
-  if (application.resume_status !== "approved" || application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) {
-    throw new Error("Mantenha o interesse registrado e o currículo aprovado para escolher o modo manual.");
-  }
-  const timestamp = now();
-  revokeAuthorizationRows(id, "manual_selected");
-  db.prepare(`UPDATE applications SET automation_mode = 'manual', auto_authorized_at = NULL,
-      authorized_resume_id = NULL, authorized_resume_version = NULL,
-      authorization_id = NULL, expires_at = NULL,
-      status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
-      current_step = 'Fluxo manual selecionado', updated_at = ? WHERE id = ?`).run(timestamp, id);
-  audit("application", id, "manual_selected", { resume_id: application.resume_id });
+  // #14: leitura, guarda e escritas na mesma transação (BEGIN IMMEDIATE); um claim do executor
+  // em outro processo não entra entre a conferência do status e os UPDATEs.
+  tx(() => {
+    const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status,
+        jobs.status AS job_status, jobs.decision AS job_decision
+      FROM applications
+      JOIN resumes ON resumes.id = applications.resume_id
+      JOIN jobs ON jobs.id = applications.job_id
+      WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; job_status: string; job_decision: string }) | undefined;
+    if (!application) throw new Error("Candidatura ou currículo não encontrado.");
+    assertJobNotArchived(application.job_id);
+    if (!MODE_CHANGE_STATUSES.includes(application.status)) throw applicationStateConflict("O modo só pode ser alterado antes do início do envio.", application.status);
+    if (application.resume_status !== "approved" || application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) {
+      throw new Error("Mantenha o interesse registrado e o currículo aprovado para escolher o modo manual.");
+    }
+    const timestamp = now();
+    const updated = db.prepare(`UPDATE applications SET automation_mode = 'manual', auto_authorized_at = NULL,
+        authorized_resume_id = NULL, authorized_resume_version = NULL,
+        authorization_id = NULL, expires_at = NULL,
+        status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
+        current_step = 'Fluxo manual selecionado', updated_at = ? WHERE id = ? AND status IN ('queued','needs_review','failed')`).run(timestamp, id);
+    if (!updated.changes) throw applicationStateConflict("O modo só pode ser alterado antes do início do envio.", "changed");
+    revokeAuthorizationRows(id, "manual_selected");
+    audit("application", id, "manual_selected", { resume_id: application.resume_id });
+  });
   return listApplications().find((item) => item.id === id) ?? null;
+}
+
+/**
+ * #10 — segredo das assinaturas HMAC de autorização. Deve ser conhecido só pelo processo do
+ * dashboard (RADAR_AUTHORIZATION_SECRET em .env.local, legível apenas pelo usuário do dashboard).
+ * Sem a variável vale um segredo fixo de desenvolvimento, com aviso em produção.
+ */
+const DEV_AUTHORIZATION_SECRET = "radar-dev-authorization-secret";
+let devAuthorizationSecretWarned = false;
+function authorizationSecret() {
+  const secret = String(process.env.RADAR_AUTHORIZATION_SECRET ?? "").trim();
+  if (secret) return secret;
+  if (process.env.RADAR_ENVIRONMENT === "production" && !devAuthorizationSecretWarned) {
+    devAuthorizationSecretWarned = true;
+    console.warn(JSON.stringify({ event: "authorization.dev_secret", message: "RADAR_AUTHORIZATION_SECRET ausente: autorizações assinadas com o segredo de desenvolvimento." }));
+  }
+  return DEV_AUTHORIZATION_SECRET;
+}
+
+/** Assina os campos imutáveis da autorização; o lease (renovável) fica fora da assinatura. */
+function authorizationSignature(value: Record<string, unknown>) {
+  const fields = ["id", "application_id", "job_id", "resume_id", "resume_version", "application_url", "application_url_hash", "issued_at", "expires_at", "nonce"]
+    .map((field) => String(value[field] ?? ""));
+  return createHmac("sha256", authorizationSecret()).update(JSON.stringify(fields)).digest("hex");
+}
+
+function hasValidAuthorizationSignature(value: Record<string, unknown>) {
+  const supplied = Buffer.from(String(value.signature ?? ""), "hex");
+  const expected = Buffer.from(authorizationSignature(value), "hex");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+/** #18 — fim do lease do claim; o executor renova com heartbeat antes de vencer. */
+function leaseExpiresAt(from = Date.now()) {
+  const seconds = Math.max(30, Number(process.env.RADAR_AUTHORIZATION_LEASE_SECONDS ?? 300) || 300);
+  return new Date(from + seconds * 1000).toISOString();
 }
 
 export function authorizeAutoApplication(id: string, resumeId: string, confirmation: string) {
@@ -2324,22 +2377,27 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   if (application.resume_id !== resumeId || application.authorized_resume_id && application.authorized_resume_id !== resumeId) throw new Error("A autorização precisa apontar para o currículo revisado desta vaga.");
   if (application.resume_status !== "approved") throw new Error("Aprove o currículo antes de autorizar a candidatura.");
   if (application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) throw new Error("Registre interesse e conclua a revisão do currículo antes de autorizar.");
-  if (!["queued", "needs_review", "failed"].includes(application.status)) throw new Error("A candidatura não está aguardando autorização.");
+  if (!MODE_CHANGE_STATUSES.includes(application.status)) throw new Error("A candidatura não está aguardando autorização.");
   const timestamp = now();
   const job = getJob(application.job_id);
   if (!job?.application_url?.trim()) throw new Error("application.url.required");
   const applicationUrl = canonicalizeJobUrl(job.application_url);
   const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
-  const authorizationId = idFor(`authorization|${id}|${application.resume_version}|${timestamp}|${Math.random()}`);
-  const nonce = idFor(`nonce|${authorizationId}|${Math.random()}`);
+  // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
+  const authorizationId = randomBytes(32).toString("hex");
+  const nonce = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + Math.max(60, Number(process.env.RADAR_AUTHORIZATION_TTL_SECONDS ?? 86_400)) * 1000).toISOString();
+  const signature = authorizationSignature({
+    id: authorizationId, application_id: id, job_id: application.job_id, resume_id: resumeId, resume_version: application.resume_version,
+    application_url: applicationUrl, application_url_hash: applicationUrlHash, issued_at: timestamp, expires_at: expiresAt, nonce,
+  });
   db.exec("BEGIN IMMEDIATE");
   try {
-    const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
+    const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL AND status IN ('queued','needs_review','failed')").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
     if (!update.changes) throw new Error("application.authorization.race");
     db.prepare(`INSERT INTO application_authorizations
-      (id,application_id,job_id,resume_id,resume_version,application_url,application_url_hash,redirect_chain_hash,actor,issued_at,expires_at,nonce,state)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued')`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, "user", timestamp, expiresAt, nonce);
+      (id,application_id,job_id,resume_id,resume_version,application_url,application_url_hash,redirect_chain_hash,actor,issued_at,expires_at,nonce,state,signature)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued',?)`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, "user", timestamp, expiresAt, nonce, signature);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   audit("application", id, "auto_authorized", { authorization_id: authorizationId, resume_id: resumeId, resume_version: application.resume_version, application_url_hash: applicationUrlHash, expires_at: expiresAt, authorized_at: timestamp });
@@ -2347,12 +2405,19 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
 }
 
 export function revokeAutoApplication(id: string) {
-  const application = listApplications().find((item) => item.id === id);
-  if (!application) return null;
-  if (application.status === "in_progress" || ["submitted", "accepted", "rejected"].includes(application.status)) throw new Error("A autorização não pode ser revogada após o início do envio.");
-  revokeAuthorizationRows(id, "user_revoked");
-  db.prepare("UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL, authorization_id=NULL,expires_at=NULL, current_step = 'Autorização automática revogada', updated_at = ? WHERE id = ?").run(now(), id);
-  audit("application", id, "auto_authorization_revoked", {});
+  // #14: mesma disciplina do claim (BEGIN IMMEDIATE) e UPDATE guardado pelo status: ou a revogação
+  // vence e o claim encontra a autorização revogada, ou o claim vence e a revogação recebe 409.
+  tx(() => {
+    const application = db.prepare("SELECT id,status FROM applications WHERE id=?").get(id) as { id: string; status: string } | undefined;
+    if (!application) throw new Error("Candidatura não encontrada.");
+    if (!MODE_CHANGE_STATUSES.includes(application.status)) throw applicationStateConflict("A autorização não pode ser revogada após o início do envio.", application.status);
+    const updated = db.prepare(`UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL,
+      authorization_id=NULL,expires_at=NULL, current_step = 'Autorização automática revogada', updated_at = ?
+      WHERE id = ? AND status IN ('queued','needs_review','failed')`).run(now(), id);
+    if (!updated.changes) throw applicationStateConflict("A autorização não pode ser revogada após o início do envio.", "changed");
+    revokeAuthorizationRows(id, "user_revoked");
+    audit("application", id, "auto_authorization_revoked", {});
+  });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
@@ -2377,17 +2442,77 @@ export function listAuthorizedApplications() {
     ORDER BY applications.auto_authorized_at ASC`).all(now());
 }
 
-function expireAuthorizations() {
+/** Etapa exibida quando o lease vence: o envio pode ou não ter acontecido no portal. */
+const LEASE_EXPIRED_STEP = "Resultado desconhecido — verificar no portal";
+/** Pergunta humana ativa pausa a execução: o lease não vence enquanto o executor espera a resposta. */
+const NO_ACTIVE_QUESTION = "NOT EXISTS (SELECT 1 FROM human_questions q WHERE q.application_id=auth.application_id AND q.status IN ('pending','delivered','delivery_failed'))";
+
+/**
+ * Expira autorizações vencidas:
+ * - `issued` (nada aberto no portal) pelo TTL da emissão;
+ * - `claimed` pelo lease do executor (#18), nunca pelo TTL da emissão. Lease vencido sem heartbeat
+ *   leva a candidatura para `needs_review` com evento de resultado desconhecido (sem aborto silencioso).
+ */
+export function expireAuthorizations() {
   const timestamp = now();
-  if (!db.prepare("SELECT 1 FROM application_authorizations WHERE state IN ('issued','claimed') AND expires_at <= ? LIMIT 1").get(timestamp)) return;
-  tx(() => {
-    db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired' WHERE state IN ('issued','claimed') AND expires_at <= ?").run(timestamp, timestamp);
-    const affected = db.prepare(`SELECT id,job_id FROM applications WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired')
-      AND status IN ('queued','needs_review','in_progress')`).all() as { id: string; job_id: string }[];
-    db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
-      claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada',updated_at=?
-      WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired') AND status IN ('queued','needs_review','in_progress')`).run(timestamp);
-    for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
+  const pending = db.prepare(`SELECT 1 FROM application_authorizations auth WHERE (auth.state='issued' AND auth.expires_at <= ?)
+    OR (auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}) LIMIT 1`).get(timestamp, timestamp);
+  if (pending) tx(() => {
+    const issued = db.prepare("SELECT id FROM application_authorizations WHERE state='issued' AND expires_at <= ?").all(timestamp) as { id: string }[];
+    for (const authorization of issued) {
+      db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired' WHERE id=? AND state='issued'").run(timestamp, authorization.id);
+      const affected = db.prepare("SELECT id,job_id FROM applications WHERE authorization_id=? AND status IN ('queued','needs_review','in_progress')").all(authorization.id) as { id: string; job_id: string }[];
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+        claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada',updated_at=?
+        WHERE authorization_id=? AND status IN ('queued','needs_review','in_progress')`).run(timestamp, authorization.id);
+      for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
+    }
+    const leases = db.prepare(`SELECT auth.id,auth.application_id,auth.job_id,auth.claimed_by,COALESCE(auth.lease_expires_at, auth.expires_at) AS lease_expires_at
+      FROM application_authorizations auth WHERE auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}`).all(timestamp) as Record<string, string>[];
+    for (const lease of leases) {
+      db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='lease_expired' WHERE id=? AND state='claimed'").run(timestamp, lease.id);
+      const updated = db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+        claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=?
+        WHERE authorization_id=? AND status IN ('in_progress','needs_review')`).run(LEASE_EXPIRED_STEP, timestamp, lease.id);
+      if (!updated.changes) continue;
+      audit("application", String(lease.application_id), "lease_expired", {
+        authorization_id: lease.id, worker_id: lease.claimed_by, lease_expires_at: lease.lease_expires_at, message: "resultado desconhecido — verificar no portal",
+      });
+      abortApplyingJob(String(lease.job_id), "lease_expired_unknown_result", "system:authorization");
+    }
+  });
+  recoverStuckApplications();
+}
+
+/**
+ * #14 — rotina de recuperação: vaga presa em `applying` cuja candidatura foi reservada por um
+ * executor (claimed_by) mas não tem mais autorização `claimed` válida volta para revisão humana,
+ * com evento de auditoria. O fluxo manual (sem claim de executor) não é tocado.
+ */
+export function recoverStuckApplications(): number {
+  const find = () => db.prepare(`SELECT applications.id,applications.job_id,applications.claimed_by,applications.authorization_id,applications.automation_mode,auth.state AS authorization_state
+    FROM applications
+    JOIN jobs ON jobs.id=applications.job_id
+    LEFT JOIN application_authorizations auth ON auth.id=applications.authorization_id
+    WHERE jobs.status='applying' AND applications.status IN ('in_progress','needs_review') AND applications.claimed_by IS NOT NULL
+      AND (auth.id IS NULL OR auth.state<>'claimed' OR applications.automation_mode<>'authorized_auto')`).all() as Record<string, string | null>[];
+  if (!find().length) return 0;
+  return tx(() => {
+    const stuck = find();
+    const timestamp = now();
+    for (const application of stuck) {
+      const id = String(application.id);
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode=CASE WHEN automation_mode='authorized_auto' THEN 'assisted' ELSE automation_mode END,
+        auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=?`)
+        .run("Execução sem autorização válida — verificar no portal", timestamp, id);
+      revokeAuthorizationRows(id, "recovered_without_authorization");
+      audit("application", id, "applying_recovered", {
+        worker_id: application.claimed_by, authorization_id: application.authorization_id, authorization_state: application.authorization_state ?? null,
+        automation_mode: application.automation_mode, message: "execução sem autorização válida — verificar no portal",
+      });
+      abortApplyingJob(String(application.job_id), "authorization_missing", "system:recovery");
+    }
+    return stuck.length;
   });
 }
 
@@ -2408,8 +2533,13 @@ function currentAuthorization(applicationId: string) {
     WHERE applications.id=?`).get(applicationId) as Record<string, unknown> | undefined;
 }
 
+/** #18: `issued` vale pelo TTL da emissão; `claimed`, pelo lease renovado no heartbeat. */
+function authorizationValidUntil(value: Record<string, unknown>) {
+  return String(value.state === "claimed" ? (value.lease_expires_at ?? value.expires_at) : value.expires_at);
+}
+
 function assertCurrentAuthorization(value: Record<string, unknown> | undefined, expectedState: "issued" | "claimed", timestamp = now()) {
-  if (!value || value.state !== expectedState || String(value.expires_at) <= timestamp || value.automation_mode !== "authorized_auto" || !value.auto_authorized_at
+  if (!value || value.state !== expectedState || authorizationValidUntil(value) <= timestamp || value.automation_mode !== "authorized_auto" || !value.auto_authorized_at
     || value.application_resume_id !== value.resume_id || value.authorized_resume_id !== value.resume_id
     || Number(value.authorized_resume_version) !== Number(value.resume_version) || Number(value.current_resume_version) !== Number(value.resume_version)
     || value.current_resume_status !== "approved" || value.job_decision !== "interested" || !["resume_approved", "ready_to_apply", "applying"].includes(String(value.job_status))) {
@@ -2428,15 +2558,18 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
   if (!nonce.trim()) throw new Error("application.authorization.nonce.required");
   expireAuthorizations();
   const timestamp = now();
+  const lease = leaseExpiresAt();
   db.exec("BEGIN IMMEDIATE");
   try {
     const authorization = assertCurrentAuthorization(currentAuthorization(applicationId), "issued", timestamp);
     if (authorization.nonce !== nonce) throw new Error("application.authorization.unavailable");
+    // #10: só vale autorização emitida pelo dashboard (assinatura HMAC com o segredo do processo).
+    if (!hasValidAuthorizationSignature(authorization)) throw new Error("application.authorization.unavailable");
     if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     // Vaga excluída nunca é enviada, mesmo que uma autorização tenha escapado da revogação.
     assertJobNotArchived(String(authorization.job_id));
-    const claimed = db.prepare(`UPDATE application_authorizations SET state='claimed',claimed_by=?,claimed_at=?
-      WHERE id=? AND nonce=? AND state='issued' AND expires_at>?`).run(workerId.trim(), timestamp, String(authorization.id), nonce, timestamp);
+    const claimed = db.prepare(`UPDATE application_authorizations SET state='claimed',claimed_by=?,claimed_at=?,lease_expires_at=?,heartbeat_at=?
+      WHERE id=? AND nonce=? AND state='issued' AND expires_at>?`).run(workerId.trim(), timestamp, lease, timestamp, String(authorization.id), nonce, timestamp);
     if (!claimed.changes) throw new Error("application.authorization.unavailable");
     const updated = db.prepare("UPDATE applications SET status='in_progress',claimed_by=?,claimed_at=?,current_step='Execução autorizada iniciada',updated_at=? WHERE id=? AND authorization_id=? AND status IN ('queued','needs_review')").run(workerId.trim(), timestamp, timestamp, applicationId, String(authorization.id));
     if (!updated.changes) throw new Error("application.authorization.unavailable");
@@ -2444,8 +2577,27 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
     advanceJobTo(String(authorization.job_id), "applying", { actor: `worker:${workerId.trim()}`, data: { reason: "authorized_execution_claimed" } });
     db.exec("COMMIT");
   } catch (error) { try { db.exec("ROLLBACK"); } catch { /* transaction already closed */ } throw error; }
-  audit("application", applicationId, "claimed", { worker_id: workerId });
-  return listApplications().find((item) => item.id === applicationId) ?? null;
+  audit("application", applicationId, "claimed", { worker_id: workerId, lease_expires_at: lease });
+  const application = listApplications().find((item) => item.id === applicationId);
+  return application ? { ...application, lease_expires_at: lease } : null;
+}
+
+/**
+ * #18 — heartbeat do executor: renova o lease do claim. Só o worker dono e só com lease ainda
+ * vigente; é também a conferência de validade antes do clique final de envio no portal.
+ */
+export function heartbeatAuthorizedApplication(id: string, workerId: string) {
+  expireAuthorizations();
+  return tx(() => {
+    const timestamp = now();
+    const { authorization, worker } = claimedAuthorizationFor(id, workerId);
+    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    const lease = leaseExpiresAt();
+    const renewed = db.prepare(`UPDATE application_authorizations SET lease_expires_at=?,heartbeat_at=?
+      WHERE id=? AND state='claimed' AND claimed_by=? AND COALESCE(lease_expires_at, expires_at) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
+    if (!renewed.changes) throw new Error("application.authorization.unavailable");
+    return { application_id: id, authorization_valid: true, lease_expires_at: lease, heartbeat_at: timestamp };
+  });
 }
 
 export function updateApplication(id: string, patch: Partial<Application>) {
@@ -2948,6 +3100,8 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
       db.prepare("UPDATE applications SET status='failed',automation_mode='assisted',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Execução interrompida por ${id}`, timestamp, applicationId);
       abortApplyingJob(String(row.job_id), "human_stop", identity);
     } else {
+      // #18: a pausa pela pergunta não conta contra o lease; a retomada recomeça o prazo do heartbeat.
+      db.prepare("UPDATE application_authorizations SET lease_expires_at=? WHERE application_id=? AND state='claimed'").run(leaseExpiresAt(), applicationId);
       assertCurrentAuthorization(currentAuthorization(applicationId), "claimed", timestamp);
       db.prepare("UPDATE applications SET status='in_progress',current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Resposta recebida para ${id}; execução retomada`, timestamp, applicationId);
     }

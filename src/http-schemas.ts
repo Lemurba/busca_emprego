@@ -130,6 +130,7 @@ export const schemas = {
   applicationClaim: z.looseObject({ worker_id: z.string().max(300).optional(), nonce: z.string().max(300).optional() }),
   applicationSubmit: z.looseObject({ worker_id: id, evidence_ref: z.string().min(1).max(2_000), observed_url: optUrl }),
   applicationFail: z.looseObject({ worker_id: id, reason: z.string().min(1).max(2_000) }),
+  applicationHeartbeat: z.looseObject({ worker_id: id }),
   humanAnswer: z.looseObject({
     answer: optText, text: optText, action: optShort, actor: optShort,
     sender_id: identity.optional(), identity_id: identity.optional(), chat_id: identity.optional(),

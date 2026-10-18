@@ -102,6 +102,8 @@ mcp_servers:
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: executor
       RADAR_MCP_AGENT_ID: "${env:RADAR_EXECUTOR_AGENT_ID}"
+      # O claim confere a assinatura HMAC da autorização (#10): mesmo segredo do dashboard.
+      RADAR_AUTHORIZATION_SECRET: "${env:RADAR_AUTHORIZATION_SECRET}"
       TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
       TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
       # Gate da candidatura automática: sem "true" a fila, claim/verify/submit/fail e as
@@ -117,6 +119,7 @@ mcp_servers:
         - radar_list_open_questions
         # escrita
         - radar_claim_application
+        - radar_heartbeat_application
         - radar_submit_application
         - radar_fail_application
         - radar_ask_human
