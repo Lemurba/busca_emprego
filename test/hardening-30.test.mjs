@@ -49,10 +49,16 @@ const api = async (method, path, body, headers = {}) => {
   const response = await fetch(`${server.base}${path}`, { method, headers: { ...svc, ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: response.status, headers: response.headers, json: await response.json().catch(() => null) };
 };
+// Portões humanos (#10) recusam o token de serviço: essas rotas vão com a sessão do dashboard.
+const human = async (method, path, body) => {
+  const login = await fetch(`${server.base}/auth?token=${encodeURIComponent(dashboardToken)}`, { redirect: "manual" });
+  const cookie = String(login.headers.get("set-cookie") ?? "").split(";")[0];
+  return api(method, path, body, { cookie });
+};
 
 try {
   await t("PATCH de candidatura/currículo inexistente → 404", async () => {
-    const application = await api("PATCH", "/api/applications/nao-existe", { notes: "x" });
+    const application = await human("PATCH", "/api/applications/nao-existe", { notes: "x" });
     assert.equal(application.status, 404, JSON.stringify(application.json));
     assert.equal(application.json.error, "application.not_found");
     const resume = await api("PATCH", "/api/resumes/nao-existe", { title: "x" });
@@ -85,7 +91,7 @@ try {
       assert.ok(response.json.details.some((item) => item.path === key && item.code === "field.not_allowed"), JSON.stringify(response.json.details));
     }
     assert.equal((await api("PATCH", "/api/jobs/qualquer", { campo_inventado: 1 })).status, 400);
-    assert.equal((await api("POST", "/api/jobs/qualquer/decision", { decision: "interested", extra: true })).status, 400);
+    assert.equal((await human("POST", "/api/jobs/qualquer/decision", { decision: "interested", extra: true })).status, 400);
   });
 
   await t("POST /api/jobs cria com proveniência humana e nunca sobrescreve", async () => {
@@ -102,7 +108,7 @@ try {
   });
 
   await t("POST /api/jobs não ressuscita vaga arquivada", async () => {
-    const archived = await api("DELETE", `/api/jobs/${encodeURIComponent(jobId)}`, { confirmation: "EXCLUIR" });
+    const archived = await human("DELETE", `/api/jobs/${encodeURIComponent(jobId)}`, { confirmation: "EXCLUIR" });
     assert.equal(archived.status, 200, JSON.stringify(archived.json));
     const recreated = await api("POST", "/api/jobs", { ...jobBody, description: "sobrescrita" });
     assert.equal(recreated.status, 422, JSON.stringify(recreated.json));
