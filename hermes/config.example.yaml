@@ -49,6 +49,7 @@ mcp_servers:
         - radar_propose_agent_prompt
         - radar_record_score
         - radar_claim_application
+        - radar_heartbeat_application
         - radar_submit_application
         - radar_fail_application
         - radar_ask_human

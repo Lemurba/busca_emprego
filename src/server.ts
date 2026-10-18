@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { heartbeatAuthorizedApplication } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -81,7 +82,7 @@ function isInternalRequest(method: string | undefined, pathname: string) {
   return method === "GET" && pathname === "/api/authorized-applications"
     || method === "POST" && (
       pathname === "/api/agent-events"
-      || /^\/api\/applications\/[^/]+\/(?:claim|questions|submit|fail)$/u.test(pathname)
+      || /^\/api\/applications\/[^/]+\/(?:claim|heartbeat|questions|submit|fail)$/u.test(pathname)
       || /^\/api\/rounds\/[^/]+\/(?:batch|status)$/u.test(pathname)
       || /^\/api\/jobs\/[^/]+\/score$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
@@ -91,7 +92,7 @@ function isInternalRequest(method: string | undefined, pathname: string) {
 function isAutomationRequest(method: string | undefined, pathname: string) {
   return method === "GET" && pathname === "/api/authorized-applications"
     || method === "POST" && (
-      /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|questions|submit|fail)$/u.test(pathname)
+      /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|heartbeat|questions|submit|fail)$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
     );
 }
@@ -289,6 +290,11 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/applications/{id}/claim"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationClaim, body);
     ok(res, 200, claimAuthorizedApplication(params[0]!, String(input.worker_id ?? ""), String(input.nonce ?? "")));
+  } },
+  // #18: heartbeat do executor — renova o lease do claim e confirma a validade antes do envio final.
+  { method: "POST", pattern: r("/api/applications/{id}/heartbeat"), handler: ({ res, params, body }) => {
+    const input = validateBody(schemas.applicationHeartbeat, body);
+    ok(res, 200, heartbeatAuthorizedApplication(params[0]!, String(input.worker_id ?? "")));
   } },
   { method: "POST", pattern: r("/api/applications/{id}/submit"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationSubmit, body);

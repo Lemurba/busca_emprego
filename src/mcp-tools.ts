@@ -3,7 +3,7 @@
 export const RADAR_MCP_TOOLS = [
   "radar_list_agents", "radar_list_sources", "radar_get_job", "radar_discover_job", "radar_enrich_job",
   "radar_create_resume", "radar_propose_agent_prompt", "radar_record_score",
-  "radar_list_authorized_applications", "radar_claim_application", "radar_verify_application",
+  "radar_list_authorized_applications", "radar_claim_application", "radar_heartbeat_application", "radar_verify_application",
   "radar_submit_application", "radar_fail_application", "radar_ask_human",
   "radar_list_open_questions",
 ] as const;

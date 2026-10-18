@@ -13,6 +13,7 @@ import {
   db,
   enrichJobFromAgent,
   failAuthorizedApplication,
+  heartbeatAuthorizedApplication,
   getJob,
   listAgentConfigs,
   listApplications,
@@ -198,10 +199,12 @@ function requireAllowedDomain(agent: PublishedAgent, url: string) {
 
 /** Autorização vigente da candidatura (lida internamente; o nonce não é devolvido). */
 function authorizationFor(applicationId: string) {
-  const row = db.prepare(`SELECT auth.id, auth.state, auth.application_url, auth.application_url_hash, auth.expires_at, auth.claimed_by, auth.job_id
+  const row = db.prepare(`SELECT auth.id, auth.state, auth.application_url, auth.application_url_hash, auth.expires_at, auth.lease_expires_at, auth.claimed_by, auth.job_id
       FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id
       WHERE applications.id = ?`).get(applicationId) as Record<string, unknown> | undefined;
-  if (!row || !["issued", "claimed"].includes(String(row.state)) || String(row.expires_at) <= new Date().toISOString()) {
+  // #18: reservada (`claimed`) vale pelo lease do heartbeat, não pelo TTL da emissão.
+  const validUntil = String(row?.state === "claimed" ? (row.lease_expires_at ?? row.expires_at) : row?.expires_at);
+  if (!row || !["issued", "claimed"].includes(String(row.state)) || validUntil <= new Date().toISOString()) {
     throw new ToolError("application.authorization.unavailable", SAFE_MESSAGES["application.authorization.unavailable"]!);
   }
   return row;
@@ -382,8 +385,20 @@ export function createRadarMcpServer() {
     const agent = requireAgent(agent_id, "application.prepare");
     const authorization = authorizationFor(application_id);
     requireAllowedDomain(agent, String(authorization.application_url));
-    claimAuthorizedApplication(application_id, worker_id, currentNonce(application_id));
-    return { application: applicationView(application_id), application_url: authorization.application_url, application_url_hash: authorization.application_url_hash, expires_at: authorization.expires_at };
+    const claimed = claimAuthorizedApplication(application_id, worker_id, currentNonce(application_id));
+    return {
+      application: applicationView(application_id), application_url: authorization.application_url, application_url_hash: authorization.application_url_hash,
+      expires_at: authorization.expires_at, lease_expires_at: claimed?.lease_expires_at ?? null,
+    };
+  }));
+
+  server.registerTool("radar_heartbeat_application", {
+    description: "Renova o lease da reserva deste worker (chame a cada poucos minutos durante o preenchimento) e confirma que a autorização segue válida. Chame imediatamente antes do clique final de envio: erro aqui significa NÃO enviar.",
+    inputSchema: { agent_id: agentId, application_id: z.string().min(1), worker_id: workerId },
+  }, async ({ agent_id, application_id, worker_id }) => execute(() => {
+    requireAutomation();
+    requireAgent(agent_id, "application.prepare");
+    return heartbeatAuthorizedApplication(application_id, worker_id);
   }));
 
   server.registerTool("radar_verify_application", {
