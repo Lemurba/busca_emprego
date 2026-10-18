@@ -37,8 +37,10 @@ try {
   // --- Contratos dos normalizadores -------------------------------------------------------
   {
     const result = sources.normalizeGreenhouse(payloads.greenhouse, company("exemplo"));
-    assert.equal(result.items.length, 2, "registros sem título/URL, com http ou host privado são descartados");
-    assert.equal(result.skipped, 4);
+    // http público é aceito e marcado como não seguro na vaga (#17); sem título/URL ou host privado é descartado.
+    assert.equal(result.items.length, 3, "registros sem título/URL ou com host privado são descartados");
+    assert.equal(result.skipped, 3);
+    assert.ok(result.items.some((item) => item.job_url.startsWith("http://")), "URL http pública segue para a ingestão");
     const [first, second] = result.items;
     assert.equal(first.source_job_id, "4001");
     assert.equal(first.company, "Exemplo Tech");
