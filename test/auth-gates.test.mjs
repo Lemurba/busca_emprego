@@ -179,7 +179,7 @@ try {
 // #19: escrita pelo MCP grava agent:<agent_id> (processo separado do servidor HTTP acima).
 process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
 const [{ createRadarMcpServer }, store] = await Promise.all([import("../dist/src/mcp-server.js"), import("../dist/src/db.js")]);
-const mcp = createRadarMcpServer();
+const mcp = createRadarMcpServer({ role: "curriculo" });
 const client = new Client({ name: "radar-auth-gates-test", version: "1.0.0" });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 await Promise.all([client.connect(clientTransport), mcp.connect(serverTransport)]);
