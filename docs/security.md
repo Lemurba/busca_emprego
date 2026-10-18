@@ -6,20 +6,54 @@ O Radar guarda currículos, vagas e decisões do usuário e aciona um executor d
 
 | Quem | Mecanismo | Onde fica o segredo |
 | --- | --- | --- |
-| Agentes, MCP auxiliar e scripts de `scripts/ops/` | header `x-radar-service-token` igual a `RADAR_INTERNAL_SERVICE_TOKEN` (comparação em tempo constante) | `.env.local` (modo 600) |
-| Pessoa no navegador | `GET /auth?token=<RADAR_DASHBOARD_TOKEN>` grava o cookie `radar_session` (HttpOnly; SameSite=Strict; Path=/; Secure quando há TLS) e redireciona para `/` | `.env.local` (modo 600) |
+| Agentes, MCP auxiliar e scripts de `scripts/ops/` | header `x-radar-service-token` igual a `RADAR_INTERNAL_SERVICE_TOKEN` (comparação em tempo constante); nunca alcança os portões humanos | `.env.local` (modo 600, usuário `radar`) |
+| Pessoa no navegador | `GET /auth?token=<RADAR_DASHBOARD_TOKEN>` grava o cookie `radar_session` (HttpOnly; SameSite=Strict; Path=/; Secure quando há TLS) e redireciona para `/` | `.env.local` (modo 600, usuário `radar`) |
 
 - Exceções sem credencial: apenas `GET /api/health` e `GET /api/ready`.
 - O token interno é obrigatório em todos os ambientes; sem ele configurado, as rotas internas respondem `503 internal_token_not_configured`.
-- O link de sessão é gerado por `node scripts/ops/dashboard-link.mjs` e pode ser enviado ao operador pelo Telegram do Hermes com `--send` (`hermes send`). Trate o link como senha: para revogá-lo, gere outro `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
+- O link de sessão é gerado por `node scripts/ops/dashboard-link.mjs` e pode ser enviado ao operador pelo Telegram do Hermes com `--send` (`hermes send`). Trate o link como senha: para revogá-lo (e encerrar todas as sessões abertas), gere outro `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
 - Nunca imprima tokens em log, relatório, issue ou conversa. `ops/hermes/radar.env.example` traz os nomes, nunca valores.
+- `/auth` limita tentativas erradas **por IP de origem** (20 em 10 minutos → `429` só para esse IP). Um token válido sempre autentica, mesmo com o limite atingido: o limite só barra novas falhas, e nenhum dispositivo da LAN tranca o dono. `X-Forwarded-For` só é considerado quando a conexão vem do proxy em loopback com `RADAR_TRUST_PROXY_TLS=true`, e vale a entrada mais à direita (a que o proxy acrescentou). O proxy não deve registrar a query string de `/auth` (veja `ops/hermes/nginx-radar.conf.example`). Risco aceito: o token do link não expira e passa pelo histórico do Telegram; rotacione-o se o link vazar.
+
+## Portões humanos (#10)
+
+Interesse, `APROVO` e `AUTORIZO` são decisões humanas, e o servidor garante isso pela credencial, não pelo prompt. As rotas abaixo só aceitam a **sessão do dashboard**; com o token de serviço respondem `403 human_session_required` (sem credencial, `401`):
+
+| Rota | Decisão |
+| --- | --- |
+| `POST /api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`; `DELETE /api/jobs/{id}` | interesse, sem tempo, descarte, desfazer, excluir/restaurar |
+| `POST /api/resumes/{id}/approve` | `APROVO` |
+| `POST /api/applications`; `PATCH /api/applications/{id}` | criar candidatura; registrar envio manual/resultado |
+| `POST /api/applications/{id}/authorize-auto`, `/revoke-auto`, `/select-manual` | `AUTORIZO`, revogação, modo manual |
+| `POST /api/profiles/{id}/confirm` | confirmar perfil (fatos usados nos currículos) |
+| `POST /api/sources/{id}/terms` | aceitar termos de uso de uma fonte |
+| `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback` | criar agente (nasce publicado) e publicar permissões e prompt |
+
+O token de serviço continua servindo às rotas de automação (descoberta, enriquecimento, rascunho de currículo, revisão ATS, nota, fila autorizada, claim/submit/fail, perguntas humanas).
+
+### Isolamento por usuário Unix
+
+O portão só vale se o Hermes não conseguir virar "humano". Por isso:
+
+- o dashboard roda com um **usuário Unix dedicado** (ex.: `radar`), diferente do usuário do Hermes (`hermes`);
+- `.env.local` (com `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_DASHBOARD_TOKEN`) e o banco SQLite (com `-wal`/`-shm`) pertencem a `radar` com modo `600`; o diretório de dados, `700`. O usuário `hermes` não lê nenhum deles;
+- o código do release pertence a `radar` (ou root) e não é gravável pelo `hermes`;
+- o link de sessão (`scripts/ops/dashboard-link.mjs`) é gerado pelo operador como `radar`, nunca pelo agente.
+
+**Pendente:** o servidor MCP (`src/mcp-server.ts`) ainda abre o SQLite diretamente. Enquanto ele não falar com o dashboard por HTTP com uma credencial de escopo restrito, o processo MCP precisa rodar como `radar` (comando fixo, sem shell) para ler o banco — e quem consegue abrir o banco consegue gravar nele. O MCP não expõe nenhuma ferramenta de portão humano, mas a garantia completa depende dessa migração.
+
+## Origem nas auditorias (#19)
+
+O ator de cada evento de workflow e de auditoria vem da credencial: `human:dashboard` (sessão), `service:<nome>` (token de serviço; `<nome>` vem do header opcional `x-radar-service-name`, padrão `internal`, e só rotula — não dá permissão) e `agent:<agent_id>` (ferramentas MCP). O executor grava `worker:<worker_id>`. O detalhe da vaga no dashboard mostra o histórico com a origem de cada passo (`GET /api/jobs/{id}/history`). Eventos antigos com ator genérico (`user`, `lan-user`) aparecem como "origem não identificada".
 
 ## Proteções de requisição
 
 - **Bind**: `RADAR_BIND_HOST` (padrão `127.0.0.1`). Com um IP específico de LAN, o servidor também escuta em `127.0.0.1:PORT`, para que watchdog, health check, pontes do Telegram e executor continuem funcionando. Exponha fora do container somente por proxy TLS ou, na LAN, com firewall restrito à sub-rede doméstica.
 - **Host**: só hosts de `RADAR_ALLOWED_HOSTS` são aceitos (resposta `421 host_not_allowed`) — mitiga DNS rebinding. Entradas sem porta valem também com a porta de escuta; `127.0.0.1`, `localhost` e `[::1]` são sempre aceitos.
-- **Sessão**: `radar_session` é um id aleatório de 32 bytes guardado em memória (reiniciar o serviço encerra as sessões); validade `RADAR_SESSION_TTL_DAYS` (padrão 30). `POST /api/logout` revoga a sessão.
-- **Corpo**: só objeto JSON (`400 invalid_body`), limite de 1 MB por requisição (8 MB só no upload de currículo-base, `413 payload_too_large`); campos validados com zod, URLs só `http(s)`.
+- **Sessão**: `radar_session` é um id aleatório de 32 bytes; o servidor guarda só o sha256 do id, no SQLite (`dashboard_sessions`), então reiniciar o serviço não desloga ninguém. Cada sessão fica amarrada à impressão digital do `RADAR_DASHBOARD_TOKEN` vigente: trocar o token e reiniciar encerra todas. Validade `RADAR_SESSION_TTL_DAYS` (padrão 30). `POST /api/logout` revoga a sessão.
+- **Corpo**: só objeto JSON (`400 invalid_body`), limite de 1 MB por requisição (8 MB só no upload de currículo-base, `413 payload_too_large`); campos validados com zod em objetos estritos (campo não previsto → `400 invalid_body` com `field.not_allowed`), URLs só `http(s)`.
+- **Upload de PDF**: assinatura `%PDF-` obrigatória; a extração (pdfjs e o extrator legado) roda num worker com `resourceLimits` e timeout, e cada stream comprimido é limitado (`maxOutputLength`), o que neutraliza bombas de compressão.
+- **Log de requisições**: uma linha JSON `http.request` por requisição com `request_id`, método, caminho (sem query string), status e duração. O `X-Request-Id` recebido do proxy é reaproveitado quando bem formado; senão o servidor gera um. O valor volta no header `x-request-id` e aparece também em `http.error`.
 - **Erros**: respostas `{ error: <código estável>, message: <texto pt-BR> }`; erro inesperado vira `500 internal_error` com mensagem genérica, detalhes só no log.
 - **CSRF**: rotas mutantes exigem `Content-Type: application/json` (exceto uploads com tipo próprio) e, quando o navegador envia `Origin`, ele precisa casar com o `Host`. O cookie é `SameSite=Strict`.
 - **TLS por proxy**: `x-forwarded-proto` só é confiado quando a conexão vem de loopback e `RADAR_TRUST_PROXY_TLS=true`.
@@ -47,6 +81,10 @@ O Radar guarda currículos, vagas e decisões do usuário e aciona um executor d
 - CAPTCHA e bloqueios nunca são contornados;
 - dúvidas continuam bloqueadas até resposta de uma identidade em `TELEGRAM_ALLOWED_USERS`.
 
+## Riscos aceitos
+
+- **IP da LAN no histórico do Git**: um endereço privado da rede doméstica (RFC 1918) aparece em commits antigos, fora da árvore atual. Reescrever o histórico quebraria clones e referências existentes para proteger um dado de baixa sensibilidade (endereço não roteável, sem credencial associada), então o risco foi aceito. Nenhum IP ou caminho específico de máquina deve voltar a arquivos versionados.
+
 ## CI
 
-A CI (`.github/workflows/ci.yml`) fixa actions por SHA, roda `npm audit --omit=dev --audit-level=high`, varre o repositório atrás de valores de secrets (tokens do Radar e do Telegram, chaves AWS, chaves privadas) e confere a cópia da skill no pacote do Hermes.
+A CI (`.github/workflows/ci.yml`) roda em matriz Node 22.16 (mínimo de `engines`) e 24, fixa actions por SHA, roda `npm audit --omit=dev --audit-level=high`, varre o repositório atrás de valores de secrets (tokens do Radar e do Telegram, chaves AWS, chaves privadas) e confere a cópia da skill no pacote do Hermes.

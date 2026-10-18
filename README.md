@@ -22,7 +22,7 @@ O banco inicia vazio e o aplicativo não cria dados exemplificativos em nenhuma 
 ## Acesso e autenticação
 
 - O servidor escuta em `RADAR_BIND_HOST` (padrão `127.0.0.1`) e só aceita os hosts de `RADAR_ALLOWED_HOSTS` (padrão `127.0.0.1,localhost`).
-- Toda rota `/api/*`, exceto `GET /api/health` e `GET /api/ready`, exige o header `x-radar-service-token` com `RADAR_INTERNAL_SERVICE_TOKEN` (agentes e scripts) **ou** o cookie de sessão do dashboard. Sem token interno configurado, as rotas internas respondem `503 internal_token_not_configured`.
+- Toda rota `/api/*`, exceto `GET /api/health` e `GET /api/ready`, exige o header `x-radar-service-token` com `RADAR_INTERNAL_SERVICE_TOKEN` (agentes e scripts) **ou** o cookie de sessão do dashboard. Interesse, `APROVO`, candidatura, `AUTORIZO` e demais portões humanos aceitam só a sessão (`403` para o token); o dashboard roda com usuário Unix próprio (`docs/security.md`). Sem token interno configurado, as rotas internas respondem `503 internal_token_not_configured`.
 - O dashboard abre por um link de sessão: `node scripts/ops/dashboard-link.mjs` imprime `http://<host>:<PORT>/auth?token=...` (ou o envia pelo Telegram do Hermes com `--send`); `GET /auth` troca `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` HttpOnly/SameSite=Strict.
 - Rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Detalhes em [`docs/security.md`](docs/security.md).
@@ -101,7 +101,7 @@ O dashboard é a fonte de verdade. O Hermes usa o servidor MCP deste projeto e a
 | Caminho | Uso |
 | --- | --- |
 | `.hermes/skills/radar-vagas/SKILL.md` | Skill de projeto (fonte única); ativada com `hermes skills trust <raiz>` |
-| `hermes/config.example.yaml` | Fragmentos do `config.yaml`: `mcp_servers.radar-vagas` (`tools.include`, `trust: untrusted`), `browser.cdp_url` |
+| `hermes/config.example.yaml` | Fragmentos do `config.yaml`: um `mcp_servers.radar-vagas-<papel>` por papel (coordenador, coleta, currículo, executor; `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`, `tools.include`, `trust: untrusted`), `browser.cdp_url` |
 | `hermes/plugin/` | Pacote portátil Agent Plugins v1 opcional (`plugin.json`, `mcp.json` sem credenciais, `skills/` gerada por `scripts/ops/build-hermes-plugin.mjs`) |
 | `hermes/cron/radar-watchdog.sh` | Watchdog para `hermes cron create "every 10m" --no-agent --script radar-watchdog.sh --deliver telegram` |
 
@@ -109,8 +109,10 @@ O dashboard é a fonte de verdade. O Hermes usa o servidor MCP deste projeto e a
 npm ci && npm run build
 hermes skills trust /opt/data/dashboard/busca_emprego
 # mescle hermes/config.example.yaml em /opt/data/config.yaml e então:
-hermes mcp test radar-vagas
+for papel in coordenador coleta curriculo executor; do hermes mcp test "radar-vagas-$papel"; done
 ```
+
+Cada papel roda em um processo MCP próprio (`RADAR_MCP_ROLE`): o processo registra só as ferramentas do papel e só aceita agentes daquele papel; as ferramentas do executor (`claim`/`submit`/`fail`) existem apenas em `radar-vagas-executor`. `RADAR_MCP_AGENT_ID` prende o processo a um agente e recusa `agent_id` divergente (obrigatório para coordenador e executor). Rascunhos de prompt (`radar_propose_agent_prompt`, escopo `agents.propose` do coordenador) só valem depois de publicados no dashboard, e textos de vagas copiados da web voltam no envelope `untrusted_content`.
 
 Com `trust: untrusted`, toda ferramenta MCP que grava pede aprovação humana antes de rodar. Cada coletor usa contexto novo e uma única fonte. Normalizador, pesquisa salarial, avaliação, entrevista, currículo ATS, revisão e candidatura permanecem papéis separados. A entrevista faz uma pergunta por mensagem, oferece alternativas e inclui `Outro` para resposta livre.
 

@@ -1,5 +1,7 @@
 import * as LeafletModule from "leaflet";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
+import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
+import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
 
 // Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
 const leafletLib: any = (LeafletModule as any).default ?? LeafletModule;
@@ -28,6 +30,8 @@ type Job = {
   job_url: string;
   application_url: string;
   opening_status: "open" | "closed" | "unknown";
+  /** Alguma URL da vaga é http:// (sem TLS): o envio automático fica bloqueado. */
+  insecure_url?: boolean;
   opening_checked_at: string | null;
   deadline_at: string | null;
   closed_at: string | null;
@@ -59,8 +63,9 @@ type AgentRun = { id: string; agent_name: string; status: string; started_at: st
 type AgentConfig = { id: string; name: string; description: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; memory_enabled: boolean; hermes_prompt_optimization: boolean; version: number; published_version_id: string | null; draft_version_id: string | null };
 type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null; readiness_status?: string; readiness_reason?: string; last_smoke_test_at?: string | null };
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
+type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; stats: Record<string, any> };
 
 /* ------------------------------------------------------------------ */
 /* Vocabulário: um único lugar traduz cada enum para a interface.      */
@@ -116,6 +121,24 @@ const factTypeLabels: Record<string, string> = {
   experience: "Experiência", education: "Formação", languages: "Idiomas", certifications: "Certificações", projects: "Projetos", role: "Cargo", seniority: "Senioridade", location: "Localização"
 };
 const originLabels: Record<string, string> = { pdf: "extraído do PDF", human: "informado por você", user: "informado por você", agent: "informado por agente", system: "calculado pelo sistema", legacy: "importado" };
+const historyEventLabels: Record<string, string> = {
+  "job.decision": "Decisão registrada", "job.decision_undone": "Decisão desfeita", "job.created_by_agent": "Vaga registrada", "job.enriched_by_agent": "Vaga enriquecida",
+  "job.updated": "Vaga editada", "job.archived": "Vaga excluída", "job.restored": "Vaga restaurada", "resume.created": "Currículo criado", "resume.approved": "Currículo aprovado (APROVO)",
+  "application.created": "Candidatura criada", "application.manual_selected": "Envio manual escolhido", "application.auto_authorized": "Envio automático autorizado (AUTORIZO)",
+  "application.auto_authorization_revoked": "Autorização revogada", "application.updated": "Candidatura atualizada"
+};
+/** Origem de um evento do histórico, derivada da credencial que o gravou. */
+function actorLabel(actor: string) {
+  if (actor === "human:dashboard") return "você, no dashboard";
+  if (actor.startsWith("agent:")) {
+    const id = actor.slice("agent:".length);
+    return `agente ${currentData().agentConfigs.find((agent) => agent.id === id)?.name ?? id}`;
+  }
+  if (actor.startsWith("service:")) return `serviço ${actor.slice("service:".length)}`;
+  if (actor.startsWith("worker:")) return `executor ${actor.slice("worker:".length)}`;
+  if (actor.startsWith("system")) return "sistema";
+  return "origem não identificada (registro antigo)";
+}
 const decisionLabels: Record<string, string> = { pending: "Pendente", interested: "Tenho interesse", not_interested: "Sem interesse", no_time: "Sem tempo" };
 /** [motivo, rótulo, detalhe padrão]; os detalhes aceitos pelo servidor estão em feedbackDetails. */
 const feedbackCategories: [string, string, string][] = [
@@ -161,7 +184,7 @@ const statusColumns = [
   { title: "Encerradas", statuses: ["expired", "discarded"], target: null }
 ];
 const movableStatusValues = ["validation", "strong_match", "review"];
-const portalNames = new Map(DEFAULT_JOB_PORTALS.map((portal) => [portal.id, portal.name]));
+const portalNames = new Map<string, string>(DEFAULT_JOB_PORTALS.map((portal) => [portal.id, portal.name]));
 type VisualFilter = { type: "source" | "status" | "lifecycle" | "location" | "job"; value: string; label: string };
 type SortKey = "match" | "deadline" | "salary" | "updated";
 
@@ -275,23 +298,22 @@ function dominantCurrency(jobs: Job[]) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "BRL";
 }
 
+// Datas e prazos usam o mesmo módulo do servidor (src/deadline.ts) e o fuso do Radar
+// informado pela API (RADAR_TZ), não o fuso do navegador.
+function radarTz() {
+  return state.data?.timezone || DEFAULT_RADAR_TZ;
+}
+
 function formatDate(value: string | null | undefined) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium" }).format(date);
+  return formatRadarDate(value, { dateStyle: "medium" }, radarTz()) ?? "—";
 }
 
 function formatShortDate(value: string | null | undefined) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(date).replace(" de ", " ");
+  return formatRadarDate(value, { day: "2-digit", month: "short" }, radarTz())?.replace(" de ", " ") ?? "—";
 }
 
 function daysUntil(value: string | null | undefined) {
-  if (!value) return null;
-  const time = new Date(value).getTime();
-  if (Number.isNaN(time)) return null;
-  return Math.ceil((time - Date.now()) / 86_400_000);
+  return daysUntilDeadline(value, Date.now(), radarTz());
 }
 
 function deadlineText(job: Job) {
@@ -393,8 +415,9 @@ function averageMonthlySalary(jobs: Job[]) {
 function visualFilteredJobs(data: Data) {
   const filter = state.visualFilter;
   if (!filter) return data.jobs;
-  if (filter.type === "job") return data.jobs.filter((job) => job.id === filter.value);
-  return data.jobs.filter((job) => String(job[filter.type]) === filter.value);
+  const field = filter.type;
+  if (field === "job") return data.jobs.filter((job) => job.id === filter.value);
+  return data.jobs.filter((job) => String(job[field]) === filter.value);
 }
 
 function visualFilterSummary(data: Data, showJobsLink = true) {
@@ -413,7 +436,7 @@ function metric(text: string, value: string | number, note: string, icon: string
 }
 
 function resumeDownloadLinks(resume: Resume) {
-  const base = `/api/resumes/${encodeURIComponent(resume.id)}/files`;
+  const base = `api/resumes/${encodeURIComponent(resume.id)}/files`;
   return `<a class="secondary-button" href="${base}/pdf">Baixar PDF</a><a class="secondary-button" href="${base}/docx">Baixar DOCX</a>`;
 }
 
@@ -438,7 +461,7 @@ function jobCard(job: Job) {
   return `<article class="job-card ${draggable ? "is-draggable" : ""}" ${draggable ? `draggable="true" data-drag-id="${escapeHtml(job.id)}"` : ""} data-detail-id="${escapeHtml(job.id)}">
     <div class="job-card-top"><h3><button type="button" class="card-title-button" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button></h3>${scoreBadge(job.match_score)}</div>
     <p><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.location)}</p>
-    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span></div>
+    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span>${job.insecure_url ? `<span class="chip" title="O link da vaga usa http:// (sem criptografia)">Link não seguro</span>` : ""}</div>
     <div class="card-footer"><span>${escapeHtml(salaryLabel(job))}</span><span>${escapeHtml(deadlineText(job))}</span></div>
     ${moveSelect(job)}
   </article>`;
@@ -639,7 +662,7 @@ function renderResumes(data: Data) {
   return `${pageHeading(pageMeta.resumes.label, "Revise o currículo adaptado a cada vaga e aprove antes de qualquer envio. A aprovação não envia nada sozinha.")}
     <section class="panel"><div class="section-head flush"><div><h2>Currículos-base</h2><p>Envie PDFs, escolha qual será usado nas próximas adaptações e baixe uma cópia.</p></div></div>
       <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
-      <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="/api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
+      <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
     <div class="section-head"><div><h2>Currículos por vaga</h2><p>Cada um nasce quando você marca interesse numa vaga.</p></div></div>
     <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
 }
@@ -705,7 +728,9 @@ function renderOperations(data: Data) {
   }).join("");
   const duplicates = data.possibleDuplicates.map((duplicate) => `<article class="ops-item"><div><strong>${escapeHtml(jobName(duplicate.job_id))}</strong><span>Parece a mesma vaga que ${escapeHtml(jobName(duplicate.candidate_job_id))} · ${Math.round(Number(duplicate.similarity) * 100)}% de semelhança</span></div><div class="button-row"><button class="secondary-button" data-resolve-duplicate="${escapeHtml(duplicate.id)}" data-resolution="distinct">São diferentes</button><button class="primary-button" data-resolve-duplicate="${escapeHtml(duplicate.id)}" data-resolution="merged">Mesclar</button></div></article>`).join("");
   // Regras desfeitas junto com o feedback de origem não podem ser reativadas; ficam fora da lista.
-  const rules = data.preferences.rules.filter((rule) => rule.state !== "undone").map((rule) => `<article class="ops-item"><div><strong>${escapeHtml(describeRule(rule))}</strong><span>${escapeHtml(rule.reason || "Sem justificativa")} · ${escapeHtml(rule.suppressed_count ?? 0)} vaga${Number(rule.suppressed_count ?? 0) === 1 ? "" : "s"} ocultada${Number(rule.suppressed_count ?? 0) === 1 ? "" : "s"}${rule.state === "active" ? "" : " · pausada"}</span></div><button class="secondary-button" data-preference-rule="${escapeHtml(rule.id)}" data-next-state="${rule.state === "active" ? "paused" : "active"}">${rule.state === "active" ? "Pausar" : "Reativar"}</button></article>`).join("");
+  const rules = data.preferences.rules.filter((rule) => rule.state !== "undone").map((rule) => `<article class="ops-item"><div><strong>${escapeHtml(describeRule(rule))}</strong><span>${escapeHtml(rule.reason || "Sem justificativa")} · ${escapeHtml(rule.hidden_count ?? 0)} vaga${Number(rule.hidden_count ?? 0) === 1 ? "" : "s"} oculta${Number(rule.hidden_count ?? 0) === 1 ? "" : "s"} agora${rule.state === "active" ? "" : " · pausada"}</span></div><button class="secondary-button" data-preference-rule="${escapeHtml(rule.id)}" data-next-state="${rule.state === "active" ? "paused" : "active"}">${rule.state === "active" ? "Pausar" : "Reativar"}</button></article>`).join("");
+  // Vagas ocultadas pelas regras: motivo (regra) e ação de reexibir no painel.
+  const suppressedJobs = (data.suppressedJobs ?? []).map((job) => `<article class="ops-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · ${escapeHtml(job.rules.map((rule) => `${describeRule(rule)}${rule.reason ? ` (${rule.reason})` : ""}`).join("; ") || "Regra removida")}</span></div><button class="secondary-button" data-action="unsuppress-job" data-job-id="${escapeHtml(job.id)}">Reexibir</button></article>`).join("");
   const openQuestions = data.humanQuestions.filter((question) => ["pending", "delivered", "delivery_failed"].includes(question.status));
   const questions = openQuestions.map((question) => { const jobId = applicationJob.get(question.application_id); return `<article class="ops-item"><div><strong>${escapeHtml(question.question)}</strong><span>${escapeHtml(jobId ? jobName(jobId) : "Candidatura removida")} · ${escapeHtml(label(questionStatusLabels, question.status))}</span></div><span class="status-pill ${question.status === "delivery_failed" ? "red" : "orange"}">Responda no Telegram</span></article>`; }).join("");
   const sourceRows = data.sourceConfigs.map((source) => `<tr><td data-label="Fonte"><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(source.domain)}</small></td><td data-label="Prontidão"><span class="status-pill ${readinessTone[source.readiness_status ?? ""] ?? "orange"}">${escapeHtml(label(readinessLabels, source.readiness_status ?? "configured"))}</span></td><td data-label="Detalhe">${escapeHtml(source.readiness_reason || "Ainda não testada")}</td><td data-label="Último teste">${escapeHtml(formatDate(source.last_smoke_test_at))}</td></tr>`).join("");
@@ -714,6 +739,7 @@ function renderOperations(data: Data) {
     <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>${profile ? `<span class="status-pill teal">${escapeHtml(label(profileStatusLabels, profile.status))}</span>` : `<span class="status-pill red">Ausente</span>`}</div><div class="ops-list">${facts.map((fact: any) => `<article class="ops-item"><div><strong>${escapeHtml(label(factTypeLabels, fact.type))}</strong><span>${escapeHtml(Array.isArray(fact.value) ? fact.value.join(", ") : fact.value)} · ${escapeHtml(label(originLabels, fact.origin))}${fact.evidence_page ? ` · página ${escapeHtml(fact.evidence_page)}` : ""}</span></div><span class="status-pill ${fact.state === "confirmed" ? "teal" : "orange"}">${fact.state === "confirmed" ? "Confirmado" : "A revisar"}</span></article>`).join("") || `<div class="empty-state"><div><strong>Nenhum perfil confirmado</strong><span>Crie o perfil a partir do currículo-base antes da busca.</span></div></div>`}</div></section>
     <section class="panel"><div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta no Telegram.</p></div></div><div class="ops-list">${questions || `<div class="empty-state"><div><strong>Nenhuma pergunta pendente</strong><span>Nenhuma automação está esperando por você.</span></div></div>`}</div></section></div>
     <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Quando há dúvida, você decide.</p></div></div><div class="ops-list">${duplicates || `<div class="empty-state"><div><strong>Fila limpa</strong><span>Nenhuma possível duplicata pendente.</span></div></div>`}</div></section><section class="panel"><div class="section-head flush"><div><h2>Preferências aprendidas</h2><p>Criadas pelo seu “Não tenho interesse”. Pausar não apaga o histórico.</p></div></div><div class="ops-list">${rules || `<div class="empty-state"><div><strong>Sem regras</strong><span>Seus motivos de descarte viram regras aqui.</span></div></div>`}</div></section></div>
+    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Ocultadas (${escapeHtml((data.suppressedJobs ?? []).length)})</h2><p>Vagas novas que batem com uma regra “Não tenho interesse” ficam fora do painel. Reexiba se a regra errou.</p></div></div><div class="ops-list">${suppressedJobs || `<div class="empty-state compact"><div><strong>Nenhuma vaga oculta</strong></div></div>`}</div></section>
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Prontidão das fontes</h2><p>As buscas usam só fontes que passaram no teste de acesso.</p></div><button class="text-button" data-page="settings">Editar fontes →</button></div><div class="table-wrap flat"><table class="data-table responsive-table"><thead><tr><th>Fonte</th><th>Prontidão</th><th>Detalhe</th><th>Último teste</th></tr></thead><tbody>${sourceRows || `<tr><td colspan="4">Nenhuma fonte configurada.</td></tr>`}</tbody></table></div></section>
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Rodadas de busca</h2><p>Cada rodada guarda o perfil usado e o resultado.</p></div></div><div class="table-wrap flat"><table class="data-table responsive-table"><thead><tr><th>Início</th><th>Estado</th><th>Fontes</th><th>Resultado</th></tr></thead><tbody>${rounds || `<tr><td colspan="4">Nenhuma rodada registrada.</td></tr>`}</tbody></table></div></section>`;
 }
@@ -723,6 +749,7 @@ function renderSettings(data: Data) {
   const toggle = (name: string, checked: boolean, title: string, description: string) => `<label class="setting-toggle"><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span><input type="checkbox" data-pref="${name}" ${checked ? "checked" : ""} /></label>`;
   return `${pageHeading(pageMeta.settings.label, "Fontes de vagas, privacidade e integrações deste navegador.")}
     <section class="panel"><div class="section-head flush"><div><h2>Fontes e credenciais</h2><p>Senhas e tokens ficam no Hermes; aqui só há referências.</p></div><button class="primary-button" data-action="add-source"><span aria-hidden="true">+</span> Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Acesso</th><th>Estado</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section>
+    ${connectorCompaniesSection()}
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Privacidade neste navegador</h2><p>Estas opções valem só para este navegador.</p></div></div><div class="settings-toggles">${toggle("map", state.mapEnabled, "Mostrar mapa", "Carrega imagens do OpenStreetMap, que recebe seu IP e as regiões exibidas.")}${toggle("browser-ai", state.browserAiTools, "Ferramentas para assistentes de IA do navegador", "Permite que um assistente de IA do navegador liste suas vagas e as mova entre as etapas iniciais.")}</div></section>
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Vagas excluídas</h2><p>Vagas excluídas não aparecem no painel nem voltam pelas buscas. Restaure quando quiser.</p></div></div><div class="ops-list">${(data.archivedJobs ?? []).map((job) => `<article class="ops-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · excluída em ${escapeHtml(formatDate(job.archived_at))}${job.archived_reason ? ` · ${escapeHtml(job.archived_reason)}` : ""}</span></div><button class="secondary-button" data-action="restore-job" data-job-id="${escapeHtml(job.id)}">Restaurar</button></article>`).join("") || `<div class="empty-state compact"><div><strong>Nenhuma vaga excluída</strong></div></div>`}</div></section>
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Agentes e integração com o Hermes</h2><p>Os agentes são criados e editados na página Agentes. A documentação técnica da integração fica em <code>docs/agent-api.md</code>.</p></div><button class="secondary-button" data-page="agents">Abrir agentes</button></div></section>`;
@@ -757,6 +784,7 @@ function render() {
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
   bindViewEvents();
+  if (state.page === "settings") void mountConnectorPanel(view(), { fetchJson, escapeHtml, formatDate, toast, confirm: confirmDialog });
 }
 
 /* ------------------------------------------------------------------ */
@@ -865,6 +893,7 @@ const errorMessages: Record<string, string> = {
   "source.in_use.disable_instead": "Esta fonte está em uso: desative-a em vez de excluir.",
   "possible_duplicate.not_found": "Essa duplicidade já foi resolvida.",
   "job.not_found": "Vaga não encontrada. Atualize a página.",
+  "job.already_exists": "Esta vaga já está no radar. Edite a vaga existente.",
 };
 
 const errorPrefixMessages: Array<[string, string]> = [
@@ -901,6 +930,12 @@ function showAuthScreen(show: boolean) {
   if (show) document.getElementById("auth-retry")?.focus();
 }
 
+// Caminhos da API são relativos ao <base href> (RADAR_BASE_PATH): "/api/x" vira "api/x",
+// para o dashboard funcionar tanto na raiz quanto atrás de um subcaminho do proxy.
+function appUrl(path: string) {
+  return path.replace(/^\/+/u, "");
+}
+
 async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   const method = String(options.method ?? "GET").toUpperCase();
@@ -909,7 +944,7 @@ async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> 
     headers.set("content-type", "application/json");
     if (init.body == null && method !== "DELETE") init.body = "{}";
   }
-  const response = await fetch(url, init);
+  const response = await fetch(appUrl(url), init);
   const body = await response.json().catch(() => ({})) as { error?: unknown; message?: string };
   if (response.status === 401) {
     showAuthScreen(true);
@@ -1127,6 +1162,8 @@ function isoFromLocal(value: string) {
 
 function localFromIso(value: string | null) {
   if (!value) return "";
+  // Prazo só com data vale até o fim do dia.
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(value)) return `${value}T23:59`;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const offset = date.getTimezoneOffset() * 60_000;
@@ -1183,7 +1220,7 @@ function showAgentModal(id?: string) {
   const checked = (value: boolean | undefined) => value ? "checked" : "";
   const role = agent?.role_type ?? "source_scout";
   const selectedSources = new Set(agent?.source_ids ?? []);
-  const selectedPortalDomains = new Set(DEFAULT_JOB_PORTALS.filter((portal) => selectedSources.has(portal.id)).map((portal) => portal.domain));
+  const selectedPortalDomains = new Set<string>(DEFAULT_JOB_PORTALS.filter((portal) => selectedSources.has(portal.id)).map((portal) => portal.domain));
   const customSources = (agent?.source_ids ?? []).filter((source) => !portalNames.has(source));
   const customDomains = (agent?.allowed_domains ?? []).filter((domain) => !selectedPortalDomains.has(domain));
   openModal(agent ? `Editar ${agent.name}` : "Novo agente", agent ? "Salvar cria um rascunho; a nova versão só vale depois de publicada." : "O agente nasce ativo, com instruções e portais padrão que você pode ajustar.", `
@@ -1271,7 +1308,10 @@ function showJobDetail(id: string) {
   const decisionNotice = ["interested", "no_time", "not_interested"].includes(job.decision) && !decisionLocked
     ? `<div class="notice decision-notice"><span aria-hidden="true">↺</span><div>Sua decisão: <strong>${escapeHtml(label(decisionLabels, job.decision))}</strong>${job.decision_at ? ` em ${escapeHtml(formatDate(job.decision_at))}` : ""}.${canUndoInterest ? "" : " Como já existe currículo ou candidatura, use “Não tenho interesse” para sair do fluxo."}</div>${canUndoInterest ? `<button class="secondary-button" data-action="undo-decision" data-job-id="${escapeHtml(job.id)}">Desfazer</button>` : ""}</div>`
     : "";
-  notice = decisionNotice + notice;
+  const insecureNotice = job.insecure_url
+    ? `<div class="notice warning"><span aria-hidden="true">!</span><div>O link desta vaga usa http:// (sem criptografia). O envio automático fica bloqueado; candidate-se manualmente.</div></div>`
+    : "";
+  notice = decisionNotice + insecureNotice + notice;
   const sourceLinks = `${externalLink(job.job_url, "Abrir vaga ↗")}${externalLink(job.application_url, "Página de candidatura ↗")}${externalLink(job.linkedin_post_url, "Post do LinkedIn ↗")}${externalLink(job.salary_source_url, "Fonte do salário ↗")}`;
   const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
   openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score)}</strong></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${application?.status === "in_progress" ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
@@ -1296,6 +1336,13 @@ function showJobDetail(id: string) {
       const evidenceMarkup = active.length ? `<details class="detail-section provenance"><summary>De onde veio cada informação (${active.length})</summary>${active.map((item) => `<p><strong>${escapeHtml(fieldLabels.get(item.field_path) ?? humanize(item.field_path))}</strong> · ${escapeHtml(label(originLabels, item.origin))} · confiança ${Math.round(item.confidence * 100)}% · ${escapeHtml(formatDate(item.retrieved_at))}${safeHref(item.source_url) ? ` · ${externalLink(item.source_url, "evidência ↗", "")}` : ""}</p>`).join("")}</details>` : "";
       descriptionRoot.insertAdjacentHTML("afterbegin", conflictMarkup);
       descriptionRoot.insertAdjacentHTML("beforeend", evidenceMarkup);
+    }).catch(() => { /* o detalhe principal continua disponível */ });
+    fetchJson<Array<{ kind: string; at: string; actor: string; event: string; from_status: string | null; to_status: string | null }>>(`/api/jobs/${encodeURIComponent(job.id)}/history`).then((history) => {
+      if (!descriptionRoot.isConnected || !history.length) return;
+      const describe = (item: (typeof history)[number]) => item.kind === "transition"
+        ? `${label(statusLabels, item.from_status ?? "")} → ${label(statusLabels, item.to_status ?? "")}`
+        : label(historyEventLabels, item.event);
+      descriptionRoot.insertAdjacentHTML("beforeend", `<details class="detail-section provenance"><summary>Histórico e origem (${history.length})</summary>${history.map((item) => `<p><strong>${escapeHtml(describe(item))}</strong> · ${escapeHtml(actorLabel(item.actor))} · ${escapeHtml(formatDate(item.at))}</p>`).join("")}</details>`);
     }).catch(() => { /* o detalhe principal continua disponível */ });
   }
 }
@@ -1364,7 +1411,7 @@ function jobFormBody(form: HTMLFormElement, get: (name: string) => string, editi
   };
   if (get("salary_source_url")) body.salary_source = "Informado por você";
   else if (!editing) body.salary_source = "Não informado";
-  if (!editing) Object.assign(body, { source: get("source"), source_url: jobUrl, match_score: 0, opening_status: "unknown" });
+  if (!editing) Object.assign(body, { source: get("source"), source_url: jobUrl, opening_status: "unknown" });
   return Object.fromEntries(Object.entries(body).filter(([key]) => !editing || has(key) || key === "salary_source"));
 }
 
@@ -1589,6 +1636,12 @@ async function restoreJob(jobId: string) {
   toast("Vaga restaurada.");
 }
 
+async function unsuppressJob(jobId: string) {
+  await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/unsuppress`, { method: "POST" });
+  await loadData();
+  toast("Vaga reexibida no painel.");
+}
+
 async function createResume(jobId: string) {
   const job = currentData().jobs.find((item) => item.id === jobId);
   if (!job) return;
@@ -1692,6 +1745,7 @@ async function handleAction(target: HTMLElement) {
     case "edit-job": showJobFormModal(jobId); return;
     case "archive-job": await archiveJobAction(jobId); return;
     case "restore-job": await restoreJob(jobId); return;
+    case "unsuppress-job": await unsuppressJob(jobId); return;
     case "undo-decision": await undoDecision(jobId); return;
     case "add-agent": showAgentModal(); return;
     case "add-source": showSourceModal(); return;

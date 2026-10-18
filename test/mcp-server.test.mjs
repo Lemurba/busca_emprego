@@ -1,30 +1,46 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const directory = mkdtempSync(join(tmpdir(), "radar-mcp-test-"));
 process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
 process.env.TELEGRAM_ALLOWED_USERS = "telegram-user";
 delete process.env.TELEGRAM_HOME_CHANNEL;
 delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
 
-const [{ createRadarMcpServer, RADAR_MCP_TOOLS }, store] = await Promise.all([
+const [{ createRadarMcpServer, RADAR_MCP_TOOLS, RADAR_MCP_ROLES }, store] = await Promise.all([
   import("../dist/src/mcp-server.js"),
   import("../dist/src/db.js"),
 ]);
-const server = createRadarMcpServer();
-const client = new Client({ name: "radar-mcp-test", version: "1.0.0" });
-const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+
+/** Um servidor MCP por papel (issue #12); `route` escolhe o cliente pelo papel dono da ferramenta. */
+const connections = [];
+async function connect(role, agentId = null) {
+  const server = createRadarMcpServer({ role, agentId });
+  const client = new Client({ name: `radar-mcp-test-${role}`, version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  connections.push({ client, server });
+  return client;
+}
+const route = {
+  leitura: await connect("leitura"),
+  coleta: await connect("coleta"),
+  curriculo: await connect("curriculo"),
+};
+function clientFor(name) {
+  for (const role of ["leitura", "coleta", "curriculo", "coordenador", "executor"]) {
+    if (route[role] && RADAR_MCP_ROLES[role].tools.includes(name)) return route[role];
+  }
+  throw new Error(`nenhum cliente conectado registra ${name}`);
+}
 
 /** Every tool output is kept so the test can prove no nonce ever left the server. */
 const outputs = [];
-async function call(name, args = {}) {
+async function call(name, args = {}, client = clientFor(name)) {
   let response;
   try {
     response = await client.callTool({ name, arguments: args });
@@ -35,13 +51,13 @@ async function call(name, args = {}) {
   outputs.push(JSON.stringify(response));
   return response;
 }
-async function ok(name, args) {
-  const response = await call(name, args);
+async function ok(name, args, client) {
+  const response = await call(name, args, client);
   assert.notEqual(response.isError, true, `${name} falhou: ${response.content?.[0]?.text}`);
   return response.structuredContent;
 }
-async function refused(name, args, code) {
-  const response = await call(name, args);
+async function refused(name, args, code, client) {
+  const response = await call(name, args, client);
   assert.equal(response.isError, true, `${name} deveria falhar`);
   const text = response.content[0].text;
   assert.doesNotMatch(text, /\n\s+at |SQLITE|SELECT |INSERT /u, "erro vazou detalhes internos");
@@ -68,15 +84,20 @@ function preparedApplication(id, applicationUrl) {
 }
 
 try {
-  // ---- tool list matches the code constant and hermes/config.example.yaml exactly ----
-  const tools = await client.listTools();
-  const names = tools.tools.map(({ name }) => name).sort();
+  // ---- cada papel registra exatamente as próprias ferramentas; a união é RADAR_MCP_TOOLS ----
+  const union = new Set();
+  for (const [role, spec] of Object.entries(RADAR_MCP_ROLES)) {
+    const client = role in route ? route[role] : await connect(role, "qualquer");
+    const tools = await client.listTools();
+    const roleNames = tools.tools.map(({ name }) => name).sort();
+    assert.deepEqual(roleNames, [...spec.tools].sort(), `ferramentas do papel ${role}`);
+    for (const tool of tools.tools) {
+      union.add(tool.name);
+      assert.ok(/[ãçéêíóõú]|\b(?:de|da|do|uma|com)\b/u.test(tool.description ?? ""), `descrição sem pt-BR: ${tool.name}`);
+    }
+  }
+  const names = [...union].sort();
   assert.deepEqual(names, [...RADAR_MCP_TOOLS].sort());
-  const config = readFileSync(join(repoRoot, "hermes/config.example.yaml"), "utf8");
-  const includeBlock = config.slice(config.indexOf("include:"), config.indexOf("resources:"));
-  const included = [...includeBlock.matchAll(/^\s*-\s*(radar_[a-z_]+)\s*$/gmu)].map((match) => match[1]).sort();
-  assert.deepEqual(included, names, "tools.include do config.example.yaml difere das ferramentas registradas");
-  for (const tool of tools.tools) assert.ok(/[ãçéêíóõú]|\b(?:de|da|do|uma|com)\b/u.test(tool.description ?? ""), `descrição sem pt-BR: ${tool.name}`);
 
   // ---- catálogo e escrita existente ----
   const agents = (await ok("radar_list_agents")).agents;
@@ -87,12 +108,15 @@ try {
   const defaultAssistant = agents.find((agent) => agent.role_type === "application_assistant");
   assert.ok(gupy && matcher && writer && defaultAssistant);
 
+  const coordinator = agents.find((agent) => agent.role_type === "coordinator");
+  route.coordenador = await connect("coordenador", coordinator.id);
   const proposal = await ok("radar_propose_agent_prompt", {
-    agent_id: gupy.id,
+    target_agent_id: gupy.id,
     prompt: `${gupy.prompt}\nPriorize vagas publicadas nas últimas 72 horas.`,
     reason: "Priorizar anúncios recentes após feedback confirmado do usuário.",
   });
   assert.ok(proposal.agent.draft_version_id);
+  assert.equal(proposal.published, false);
 
   const created = await ok("radar_discover_job", {
     agent_id: gupy.id, source: "gupy", title: "Analista de Produto", company: "Empresa Exemplo",
@@ -113,8 +137,9 @@ try {
   }, "test");
   store.updateAgentConfig(disabled.id, { enabled: false }, "test");
   await refused("radar_discover_job", { agent_id: disabled.id, source: "gupy", title: "X", company: "Y", source_url: "https://portal.gupy.io/job/10" }, "agent.disabled");
-  await refused("radar_create_resume", { agent_id: gupy.id, job_id: jobId, title: "CV" }, "agent.capability.forbidden");
-  await refused("radar_record_score", { agent_id: gupy.id, job_id: jobId, scores: { role_family: 80, skills: 70, seniority: null, location_work_model: 90, compensation: null, explicit_preferences: 60 } }, "agent.capability.forbidden");
+  await refused("radar_create_resume", { agent_id: gupy.id, job_id: jobId, title: "CV" }, "agent.role.forbidden");
+  await refused("radar_record_score", { agent_id: gupy.id, job_id: jobId, scores: { role_family: 80, skills: 70, seniority: null, location_work_model: 90, compensation: null, explicit_preferences: 60 } }, "agent.role.forbidden");
+  await refused("radar_create_resume", { agent_id: matcher.id, job_id: jobId, title: "CV" }, "agent.capability.forbidden");
 
   // ---- currículo e nota ----
   store.recordJobDecision(jobId, "interested", "TENHO INTERESSE");
@@ -132,6 +157,7 @@ try {
     name: "Assistente MCP", role_type: "application_assistant", tool_scopes: ["jobs.read", "application.prepare", "telegram.question"],
     allowed_domains: ["example.test"], prompt: "Candidatar somente com autorização.",
   }, "test");
+  route.executor = await connect("executor", assistant.id);
   const first = preparedApplication("mcp-submit", "https://jobs.example.test/mcp-submit/apply");
   const second = preparedApplication("mcp-fail", "https://jobs.example.test/mcp-fail/apply");
   await refused("radar_list_authorized_applications", {}, "automation_disabled");
@@ -156,9 +182,9 @@ try {
   assert.equal((await ok("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://jobs.example.test/outra" })).match, false);
   await refused("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://evil.example.com/apply" }, "agent.domain.forbidden");
   // O assistente padrão não tem domínios configurados: não pode reservar.
-  await refused("radar_claim_application", { agent_id: defaultAssistant.id, application_id: first.application.id, worker_id: "w1" }, "agent.domain.forbidden");
-  await refused("radar_claim_application", { agent_id: gupy.id, application_id: first.application.id, worker_id: "w1" }, "agent.capability.forbidden");
-  await refused("radar_claim_application", { application_id: first.application.id, worker_id: "w1" });
+  await refused("radar_claim_application", { application_id: first.application.id, worker_id: "w1" }, "agent.domain.forbidden", await connect("executor", defaultAssistant.id));
+  // Servidor do executor vinculado ao assistente: agent_id de outro agente é recusado.
+  await refused("radar_claim_application", { agent_id: gupy.id, application_id: first.application.id, worker_id: "w1" }, "agent.binding.mismatch");
   const claimed = await ok("radar_claim_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" });
   assert.equal(claimed.application.status, "in_progress");
   assert.equal(claimed.application.claimed_by, "w1");
@@ -176,6 +202,12 @@ try {
   assert.equal(answered.status, "answered");
   assert.equal(store.listApplications().find((item) => item.id === first.application.id).status, "in_progress");
   assert.ok(!(await ok("radar_list_open_questions")).questions.some((question) => question.id === questionId));
+
+  // ---- heartbeat (#18): renova o lease e confere a validade antes do clique final ----
+  await refused("radar_heartbeat_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2" }, "application.claim.worker_mismatch");
+  const beat = await ok("radar_heartbeat_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" });
+  assert.equal(beat.authorization_valid, true);
+  assert.ok(beat.lease_expires_at > new Date().toISOString());
 
   // ---- submit ----
   await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/mcp-submit/apply" }, "application.claim.worker_mismatch");
@@ -203,11 +235,13 @@ try {
   assert.doesNotMatch(everything, /"nonce"/u);
   for (const nonce of nonces) assert.ok(!everything.includes(nonce), "nonce vazou em saída de ferramenta");
 
-  console.log(`MCP validado: ${names.length} ferramentas, escopo por agente, domínios, gate de automação, idempotência e nonce oculto.`);
+  console.log(`MCP validado: ${names.length} ferramentas em ${Object.keys(RADAR_MCP_ROLES).length} papéis, escopo por agente, domínios, gate de automação, idempotência e nonce oculto.`);
 } finally {
   delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
-  await client.close();
-  await server.close();
+  for (const { client, server } of connections) {
+    await client.close();
+    await server.close();
+  }
   store.db.close();
   rmSync(directory, { recursive: true, force: true });
 }

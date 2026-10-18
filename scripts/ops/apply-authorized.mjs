@@ -9,7 +9,12 @@
  * Harness); este script é a guarda do protocolo em volta desse trabalho:
  *
  *   1. list    → lê a fila autorizada (só existe com RADAR_AUTO_APPLICATION_ENABLED=true)
- *   2. claim   → reserva a candidatura com o nonce da fila (status in_progress)
+ *   2. claim   → reserva a candidatura com o nonce da fila (status in_progress) e abre
+ *                um lease curto (RADAR_AUTHORIZATION_LEASE_SECONDS, padrão 300 s)
+ *      heartbeat → POST /api/applications/{id}/heartbeat: renova o lease durante o
+ *                preenchimento e confere a validade — rode IMEDIATAMENTE antes do clique
+ *                final de envio; falha aqui significa não enviar. Lease vencido sem
+ *                heartbeat leva a candidatura para revisão ("resultado desconhecido")
  *   3. verify  → confere a URL observada contra o hash autorizado (mesma
  *                canonicalização do app, importada de dist/src/domain.js)
  *   4. submit  → registra o envio COM evidência e URL observada pela rota interna
@@ -21,6 +26,7 @@
  * Uso:
  *   node scripts/ops/apply-authorized.mjs list [--json]
  *   node scripts/ops/apply-authorized.mjs claim  --application <id> [--worker <id>]
+ *   node scripts/ops/apply-authorized.mjs heartbeat --application <id>
  *   node scripts/ops/apply-authorized.mjs verify --application <id> --observed-url <url>
  *   node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <ref> --observed-url <url>
  *   node scripts/ops/apply-authorized.mjs fail   --application <id> --reason <codigo>
@@ -181,19 +187,34 @@ if (command === "claim") {
     resume_id: entry.resume_id,
     resume_version: entry.resume_version,
     expires_at: entry.expires_at,
+    lease_expires_at: res.data?.lease_expires_at ?? null,
   });
   const resumeUrl = `${base}/api/resumes/${encodeURIComponent(String(entry.resume_id))}/files/pdf`;
-  out({ ok: true, application_id: applicationId, status: res.data?.status, application_url: entry.application_url, resume_pdf: resumeUrl, expires_at: entry.expires_at });
+  out({ ok: true, application_id: applicationId, status: res.data?.status, application_url: entry.application_url, resume_pdf: resumeUrl, expires_at: entry.expires_at, lease_expires_at: res.data?.lease_expires_at ?? null });
   if (!asJson) {
-    console.log(`claim ok — candidatura ${applicationId} em andamento (worker ${workerId})`);
+    console.log(`claim ok — candidatura ${applicationId} em andamento (worker ${workerId}); lease até ${res.data?.lease_expires_at ?? "?"}`);
     console.log(`  url autorizada: ${entry.application_url}\n  currículo aprovado (pdf): ${resumeUrl}`);
     console.log("\npróximo passo (Browser Harness, com o navegador já na sessão):");
     console.log("  1. abrir a URL autorizada e conferir que o destino final é o mesmo host/caminho autorizado");
-    console.log(`  2. preencher o formulário com o currículo aprovado e enviar o PDF`);
-    console.log("  3. capturar a evidência do envio (URL de confirmação/protocolo) e rodar:");
+    console.log(`  2. preencher o formulário com o currículo aprovado e enviar o PDF (heartbeat --application ${applicationId} a cada poucos minutos)`);
+    console.log(`  3. IMEDIATAMENTE antes do clique final: heartbeat --application ${applicationId}; se falhar, NÃO envie`);
+    console.log("  4. capturar a evidência do envio (URL de confirmação/protocolo) e rodar:");
     console.log(`     verify --application ${applicationId} --observed-url <url final>`);
     console.log(`     submit --application ${applicationId} --evidence-ref <referência observada> --observed-url <url final>`);
   }
+  process.exit(0);
+}
+
+if (command === "heartbeat") {
+  const state = readState(applicationId);
+  if (String(state.worker_id) !== workerId) fail(`claim local pertence ao worker ${state.worker_id}, não a ${workerId} — heartbeat recusado.`);
+  const payload = { worker_id: workerId };
+  if (dryRun) { out({ ok: true, dry_run: true, path: appPath(applicationId, "/heartbeat"), payload }); process.exit(0); }
+  const res = await call("POST", appPath(applicationId, "/heartbeat"), payload);
+  if (res.status !== 200) fail(`autorização inválida ou lease vencido — NÃO envie: HTTP ${res.status} ${JSON.stringify(res.data)}`, 1);
+  writeState(applicationId, { ...state, lease_expires_at: res.data?.lease_expires_at ?? null });
+  out({ ok: true, application_id: applicationId, authorization_valid: true, lease_expires_at: res.data?.lease_expires_at });
+  if (!asJson) console.log(`autorização válida — lease renovado até ${res.data?.lease_expires_at}`);
   process.exit(0);
 }
 
@@ -283,4 +304,4 @@ if (command === "status") {
   process.exit(0);
 }
 
-fail(`comando desconhecido: ${command} (use list|claim|verify|submit|fail|ask|status).`);
+fail(`comando desconhecido: ${command} (use list|claim|heartbeat|verify|submit|fail|ask|status).`);
