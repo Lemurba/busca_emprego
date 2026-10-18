@@ -74,12 +74,12 @@ export function sessionTtlMs(env: NodeJS.ProcessEnv = process.env): number {
   return (Number.isFinite(days) && days > 0 ? Math.min(days, 365) : 30) * 86_400_000;
 }
 
-export function sessionCookie(id: string, ttlMs: number, secure: boolean): string {
-  return `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(ttlMs / 1000)}${secure ? "; Secure" : ""}`;
+export function sessionCookie(id: string, ttlMs: number, secure: boolean, path = "/"): string {
+  return `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=${path}; Max-Age=${Math.floor(ttlMs / 1000)}${secure ? "; Secure" : ""}`;
 }
 
-export function clearedSessionCookie(secure: boolean): string {
-  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure ? "; Secure" : ""}`;
+export function clearedSessionCookie(secure: boolean, path = "/"): string {
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=${path}; Max-Age=0${secure ? "; Secure" : ""}`;
 }
 
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];

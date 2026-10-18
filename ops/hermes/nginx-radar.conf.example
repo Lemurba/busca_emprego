@@ -1,5 +1,9 @@
 # Include inside the existing Hermes TLS virtual host. Certificates remain
 # managed by the platform proxy; the Node process is never internet-facing.
+# O prefixo do location precisa ser igual a RADAR_BASE_PATH no .env.local
+# (RADAR_BASE_PATH=/plugins/busca-emprego/) e o host deve estar em RADAR_ALLOWED_HOSTS.
+# O proxy_pass com "/" no fim remove o prefixo; o servidor também aceita o caminho com prefixo.
+# Coberto por test/base-path.test.mjs (teste HTTP com o mesmo prefixo).
 location /plugins/busca-emprego/ {
     proxy_pass http://127.0.0.1:8787/;
     proxy_http_version 1.1;

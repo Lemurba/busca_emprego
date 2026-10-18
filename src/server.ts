@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -21,6 +22,8 @@ const actor = "lan-user";
 const trustProxyTls = process.env.RADAR_TRUST_PROXY_TLS === "true";
 const allowedHosts = parseAllowedHosts(process.env.RADAR_ALLOWED_HOSTS, port);
 const sessions = new SessionStore(sessionTtlMs());
+const basePath = normalizeBasePath(process.env.RADAR_BASE_PATH);
+const sessionCookiePath = cookiePath(basePath);
 if (["staging", "production"].includes(environment) && operatorId === "unassigned") throw new Error("RADAR_OPERATOR_ID is required in staging/production");
 
 const serviceToken = () => process.env.RADAR_INTERNAL_SERVICE_TOKEN ?? "";
@@ -129,7 +132,7 @@ function handleAuth(req: IncomingMessage, res: ServerResponse, url: URL) {
   }
   sessions.revoke(sessionId(req));
   const id = sessions.create(now);
-  res.writeHead(303, { location: "/", "set-cookie": sessionCookie(id, sessions.ttlMs, isTlsRequest(req, trustProxyTls)), "cache-control": "no-store" });
+  res.writeHead(303, { location: basePath, "set-cookie": sessionCookie(id, sessions.ttlMs, isTlsRequest(req, trustProxyTls), sessionCookiePath), "cache-control": "no-store" });
   res.end();
 }
 
@@ -154,7 +157,7 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/bootstrap"), handler: ({ res }) => ok(res, 200, getBootstrap(projectId)) },
   { method: "POST", pattern: r("/api/logout"), handler: ({ req, res }) => {
     sessions.revoke(sessionId(req));
-    res.setHeader("set-cookie", clearedSessionCookie(isTlsRequest(req, trustProxyTls)));
+    res.setHeader("set-cookie", clearedSessionCookie(isTlsRequest(req, trustProxyTls), sessionCookiePath));
     ok(res, 200, { ok: true });
   } },
 
@@ -386,14 +389,15 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: 
   if (!rel || rel.startsWith("..") || isAbsolute(rel) || rel.split(/[\\/]/u).includes("..")) return sendJson(res, 404, { error: "not_found", message: "Arquivo não encontrado." });
   try {
     const content = await readFile(file);
+    const body = extname(file) === ".html" ? withBaseHref(content.toString("utf8"), basePath) : content;
     res.writeHead(200, { "content-type": mime[extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" });
-    res.end(req.method === "HEAD" ? undefined : content);
+    res.end(req.method === "HEAD" ? undefined : body);
     return;
   } catch { /* cai no fallback abaixo */ }
   // SPA: só caminhos sem extensão recebem o index.html.
   if (extname(requested)) return sendJson(res, 404, { error: "not_found", message: "Arquivo não encontrado." });
   try {
-    const fallback = await readFile(join(publicDir, "index.html"));
+    const fallback = withBaseHref(await readFile(join(publicDir, "index.html"), "utf8"), basePath);
     res.writeHead(200, { "content-type": mime[".html"], "cache-control": "no-cache" });
     res.end(req.method === "HEAD" ? undefined : fallback);
   } catch (error) {
@@ -408,9 +412,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader("x-frame-options", "DENY");
     res.setHeader("referrer-policy", "no-referrer");
     res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
-    res.setHeader("content-security-policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'");
+    res.setHeader("content-security-policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'");
     if (!isHostAllowed(req.headers.host, allowedHosts)) return sendJson(res, 421, { error: "host_not_allowed", message: "Host não autorizado. Inclua-o em RADAR_ALLOWED_HOSTS." });
     const url = new URL(req.url ?? "/", "http://radar.invalid");
+    url.pathname = stripBasePath(url.pathname, basePath);
     const isProbe = url.pathname === "/api/health" || url.pathname === "/api/ready";
     if (trustProxyTls && !isProbe && !isTlsRequest(req, trustProxyTls)) return sendJson(res, 426, { error: "TLS_REQUIRED", message: "Acesse o dashboard por HTTPS." });
     if (url.pathname === "/auth") return handleAuth(req, res, url);
