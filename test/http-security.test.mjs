@@ -202,7 +202,7 @@ try {
     assert.match(body.message, /source_url/);
     const badPatch = await fetch(`${base}/api/jobs/utf8-job`, { method: "PATCH", headers: { ...json, ...svc }, body: JSON.stringify({ application_url: "data:text/html,oi" }) });
     assert.equal(badPatch.status, 400);
-    const badType = await fetch(`${base}/api/agents`, { method: "POST", headers: { ...json, ...svc }, body: JSON.stringify({ name: { $gt: "" }, allowed_domains: "a.com" }) });
+    const badType = await fetch(`${base}/api/agents`, { method: "POST", headers: { ...json, cookie }, body: JSON.stringify({ name: { $gt: "" }, allowed_domains: "a.com" }) });
     assert.equal(badType.status, 400);
   });
 

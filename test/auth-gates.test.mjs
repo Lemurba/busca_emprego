@@ -113,6 +113,7 @@ try {
     await refusedToService("POST", `/api/jobs/${jobId}/restore`, {});
     await refusedToService("POST", "/api/profiles/qualquer/confirm", {});
     await refusedToService("POST", "/api/sources/qualquer/terms", {});
+    await refusedToService("POST", "/api/agents", { name: "Agente do serviço", role_type: "custom" });
     await refusedToService("POST", "/api/agents/qualquer/publish", { version_id: "v" });
     await refusedToService("POST", "/api/agents/qualquer/rollback", { version_id: "v" });
     // Sem credencial nenhuma continua 401; com a sessão a rota é alcançada (404 do recurso).

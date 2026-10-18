@@ -99,7 +99,7 @@ try {
   const sourceBody = await sourceResponse.json();
   assert.equal(sourceResponse.status, 201, JSON.stringify(sourceBody));
 
-  const agentResponse = await request("/api/agents", { method: "POST", body: JSON.stringify({ name: "E2E Enrichment", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"], allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"], browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["salary_min", "salary_max"], concurrency: 1, timeout_seconds: 120, prompt: "v1" }) });
+  const agentResponse = await human("/api/agents", { method: "POST", body: JSON.stringify({ name: "E2E Enrichment", role_type: "job_enrichment", enabled: true, source_ids: ["glassdoor"], allowed_domains: ["glassdoor.com"], tool_scopes: ["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"], browser_enabled: true, can_create_jobs: false, can_edit_jobs: true, editable_fields: ["salary_min", "salary_max"], concurrency: 1, timeout_seconds: 120, prompt: "v1" }) });
   const agent = await agentResponse.json();
   assert.equal(agentResponse.status, 201, JSON.stringify(agent));
   const draftResponse = await request(`/api/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({ prompt: "v2" }) });

@@ -97,12 +97,12 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
 
 /**
  * Portões humanos (#10): interesse, desfazer/descartar, APROVO, candidatura, AUTORIZO, revogação,
- * modo manual, registro de envio, confirmação de perfil, termos de fonte e publicação de agente
+ * modo manual, registro de envio, confirmação de perfil, termos de fonte e criação/publicação de agente
  * só valem com a sessão do dashboard. O token de serviço (Hermes, scripts) recebe 403.
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
   return method === "POST" && (
-    pathname === "/api/applications"
+    pathname === "/api/applications" || pathname === "/api/agents"
     || /^\/api\/jobs\/[^/]+\/(?:decision|decision\/undo|feedback|restore)$/u.test(pathname)
     || /^\/api\/resumes\/[^/]+\/approve$/u.test(pathname)
     || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual)$/u.test(pathname)

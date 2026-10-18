@@ -6,13 +6,45 @@ O Radar guarda currículos, vagas e decisões do usuário e aciona um executor d
 
 | Quem | Mecanismo | Onde fica o segredo |
 | --- | --- | --- |
-| Agentes, MCP auxiliar e scripts de `scripts/ops/` | header `x-radar-service-token` igual a `RADAR_INTERNAL_SERVICE_TOKEN` (comparação em tempo constante) | `.env.local` (modo 600) |
-| Pessoa no navegador | `GET /auth?token=<RADAR_DASHBOARD_TOKEN>` grava o cookie `radar_session` (HttpOnly; SameSite=Strict; Path=/; Secure quando há TLS) e redireciona para `/` | `.env.local` (modo 600) |
+| Agentes, MCP auxiliar e scripts de `scripts/ops/` | header `x-radar-service-token` igual a `RADAR_INTERNAL_SERVICE_TOKEN` (comparação em tempo constante); nunca alcança os portões humanos | `.env.local` (modo 600, usuário `radar`) |
+| Pessoa no navegador | `GET /auth?token=<RADAR_DASHBOARD_TOKEN>` grava o cookie `radar_session` (HttpOnly; SameSite=Strict; Path=/; Secure quando há TLS) e redireciona para `/` | `.env.local` (modo 600, usuário `radar`) |
 
 - Exceções sem credencial: apenas `GET /api/health` e `GET /api/ready`.
 - O token interno é obrigatório em todos os ambientes; sem ele configurado, as rotas internas respondem `503 internal_token_not_configured`.
 - O link de sessão é gerado por `node scripts/ops/dashboard-link.mjs` e pode ser enviado ao operador pelo Telegram do Hermes com `--send` (`hermes send`). Trate o link como senha: para revogá-lo, gere outro `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
 - Nunca imprima tokens em log, relatório, issue ou conversa. `ops/hermes/radar.env.example` traz os nomes, nunca valores.
+- `/auth` limita tentativas erradas **por IP de origem** (20 em 10 minutos → `429` só para esse IP). Um token válido sempre autentica, mesmo com o limite atingido: o limite só barra novas falhas, e nenhum dispositivo da LAN tranca o dono. `X-Forwarded-For` só é considerado quando a conexão vem do proxy em loopback com `RADAR_TRUST_PROXY_TLS=true`, e vale a entrada mais à direita (a que o proxy acrescentou). O proxy não deve registrar a query string de `/auth` (veja `ops/hermes/nginx-radar.conf.example`). Risco aceito: o token do link não expira e passa pelo histórico do Telegram; rotacione-o se o link vazar.
+
+## Portões humanos (#10)
+
+Interesse, `APROVO` e `AUTORIZO` são decisões humanas, e o servidor garante isso pela credencial, não pelo prompt. As rotas abaixo só aceitam a **sessão do dashboard**; com o token de serviço respondem `403 human_session_required` (sem credencial, `401`):
+
+| Rota | Decisão |
+| --- | --- |
+| `POST /api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`; `DELETE /api/jobs/{id}` | interesse, sem tempo, descarte, desfazer, excluir/restaurar |
+| `POST /api/resumes/{id}/approve` | `APROVO` |
+| `POST /api/applications`; `PATCH /api/applications/{id}` | criar candidatura; registrar envio manual/resultado |
+| `POST /api/applications/{id}/authorize-auto`, `/revoke-auto`, `/select-manual` | `AUTORIZO`, revogação, modo manual |
+| `POST /api/profiles/{id}/confirm` | confirmar perfil (fatos usados nos currículos) |
+| `POST /api/sources/{id}/terms` | aceitar termos de uso de uma fonte |
+| `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback` | criar agente (nasce publicado) e publicar permissões e prompt |
+
+O token de serviço continua servindo às rotas de automação (descoberta, enriquecimento, rascunho de currículo, revisão ATS, nota, fila autorizada, claim/submit/fail, perguntas humanas).
+
+### Isolamento por usuário Unix
+
+O portão só vale se o Hermes não conseguir virar "humano". Por isso:
+
+- o dashboard roda com um **usuário Unix dedicado** (ex.: `radar`), diferente do usuário do Hermes (`hermes`);
+- `.env.local` (com `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_DASHBOARD_TOKEN`) e o banco SQLite (com `-wal`/`-shm`) pertencem a `radar` com modo `600`; o diretório de dados, `700`. O usuário `hermes` não lê nenhum deles;
+- o código do release pertence a `radar` (ou root) e não é gravável pelo `hermes`;
+- o link de sessão (`scripts/ops/dashboard-link.mjs`) é gerado pelo operador como `radar`, nunca pelo agente.
+
+**Pendente:** o servidor MCP (`src/mcp-server.ts`) ainda abre o SQLite diretamente. Enquanto ele não falar com o dashboard por HTTP com uma credencial de escopo restrito, o processo MCP precisa rodar como `radar` (comando fixo, sem shell) para ler o banco — e quem consegue abrir o banco consegue gravar nele. O MCP não expõe nenhuma ferramenta de portão humano, mas a garantia completa depende dessa migração.
+
+## Origem nas auditorias (#19)
+
+O ator de cada evento de workflow e de auditoria vem da credencial: `human:dashboard` (sessão), `service:<nome>` (token de serviço; `<nome>` vem do header opcional `x-radar-service-name`, padrão `internal`, e só rotula — não dá permissão) e `agent:<agent_id>` (ferramentas MCP). O executor grava `worker:<worker_id>`. O detalhe da vaga no dashboard mostra o histórico com a origem de cada passo (`GET /api/jobs/{id}/history`). Eventos antigos com ator genérico (`user`, `lan-user`) aparecem como "origem não identificada".
 
 ## Proteções de requisição
 

@@ -34,7 +34,7 @@ Variáveis lidas do ambiente do gateway (`/opt/data/.env`):
 | `RADAR_NODE_BIN` | binário do Node (padrão: `node` do PATH) |
 | `RADAR_TELEGRAM_REFS_PATH` | caminho alternativo do `telegram-refs.json` |
 
-O script de resposta lê `RADAR_INTERNAL_SERVICE_TOKEN` e `PORT` do `.env.local` do Radar.
+O script de resposta usa `RADAR_INTERNAL_SERVICE_TOKEN` e `PORT` do ambiente do gateway (o `.env` do Hermes); só lê o `.env.local` do Radar quando o ambiente não os traz. Com o dashboard isolado em outro usuário Unix (`docs/security.md`), o `.env.local` fica ilegível para o Hermes: defina as duas chaves no `.env` do Hermes. O token de serviço não alcança os portões humanos (interesse, `APROVO`, `AUTORIZO`).
 
 ## Testes
 
