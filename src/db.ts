@@ -68,7 +68,7 @@ db.exec(`
     title TEXT NOT NULL,
     file_name TEXT NOT NULL,
     mime_type TEXT NOT NULL DEFAULT 'application/pdf',
-    file_data TEXT NOT NULL,
+    file_data TEXT NOT NULL DEFAULT '',
     is_base INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -568,6 +568,24 @@ ensureColumn("base_resumes", "extracted_text", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("base_resumes", "extraction_error", "TEXT");
 ensureColumn("base_resumes", "page_count", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("base_resumes", "extracted_at", "TEXT");
+// PDF em BLOB (#28): o base64 em TEXT legado (file_data) ocupava 33% a mais no banco e em todo backup.
+ensureColumn("base_resumes", "file_blob", "BLOB");
+migrateBaseResumeBlobs();
+
+/** Converte, em uma transação, as linhas legadas com base64 em file_data para file_blob. Idempotente. */
+function migrateBaseResumeBlobs() {
+  const legacy = db.prepare("SELECT id, file_data FROM base_resumes WHERE file_blob IS NULL AND file_data <> ''").all() as { id: string; file_data: string }[];
+  if (!legacy.length) return;
+  const update = db.prepare("UPDATE base_resumes SET file_blob = ?, file_data = '' WHERE id = ? AND file_blob IS NULL");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const row of legacy) update.run(Buffer.from(row.file_data, "base64"), row.id);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
 ensureColumn("resumes", "profile_snapshot_id", "TEXT REFERENCES profile_snapshots(id) ON DELETE SET NULL");
 ensureColumn("resumes", "generation_source", "TEXT NOT NULL DEFAULT 'manual'");
 ensureColumn("resumes", "facts_used", "TEXT NOT NULL DEFAULT '[]'");
@@ -1791,14 +1809,14 @@ function prepareBaseResume(input: BaseResumeUpload) {
 }
 
 function insertBaseResume(prepared: ReturnType<typeof prepareBaseResume>, extraction: PdfExtraction) {
-  const { title, fileName, fileData, bytes, checksum } = prepared;
+  const { title, fileName, bytes, checksum } = prepared;
   if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
   const id = idFor(`base-resume|${checksum}`);
   const timestamp = now();
   const hasBase = Boolean(db.prepare("SELECT id FROM base_resumes WHERE is_base = 1 LIMIT 1").get());
   db.prepare(`INSERT INTO base_resumes
-    (id,title,file_name,mime_type,file_data,is_base,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at,created_at,updated_at)
-    VALUES (?,?,?,'application/pdf',?,?,?,?,?,?,?,?,?,?)`).run(id, title, fileName, fileData, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
+    (id,title,file_name,mime_type,file_data,file_blob,is_base,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at,created_at,updated_at)
+    VALUES (?,?,?,'application/pdf','',?,?,?,?,?,?,?,?,?,?)`).run(id, title, fileName, bytes, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
   audit("base_resume", id, "uploaded", { bytes: bytes.length, sha256: checksum, extraction_status: extraction.status, page_count: extraction.pageCount });
   return listBaseResumes().find((resume) => resume.id === id) ?? null;
 }
@@ -1830,8 +1848,11 @@ export function selectBaseResume(id: string) {
 }
 
 export function getBaseResumeFile(id: string) {
-  const row = db.prepare("SELECT id,title,file_name,mime_type,file_data FROM base_resumes WHERE id = ?").get(id) as { id: string; title: string; file_name: string; mime_type: string; file_data: string } | undefined;
-  return row ? { ...row, data: Buffer.from(row.file_data, "base64") } : null;
+  const row = db.prepare("SELECT id,title,file_name,mime_type,file_data,file_blob FROM base_resumes WHERE id = ?").get(id) as { id: string; title: string; file_name: string; mime_type: string; file_data: string; file_blob: Uint8Array | null } | undefined;
+  if (!row) return null;
+  const { file_blob: blob, ...rest } = row;
+  // file_data legado só sobra se a migração não rodou (banco aberto por versão antiga no meio).
+  return { ...rest, data: blob ? Buffer.from(blob) : Buffer.from(row.file_data, "base64") };
 }
 
 function mapProfileFact(row: Record<string, unknown>): any {

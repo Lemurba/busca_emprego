@@ -109,9 +109,46 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 
 ## 5. Backup, retenção e restore
 
-`backup-sqlite.mjs` usa `VACUUM INTO`, valida origem e snapshot, aplica permissões 0600 e gera manifesto SHA-256. Agende pelo cron do Hermes (ex.: script sem LLM em `/opt/data/scripts/`); o repositório não instala esse agendamento. A frequência, retenção, criptografia e cópia off-host devem ser definidas conforme RPO, LGPD e capacidade do operador.
+`backup-sqlite.mjs` usa `VACUUM INTO`, valida a origem (`quick_check`) e o snapshot (`PRAGMA integrity_check`), aplica permissões 0600 e gera manifesto SHA-256.
 
-Teste restore periodicamente em caminho/ambiente isolado. Para restaurar o banco ativo:
+### Agendamento (cron sem LLM)
+
+`hermes/cron/radar-backup.sh` roda `scripts/ops/scheduled-backup.mjs`, que a cada execução:
+
+1. cria o backup com `backup-sqlite.mjs` (integrity_check no snapshot);
+2. faz o **teste de restore** do backup recém-criado (`restore-test.mjs`): restaura com o mesmo `restore-sqlite.mjs` num diretório temporário e confere `integrity_check`, `foreign_key_check`, tabelas essenciais e o SHA-256 de cada PDF de currículo-base. O banco ativo não é tocado;
+3. se `RADAR_OFFSITE_DIR` estiver definido, grava a **cópia criptografada fora do host** (`offsite-backup.mjs`) e roda `RADAR_OFFSITE_UPLOAD_CMD`, se houver;
+4. aplica a **rotação** diário/semanal/mensal (`rotate-backups.mjs`) no diretório local e no off-host: fica o backup mais novo de cada um dos últimos `RADAR_BACKUP_KEEP_DAILY` dias (padrão 7), `RADAR_BACKUP_KEEP_WEEKLY` semanas ISO (4) e `RADAR_BACKUP_KEEP_MONTHLY` meses (6), em UTC; o mais novo nunca é apagado. O off-host aceita `RADAR_OFFSITE_KEEP_*` próprios. Cópias `pre-restore` e outros arquivos não são tocados.
+
+Instalação (o script é copiado; reinstale após atualizar o repositório):
+
+```sh
+install -m 0755 hermes/cron/radar-backup.sh /opt/data/scripts/radar-backup.sh
+hermes cron create "every 24h" --no-agent --script radar-backup.sh \
+  --deliver telegram --name radar-backup
+hermes cron run <job_id>      # primeira execução manual: stdout vazio = sucesso
+```
+
+Contrato igual ao do watchdog: sucesso é tick silencioso (`RADAR_BACKUP_NOTIFY_SUCCESS=true` avisa também os sucessos); qualquer falha (backup, teste de restore, criptografia, envio) chega no Telegram com as últimas linhas do resumo JSON. Para rodar à mão: `node scripts/ops/scheduled-backup.mjs` (uma linha JSON; código 1 em falha). Rotação e teste de restore também rodam isolados: `node scripts/ops/rotate-backups.mjs --dir DIR --dry-run` e `node scripts/ops/restore-test.mjs --dir DIR`.
+
+### Cópia criptografada fora do host
+
+O destino padrão (`RADAR_BACKUP_DIR`, ou `dirname(db)/backups`) está no mesmo disco do banco; ele cobre erro operacional, não perda do host. A cópia off-host é cifrada com a **chave pública** do operador, usando a CLI disponível:
+
+- **age** (preferido): `RADAR_OFFSITE_AGE_RECIPIENTS` = arquivo de destinatários (uma chave `age1…` por linha) ou uma chave `age1…`. Gere o par **fora do container** (`age-keygen -o radar-backup.key`), guarde a chave privada com o operador (gerenciador de senhas/cofre offline) e copie só a linha `public key` para o host;
+- **gpg**: `RADAR_OFFSITE_GPG_RECIPIENT_FILE` = chave pública exportada (`gpg --armor --export ID > radar-backup.pub.asc`). O script usa um `GNUPGHOME` temporário; nada é importado no perfil do container.
+
+Sem destinatário configurado a etapa falha fechada (`offsite_recipient_not_configured`) e nada é gravado em texto claro. `RADAR_OFFSITE_DIR` deve ser outro host (montagem sshfs/NFS/rclone) ou um diretório de saída enviado por `RADAR_OFFSITE_UPLOAD_CMD` (executado com `sh -c`, recebe `RADAR_OFFSITE_FILE` e `RADAR_OFFSITE_MANIFEST` no ambiente; ex.: `rclone copy "$RADAR_OFFSITE_FILE" remoto:radar-vagas/`). Cada arquivo `.age`/`.gpg` tem manifesto `.json` com o SHA-256 do texto claro e do cifrado.
+
+Para restaurar de uma cópia off-host, decifre **fora do container** (ou traga a chave só durante a operação e apague-a depois): `age -d -i radar-backup.key -o radar-AAAA.sqlite radar-AAAA.sqlite.age` (ou `gpg --decrypt`), confira o SHA-256 contra `plaintext_sha256` do manifesto cifrado, recrie o manifesto adjacente com `backup-sqlite.mjs --db radar-AAAA.sqlite --out DIR` (gera um snapshot novo e validado) e siga o procedimento abaixo.
+
+### PDFs dos currículos
+
+Os PDFs de currículo-base ficam em `base_resumes.file_blob` (BLOB), não mais em base64 dentro de `file_data` (TEXT, 33% maior). A migração roda sozinha na primeira abertura do banco pela versão nova (dashboard ou MCP), em uma transação, e é idempotente; a API (`GET /api/base-resumes/{id}/file`) devolve os mesmos bytes. O espaço liberado volta a ser usado pelo SQLite; os backups (`VACUUM INTO`) já saem compactados.
+
+### Restore
+
+Teste restore periodicamente em caminho/ambiente isolado (o backup agendado já faz isso a cada execução). Para restaurar o banco ativo:
 
 1. Parar o processo Radar e confirmar que `/api/health` não responde. Parar também o servidor MCP `radar-vagas` do Hermes (subprocesso stdio de vida longa, aberto pelo gateway): ele segura o inode antigo e continuaria gravando no arquivo substituído, e essas gravações se perderiam.
 2. Identificar explicitamente o arquivo de backup e seu manifesto adjacente (`.sqlite.json`). O restore confere formato, tamanho e SHA-256; backups legados sem manifesto exigem a opção explícita `--allow-missing-manifest` e validação por outro meio.

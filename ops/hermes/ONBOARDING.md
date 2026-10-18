@@ -162,6 +162,8 @@ Regras do cron sem agente ("Script-Only Cron Jobs"): o script tem de estar em `~
 
 Reinstale o script após atualizar o repositório (ele é copiado, não referenciado).
 
+O backup agendado (`hermes/cron/radar-backup.sh`: backup, teste de restore, cópia criptografada fora do host e rotação) é instalado do mesmo jeito, com `"every 24h"` e `--name radar-backup`; configuração e chaves em `docs/operations-runbook.md`, seção 5.
+
 ## 10. Verificação
 
 1. `curl -fsS http://127.0.0.1:${PORT:-8787}/api/health` e `/api/ready`.
