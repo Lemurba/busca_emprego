@@ -113,7 +113,7 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 
 Teste restore periodicamente em caminho/ambiente isolado. Para restaurar o banco ativo:
 
-1. Parar o processo Radar e confirmar que `/api/health` não responde.
+1. Parar o processo Radar e confirmar que `/api/health` não responde. Parar também o servidor MCP `radar-vagas` do Hermes (subprocesso stdio de vida longa, aberto pelo gateway): ele segura o inode antigo e continuaria gravando no arquivo substituído, e essas gravações se perderiam.
 2. Identificar explicitamente o arquivo de backup e seu manifesto adjacente (`.sqlite.json`). O restore confere formato, tamanho e SHA-256; backups legados sem manifesto exigem a opção explícita `--allow-missing-manifest` e validação por outro meio.
 3. Executar:
 
@@ -129,6 +129,16 @@ Teste restore periodicamente em caminho/ambiente isolado. Para restaurar o banco
 5. Se a validação falhar, parar o processo e restaurar o arquivo `pre_restore_path` com o mesmo procedimento.
 
 O restore recusa serviço HTTP ativo e exige confirmação literal, mas isso não substitui o controle do supervisor: há uma pequena janela em que outro operador poderia reiniciar o processo. Bloqueie a automação de restart durante a manutenção.
+
+### Processos abertos sobre o banco
+
+O dashboard e o servidor MCP gravam um heartbeat (a cada 15 s) em `<db>.processes/<papel>-<pid>.json` e removem o arquivo ao sair. O restore consulta esse registro, além do health check e da varredura de `/proc`:
+
+- dashboard registrado com heartbeat recente: recusa sempre (`service_process_registered`); pare o serviço;
+- servidor MCP ativo: recusa com `mcp_process_active` e a lista de PIDs. `--force` segue mesmo assim, com o aviso `mcp_process_active_forced` no stderr e `forced_with_mcp_active: true` no resultado; tudo que esse MCP gravar depois da troca se perde, então reinicie-o imediatamente;
+- registros órfãos (heartbeat com mais de 60 s ou PID morto no mesmo host) são ignorados e podem ser apagados.
+
+Preferência de longo prazo (fora deste runbook): o MCP deixa de abrir o SQLite e passa a falar com o dashboard por HTTP com o token interno, tornando o dashboard o único escritor; aí o restore só precisa parar um processo.
 
 ## 6. Rollback
 

@@ -25,6 +25,8 @@ import {
 } from "./db.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
 import { RADAR_MCP_TOOLS } from "./mcp-tools.js";
+import { dbPath } from "./db.js";
+import { registerProcess } from "./process-registry.js";
 
 /**
  * Servidor MCP do Radar de Vagas.
@@ -464,5 +466,8 @@ export function createRadarMcpServer() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const server = createRadarMcpServer();
+  // Heartbeat em <db>.processes/: o restore recusa trocar o banco com este processo aberto (#25).
+  registerProcess(dbPath, "mcp");
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => process.exit(0));
   await server.connect(new StdioServerTransport());
 }
