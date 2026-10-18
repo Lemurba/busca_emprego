@@ -37,7 +37,7 @@ No repositório:
 mkdir -p /opt/data/dashboard
 git clone <url-do-repositorio> /opt/data/dashboard/busca_emprego
 cd /opt/data/dashboard/busca_emprego
-npm ci && npm test            # Node >= 22.16 (node:sqlite com isTransaction); a CI usa Node 24
+npm ci && npm run build && npm test   # Node >= 22.16 (node:sqlite com isTransaction); a CI usa Node 22.16 e 24
 cp ops/hermes/radar.env.example .env.local && chmod 600 .env.local
 ```
 
@@ -164,7 +164,7 @@ Reinstale o script após atualizar o repositório (ele é copiado, não referenc
 3. `hermes mcp test radar-vagas`; numa sessão, `skills_list` mostra `radar-vagas`.
 4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido.
 5. `node scripts/ops/notify-human-questions.mjs` (simulação) e `node scripts/ops/telegram-diagnose.mjs`.
-6. `node test/executor.test.mjs` antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
+6. `node test/e2e/executor.test.mjs` (após `npm run build`) antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
 7. `hermes cron run <job_id>` do watchdog com o app no ar: nenhuma mensagem.
 
 ## 11. Rotação e recuperação

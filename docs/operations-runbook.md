@@ -42,7 +42,7 @@ O bot token do Telegram fica só no `.env` do Hermes. Logins de portais ficam no
 Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver proxy TLS, `nginx-radar.conf.example`. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela instalação e é obrigatório.
 
 1. Criar release imutável a partir de commit identificado; registrar o SHA.
-2. Dentro do release, executar `npm ci` e `npm test` (inclui `test/ops.test.mjs`).
+2. Dentro do release, executar `npm ci`, `npm run build`, `npm test` (inclui `test/ops.test.mjs` e `test/migrations.test.mjs`) e `npm run test:e2e`.
 3. Se já existir uma instalação, executar backup do banco atual:
 
    ```bash
@@ -91,7 +91,7 @@ Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `-
 
 **Navegador:** o executor conduz o navegador configurado no Hermes por `browser.cdp_url: http://127.0.0.1:9222` (`hermes/config.example.yaml`), que tem precedência sobre o motor padrão; com o CDP fora do ar o Hermes não deve abrir outro navegador para candidatura — pare e corrija o serviço do Chrome. Se houver visualizador remoto da sessão, sua URL fica em `RADAR_BROWSER_VIEWER_URL` no `.env.local`. Logins de portais vêm do cofre de credenciais do Hermes (`hermes vault add`); nenhuma candidatura roda em outro perfil ou endpoint CDP.
 
-Verificação obrigatória antes de ligar o gate: `node test/executor.test.mjs` (claim, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada — 10 checagens).
+Verificação obrigatória antes de ligar o gate: `node test/e2e/executor.test.mjs` (após `npm run build`) (claim, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada — 10 checagens).
 
 Para provar o harness **no ambiente real**, use um formulário HTTPS **público** (ex.: `https://httpbin.org/forms/post`) no navegador da instância única: preencha os campos, envie e use a página de confirmação/eco do portal como `--evidence-ref`. O Hermes bloqueia URL privada/interna no navegador (`allow_private_urls: false`), então o fixture local `node test/fixtures/portal-fixture.mjs 8791` serve para checar o **formato** de portal (upload de PDF, consentimento, redirect com protocolo) fora do fluxo autorizado — nunca como URL de candidatura. Isso é coerente com o app: o Radar só autoriza `application_url` pública HTTPS.
 
@@ -105,7 +105,7 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 - verificar logs sem CV, tokens, URLs privadas ou conteúdo de prompts;
 - verificar fila/latência/falhas de fonte quando essas métricas forem implementadas;
 - executar uma busca controlada sem candidatura automática;
-- ligar a candidatura automática (`RADAR_AUTO_APPLICATION_ENABLED=true`) somente depois de Telegram entregando e `test/executor.test.mjs` verde; com o gate ligado, a fila autorizada exige o token interno e a vaga só é marcada como candidatada com evidência observável do portal.
+- ligar a candidatura automática (`RADAR_AUTO_APPLICATION_ENABLED=true`) somente depois de Telegram entregando e `test/e2e/executor.test.mjs` verde; com o gate ligado, a fila autorizada exige o token interno e a vaga só é marcada como candidatada com evidência observável do portal.
 
 ## 5. Backup, retenção e restore
 
@@ -145,7 +145,7 @@ O restore recusa serviço HTTP ativo e exige confirmação literal, mas isso nã
 3. Restaurar o backup pré-deploy usando a seção 5.
 4. Voltar ao release anterior e validar.
 
-Não fazer downgrade de código sobre schema incompatível. Cada futura migração precisa declarar compatibilidade, forward fix e procedimento de rollback antes do merge.
+Não fazer downgrade de código sobre schema incompatível. O schema é versionado em `src/db/migrations/` (tabela `schema_migrations`); cada migração roda uma vez, numa transação exclusiva, na primeira abertura do banco pelo release novo. Cada futura migração precisa declarar compatibilidade, forward fix e procedimento de rollback antes do merge.
 
 ## 7. Incidentes
 
@@ -162,7 +162,7 @@ Não fazer downgrade de código sobre schema incompatível. Cada futura migraç�
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
 - A API distingue apenas dois papéis (token interno e sessão do dashboard), sem escopos por rota. SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
-- Não há migração versionada/rollback de schema, alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
+- As migrações são versionadas, mas não há rollback automático de schema (use o backup pré-deploy), alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
 - A anonimização legada permanece opt-in (`RADAR_RUN_LEGACY_ANONYMIZATION=true`) e deve ficar desabilitada em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.
 
 Essas limitações são bloqueadores de produção, não exceções aceitas por este runbook.

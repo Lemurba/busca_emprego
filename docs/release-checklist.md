@@ -11,7 +11,7 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 ## CI e qualidade
 
 - [ ] GitHub Actions verde no commit exato
-- [ ] `npm test` verde (inclui `test/ops.test.mjs`) e `npm audit --omit=dev --audit-level=high` sem achados
+- [ ] `npm run lint`, `npm run typecheck`, `npm test` (inclui `test/ops.test.mjs` e `test/migrations.test.mjs`) e `npm run test:e2e` verdes; `npm audit --omit=dev --audit-level=high` sem achados
 - [ ] `node scripts/ops/build-hermes-plugin.mjs --check` verde (skill do pacote Hermes em sincronia)
 - [ ] Cobertura >=80% nos módulos exigidos pelo SDD, com relatório anexado
 - [ ] Todos os cenários BDD/TDD obrigatórios executados sem skip
