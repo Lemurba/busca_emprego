@@ -13,10 +13,12 @@
     "test:e2e": "npm run build && node --test \"test/e2e/*.test.mjs\"",
     "test:py": "python3 -m unittest discover -s hermes/native-plugin",
     "test:all": "npm test && npm run test:e2e",
+    "lint": "biome lint .",
     "start": "node dist/src/server.js",
     "dev": "npm run build && node dist/src/server.js"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.15",
     "@types/node": "^24.3.0",
     "esbuild": "^0.25.9",
     "tsx": "^4.20.5",
