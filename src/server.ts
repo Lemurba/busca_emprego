@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, createProfessionalProfile, createProfileFromBaseResume, createResume, dashboardSessionStore, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertSourceConfig } from "./db.js";
 import { projectId } from "./config.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
@@ -21,8 +21,10 @@ const operatorId = process.env.RADAR_OPERATOR_ID ?? "unassigned";
 const actor = "lan-user";
 const trustProxyTls = process.env.RADAR_TRUST_PROXY_TLS === "true";
 const allowedHosts = parseAllowedHosts(process.env.RADAR_ALLOWED_HOSTS, port);
-// Sessões persistidas (hash) no SQLite: reiniciar o serviço não desloga ninguém.
-const sessions = new SessionStore(sessionTtlMs(), 1000, dashboardSessionStore);
+// Sessões persistidas (hash) no SQLite: reiniciar o serviço não desloga ninguém; trocar
+// RADAR_DASHBOARD_TOKEN e reiniciar encerra todas (a impressão digital do token muda).
+const dashboardTokenFingerprint = createHash("sha256").update(`radar-session|${process.env.RADAR_DASHBOARD_TOKEN ?? ""}`).digest("hex").slice(0, 32);
+const sessions = new SessionStore(sessionTtlMs(), 1000, dashboardSessionStore(dashboardTokenFingerprint));
 if (["staging", "production"].includes(environment) && operatorId === "unassigned") throw new Error("RADAR_OPERATOR_ID is required in staging/production");
 
 const serviceToken = () => process.env.RADAR_INTERNAL_SERVICE_TOKEN ?? "";

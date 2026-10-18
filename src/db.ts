@@ -524,24 +524,29 @@ db.exec(`
 db.exec("DROP INDEX IF EXISTS idx_occurrence_source_identity");
 
 // Sessões do dashboard: só o hash (sha256) do id do cookie é gravado, nunca o id em si.
+// `token_fingerprint` amarra a sessão ao RADAR_DASHBOARD_TOKEN vigente: trocar o token e
+// reiniciar continua encerrando todas as sessões.
 db.exec(`CREATE TABLE IF NOT EXISTS dashboard_sessions (
   token_hash TEXT PRIMARY KEY,
+  token_fingerprint TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 )`);
 
 /** Persistência das sessões do dashboard no SQLite (reiniciar o serviço não desloga ninguém). */
-export const dashboardSessionStore = {
-  load(now = Date.now()): Array<[string, number]> {
-    db.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= ?").run(now);
-    return (db.prepare("SELECT token_hash, expires_at FROM dashboard_sessions").all() as Array<{ token_hash: string; expires_at: number }>).map((row) => [row.token_hash, Number(row.expires_at)]);
-  },
-  save(tokenHash: string, expiresAt: number) {
-    db.prepare("INSERT INTO dashboard_sessions (token_hash, expires_at) VALUES (?, ?) ON CONFLICT(token_hash) DO UPDATE SET expires_at = excluded.expires_at").run(tokenHash, expiresAt);
-  },
-  remove(tokenHash: string) {
-    db.prepare("DELETE FROM dashboard_sessions WHERE token_hash = ?").run(tokenHash);
-  },
-};
+export function dashboardSessionStore(tokenFingerprint: string) {
+  return {
+    load(now = Date.now()): Array<[string, number]> {
+      db.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= ? OR token_fingerprint <> ?").run(now, tokenFingerprint);
+      return (db.prepare("SELECT token_hash, expires_at FROM dashboard_sessions").all() as Array<{ token_hash: string; expires_at: number }>).map((row) => [row.token_hash, Number(row.expires_at)]);
+    },
+    save(tokenHash: string, expiresAt: number) {
+      db.prepare("INSERT INTO dashboard_sessions (token_hash, token_fingerprint, expires_at) VALUES (?, ?, ?) ON CONFLICT(token_hash) DO UPDATE SET expires_at = excluded.expires_at, token_fingerprint = excluded.token_fingerprint").run(tokenHash, tokenFingerprint, expiresAt);
+    },
+    remove(tokenHash: string) {
+      db.prepare("DELETE FROM dashboard_sessions WHERE token_hash = ?").run(tokenHash);
+    },
+  };
+}
 
 function ensureColumn(table: string, column: string, definition: string) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
