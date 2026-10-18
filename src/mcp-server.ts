@@ -447,12 +447,12 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     };
   }));
 
-  server.registerTool("radar_heartbeat_application", {
+  if (has("radar_heartbeat_application")) server.registerTool("radar_heartbeat_application", {
     description: "Renova o lease da reserva deste worker (chame a cada poucos minutos durante o preenchimento) e confirma que a autorização segue válida. Chame imediatamente antes do clique final de envio: erro aqui significa NÃO enviar.",
     inputSchema: { agent_id: agentId, application_id: z.string().min(1), worker_id: workerId },
   }, async ({ agent_id, application_id, worker_id }) => execute(() => {
     requireAutomation();
-    requireAgent(agent_id, "application.prepare");
+    agentFor(agent_id, "application.prepare");
     return heartbeatAuthorizedApplication(application_id, worker_id);
   }));
 
