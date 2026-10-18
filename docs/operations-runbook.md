@@ -31,6 +31,7 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_LOG_DIR` | não | padrão `/opt/data/logs` |
 | `RADAR_TRUST_PROXY_TLS` | não | `true` só atrás de proxy TLS em loopback |
 | `RADAR_AUTO_APPLICATION_ENABLED` | não (gate) | ligar somente com executor testado; com `false` a fila responde 403 `AUTOMATION_DISABLED` |
+| `RADAR_TZ` | não | fuso dos prazos (padrão `America/Sao_Paulo`): prazo só com data vale até 23:59:59 nesse fuso, independente do TZ do container |
 | `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_HOME_CHANNEL` | não | vazios = herdados de `/opt/data/.env` do Hermes |
 | `RADAR_BROWSER_VIEWER_URL` | não | visualizador remoto do navegador, se existir |
 | `GEOAPIFY_API_KEY` | não implementado | o mapa usa tiles do OpenStreetMap |

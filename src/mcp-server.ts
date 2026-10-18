@@ -88,7 +88,7 @@ const SAFE_MESSAGES: Record<string, string> = {
 };
 
 /** Converte qualquer erro em resposta MCP segura: código estável + mensagem pt-BR (#29). */
-function toolError(error: unknown) {
+export function toolError(error: unknown) {
   let code = "internal_error";
   let message = "Erro interno ao executar a ferramenta.";
   let status = 500;
