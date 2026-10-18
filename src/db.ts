@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, WorkflowError, type TransitionInput, type TransitionResult, type WorkflowCommand } from "./workflow.js";
 import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
+import { extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "./domain.js";
 import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "./agent-defaults.js";
 import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
 
@@ -779,6 +780,60 @@ function migrateExistingAgentVersions() {
 
 migrateExistingAgentVersions();
 
+/** Canonicalização sem lançar: URLs antigas que a regra atual recusa ficam como estão. */
+function recanonicalizedUrl(value: unknown): string {
+  const text = String(value ?? "");
+  if (!text) return text;
+  try { return canonicalizeJobUrl(text); } catch { return text; }
+}
+
+/**
+ * Regras por portal (#23) mudaram a forma canônica: recalcula canonical_url/job_url das vagas
+ * e canonical_url das ocorrências, e aponta como possível duplicata (nunca mescla) as vagas que
+ * passaram a ter a mesma URL canônica e a mesma empresa normalizada.
+ */
+function migrateCanonicalUrlsOnce() {
+  const migration = "recanonicalize_job_urls_v1";
+  if (db.prepare("SELECT name FROM schema_migrations WHERE name=?").get(migration)) return;
+  tx(() => {
+    const timestamp = now();
+    const rows = db.prepare("SELECT id,project_id,company,source_url,job_url,canonical_url,created_at FROM jobs ORDER BY created_at, id").all() as Record<string, unknown>[];
+    const updateJob = db.prepare("UPDATE jobs SET canonical_url=?,job_url=? WHERE id=?");
+    const groups = new Map<string, string[]>();
+    for (const row of rows) {
+      const canonicalUrl = recanonicalizedUrl(row.source_url) || recanonicalizedUrl(row.canonical_url);
+      const jobUrl = recanonicalizedUrl(row.job_url);
+      if (canonicalUrl !== row.canonical_url || jobUrl !== row.job_url) updateJob.run(canonicalUrl, jobUrl, String(row.id));
+      const key = companyKey(String(row.company ?? ""));
+      const identityUrl = jobUrl || canonicalUrl;
+      if (!key || !identityUrl) continue;
+      const groupKey = `${row.project_id}|${identityUrl}|${key}`;
+      groups.set(groupKey, [...(groups.get(groupKey) ?? []), String(row.id)]);
+    }
+    const occurrences = db.prepare("SELECT id,canonical_url FROM job_occurrences").all() as { id: string; canonical_url: string }[];
+    const updateOccurrence = db.prepare("UPDATE job_occurrences SET canonical_url=? WHERE id=?");
+    for (const occurrence of occurrences) {
+      const canonicalUrl = recanonicalizedUrl(occurrence.canonical_url);
+      if (canonicalUrl !== occurrence.canonical_url) updateOccurrence.run(canonicalUrl, occurrence.id);
+    }
+    const insertDuplicate = db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
+      VALUES (?,?,?,?,1,?,?)`);
+    let flagged = 0;
+    for (const [groupKey, ids] of groups) {
+      if (ids.length < 2) continue;
+      const projectId = groupKey.split("|", 1)[0];
+      // A vaga mais antiga é a candidata; as demais apontam para ela.
+      for (const jobId of ids.slice(1)) {
+        flagged += Number(insertDuplicate.run(idFor(`possible|${jobId}|${ids[0]}`), projectId, jobId, ids[0], JSON.stringify(["same_canonical_url_after_recanonicalization", "same_company"]), timestamp).changes);
+      }
+    }
+    db.prepare("INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)").run(migration, timestamp);
+    if (flagged) audit("possible_duplicate", migration, "flagged_by_migration", { count: flagged });
+  });
+}
+
+migrateCanonicalUrlsOnce();
+
 function mapJob(row: Record<string, unknown>): Job {
   return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1 } as Job;
 }
@@ -926,8 +981,9 @@ export function listCompanies(): CompanySummary[] {
   })).sort((left, right) => right.jobs - left.jobs || left.name.localeCompare(right.name));
 }
 
+// Leitura pura: a expiração roda no job periódico (timer do servidor e scripts/ops/expire-jobs.mjs),
+// e `lifecycle` abaixo já mostra como perdida a vaga com prazo vencido antes do próximo tick.
 export function getBootstrap(projectId = "busca-emprego") {
-  refreshExpiredJobs();
   const applications = listApplications();
   const applicationByJob = new Map<string, Application>();
   for (const application of applications) {
@@ -1438,6 +1494,45 @@ function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, 
   audit("job", jobId, "closed_by_source", { source_id: sourceId, round_id: roundId ?? null });
 }
 
+type FuzzyIndex = Map<string, Array<{ id: string; candidate: FuzzyJobCandidate }>>;
+type FuzzyMatch = { id: string; decision: FuzzyDuplicateDecision };
+
+function fuzzyFromItem(item: Record<string, unknown>): FuzzyJobCandidate {
+  return { title: String(item.title), company: String(item.company), location: item.location_text == null ? null : String(item.location_text), workModel: item.work_model == null ? null : String(item.work_model), postedAt: item.posted_at == null ? null : String(item.posted_at) };
+}
+
+function addToFuzzyIndex(index: FuzzyIndex, id: string, candidate: FuzzyJobCandidate) {
+  const key = companyKey(candidate.company);
+  // Sem empresa normalizada não há sinal "same_company": a vaga nunca seria candidata.
+  if (!key) return;
+  const bucket = index.get(key);
+  if (bucket) bucket.push({ id, candidate }); else index.set(key, [{ id, candidate }]);
+}
+
+/**
+ * Índice em memória por company_key de todas as vagas do projeto (inclusive excluídas e de
+ * score baixo). Só a coluna leve é lida, e os trigramas só rodam dentro do balde da empresa.
+ */
+function buildFuzzyIndex(projectId: string): FuzzyIndex {
+  const index: FuzzyIndex = new Map();
+  const rows = db.prepare("SELECT id,title,company,location,work_model,posted_at FROM jobs WHERE project_id=? ORDER BY created_at, id").all(projectId) as Record<string, unknown>[];
+  for (const row of rows) {
+    addToFuzzyIndex(index, String(row.id), { title: String(row.title), company: String(row.company), location: row.location == null ? null : String(row.location), workModel: row.work_model == null ? null : String(row.work_model), postedAt: row.posted_at == null ? null : String(row.posted_at) });
+  }
+  return index;
+}
+
+/** Até `limit` vagas do balde da empresa que o fuzzy marca como possível duplicata. */
+function findFuzzyMatches(index: FuzzyIndex, incoming: FuzzyJobCandidate, limit = 2): FuzzyMatch[] {
+  const matches: FuzzyMatch[] = [];
+  for (const entry of index.get(companyKey(incoming.company)) ?? []) {
+    const decision = compareFuzzyDuplicate(incoming, entry.candidate);
+    if (decision.action === "possible_duplicate") matches.push({ id: entry.id, decision });
+    if (matches.length >= limit) break;
+  }
+  return matches;
+}
+
 export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego") {
   const round = getRound(roundId, projectId);
   if (!round) throw new Error("round.not_found");
@@ -1448,6 +1543,12 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   if (!["running", "planning"].includes(String(round.status))) throw new Error("round.not_running");
   if (!["ready", "running"].includes(String(roundSource.status))) throw new Error("round.source.not_runnable");
   const results: Array<Record<string, unknown>> = [];
+  // Fuzzy fora da transação de escrita: lê o índice e compara antes do BEGIN IMMEDIATE, para não
+  // segurar o lock do SQLite (MCP e dashboard esperam no busy_timeout) durante os trigramas.
+  const fuzzyIndex = buildFuzzyIndex(projectId);
+  const fuzzyMatches = new Map(items.map((item) => [item, findFuzzyMatches(fuzzyIndex, fuzzyFromItem(item))]));
+  // Vagas novas deste lote: um item pode ser possível duplicata de outro do mesmo lote.
+  const batchFuzzyIndex: FuzzyIndex = new Map();
   db.exec("BEGIN IMMEDIATE");
   try {
   const lockedRound = db.prepare("SELECT status FROM search_rounds WHERE id=? AND project_id=?").get(roundId, projectId) as { status: string } | undefined;
@@ -1468,7 +1569,8 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   for (const item of items) {
     const sourceUrl = canonicalizeJobUrl(String(item.source_url ?? item.job_url));
     const jobUrl = canonicalizeJobUrl(String(item.job_url));
-    const sourceJobId = item.source_job_id == null ? null : String(item.source_job_id);
+    // Sem ID nativo informado, usa o ID que a URL do portal expõe ("linkedin:123", "gupy:456"...).
+    const sourceJobId = item.source_job_id == null ? extractSourceJobId(jobUrl) : String(item.source_job_id);
     // Exact identity (domain.compareExactIdentity): same source job id within the source, or the
     // same canonical URL *and* the same normalized company. A URL alone never merges employers.
     const incoming = { sourceId, sourceJobId, sourceUrl: jobUrl, company: String(item.company) };
@@ -1494,15 +1596,14 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
       }
     }
     let action = existingJob ? "sighting" : "new";
+    const jobId = existingJob?.id ?? idFor(`canonical-job|${projectId}|${jobUrl}|${companyKey(String(item.company))}`);
+    let fuzzy: FuzzyMatch | null = null;
     if (!existingJob) {
-      const candidates = listJobs({ includeArchived: true }).filter((candidate) => candidate.project_id === projectId).slice(0, 500);
-      const fuzzy = candidates.find((candidate) => compareFuzzyDuplicate(
-        { title: String(item.title), company: String(item.company), location: item.location_text == null ? null : String(item.location_text), workModel: item.work_model == null ? null : String(item.work_model), postedAt: item.posted_at == null ? null : String(item.posted_at) },
-        { title: candidate.title, company: candidate.company, location: candidate.location, workModel: candidate.work_model, postedAt: candidate.posted_at }
-      ).action === "possible_duplicate");
+      // Candidatos pré-calculados; dentro do lock só confirma que a candidata ainda existe.
+      fuzzy = [...(fuzzyMatches.get(item) ?? []), ...findFuzzyMatches(batchFuzzyIndex, fuzzyFromItem(item))]
+        .find((match) => match.id !== jobId && db.prepare("SELECT 1 FROM jobs WHERE id=?").get(match.id)) ?? null;
       if (fuzzy) action = "possible_duplicate";
     }
-    const jobId = existingJob?.id ?? idFor(`canonical-job|${projectId}|${jobUrl}|${companyKey(String(item.company))}`);
     const jobInput: any = {
       id: jobId, project_id: projectId, source_job_id: sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? "Não informado" : String(item.location_text),
       work_model: item.work_model == null || item.work_model === "unknown" ? "Não informado" : String(item.work_model), seniority: item.seniority == null ? "Não informado" : String(item.seniority),
@@ -1514,6 +1615,7 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
     // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
     const job = existingJob ?? upsertJob(jobInput);
     if (!job) throw new Error("job.persist.failed");
+    if (!existingJob) addToFuzzyIndex(batchFuzzyIndex, job.id, fuzzyFromItem(item));
     // One occurrence per (round, source, item): the same item repeated across batches of a
     // round is the same sighting, so the batch hash is not part of the identity.
     const occurrenceId = idFor(`occurrence|${projectId}|${roundId}|${sourceId}|${sourceJobId ?? jobUrl}`);
@@ -1556,16 +1658,9 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
         VALUES (?,?,?,?,?,'pending',?,?)`).run(idFor(`conflict|${job.id}|${field}|${evidence.id}`), job.id, field, selected.id, evidence.id,
           selected.origin === "human" ? "human_value_protected" : "source_disagreement", evidence.timestamp);
     }
-    if (action === "possible_duplicate" && job.id !== existingJob?.id) {
-      const candidate = listJobs({ includeArchived: true }).find((candidateJob) => candidateJob.id !== job.id && compareFuzzyDuplicate(
-        { title: job.title, company: job.company, location: job.location, workModel: job.work_model, postedAt: job.posted_at },
-        { title: candidateJob.title, company: candidateJob.company, location: candidateJob.location, workModel: candidateJob.work_model, postedAt: candidateJob.posted_at }
-      ).action === "possible_duplicate");
-      if (candidate) {
-        const decision = compareFuzzyDuplicate({ title: job.title, company: job.company, location: job.location, workModel: job.work_model, postedAt: job.posted_at }, { title: candidate.title, company: candidate.company, location: candidate.location, workModel: candidate.work_model, postedAt: candidate.posted_at });
-        db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
-          VALUES (?,?,?,?,?,?,?)`).run(idFor(`possible|${job.id}|${candidate.id}`), projectId, job.id, candidate.id, decision.similarity, JSON.stringify(decision.reasons), now());
-      }
+    if (fuzzy && job.id !== fuzzy.id) {
+      db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
+        VALUES (?,?,?,?,?,?,?)`).run(idFor(`possible|${job.id}|${fuzzy.id}`), projectId, job.id, fuzzy.id, fuzzy.decision.similarity, JSON.stringify(fuzzy.decision.reasons), now());
     }
     results.push({ source_job_id: sourceJobId, job_id: job.id, action, reason, suppressed: suppressed.length > 0 });
   }
