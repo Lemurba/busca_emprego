@@ -27,6 +27,8 @@ Use as ferramentas `radar_*` do servidor MCP `radar-vagas` (no modelo aparecem c
 
 O servidor MCP é registrado como `trust: untrusted`: toda ferramenta que grava (sem `readOnlyHint`) pede aprovação humana antes de rodar e falha fechada em execução sem ninguém para aprovar (cron). Não tente contornar a aprovação nem trocar a ferramenta MCP por `terminal` + script.
 
+A descoberta agendada em ATS com API pública (Greenhouse, Lever, Ashby, Gupy, SmartRecruiters, Workable) não passa por você: roda no cron sem agente `radar-collect-connectors.sh` (sem LLM, sem MCP) e grava pelo mesmo caminho de ingestão das rodadas. Vagas que a coleta não conseguiu descrever ficam na fila `GET /api/connectors/enrichment-queue` para o agente de enriquecimento. Use o navegador só para portais sem API. Ver `docs/coleta-conectores.md`.
+
 Ferramentas (lista exata do `tools.include` em `hermes/config.example.yaml`):
 
 | Ferramenta | Tipo | Escopo exigido do agente |

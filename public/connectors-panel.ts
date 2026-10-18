@@ -67,8 +67,10 @@ export async function mountConnectorPanel(root: ParentNode, deps: ConnectorPanel
     const target = event.target as HTMLElement;
     const toggle = target.closest<HTMLElement>("[data-connector-toggle]");
     const remove = target.closest<HTMLElement>("[data-connector-delete]");
-    if (!toggle && !remove) return;
+    // O handler global de cliques da página marca o botão como ocupado (disabled), o que
+    // impediria o envio do formulário; nenhum clique deste painel precisa dele.
     event.stopPropagation();
+    if (!toggle && !remove) return;
     void (async () => {
       if (toggle) {
         await deps.fetchJson(`/api/connectors/companies/${encodeURIComponent(toggle.dataset.connectorToggle ?? "")}`, { method: "PATCH", body: JSON.stringify({ enabled: toggle.dataset.enabled !== "1" }) });
