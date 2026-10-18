@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { refreshExpiredJobs } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -443,6 +444,21 @@ server.listen(port, bindHost, () => {
   if (!serviceToken()) console.warn(JSON.stringify({ event: "server.warning", code: "internal_token_missing", message: "RADAR_INTERNAL_SERVICE_TOKEN ausente: rotas internas respondem 503." }));
 });
 
+// Expiração periódica sem LLM (#24): fora do GET /api/bootstrap, também cobre vagas lidas só pelo MCP.
+// RADAR_EXPIRATION_INTERVAL_MS=0 desliga o timer (ex.: quando o cron do Hermes roda scripts/ops/expire-jobs.mjs).
+const expirationIntervalMs = Number(process.env.RADAR_EXPIRATION_INTERVAL_MS ?? 15 * 60_000);
+function runExpiration() {
+  try {
+    const expired = refreshExpiredJobs();
+    if (expired.length) console.log(JSON.stringify({ event: "jobs.expired", count: expired.length }));
+  } catch (error) {
+    console.error(JSON.stringify({ event: "jobs.expiration_failed", message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+const expirationTimer = Number.isFinite(expirationIntervalMs) && expirationIntervalMs > 0 ? setInterval(runExpiration, expirationIntervalMs) : null;
+expirationTimer?.unref();
+if (expirationTimer) setImmediate(runExpiration);
+
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, () => { loopbackServer?.close(); server.close(() => process.exit(0)); });
+  process.on(signal, () => { if (expirationTimer) clearInterval(expirationTimer); loopbackServer?.close(); server.close(() => process.exit(0)); });
 }

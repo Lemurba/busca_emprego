@@ -218,6 +218,8 @@ try {
     const running = claimed("worker-deadline");
     store.db.prepare("UPDATE jobs SET deadline_at=? WHERE id=?").run(dateOnly(yesterday), running.job.id);
     assert.equal(store.getJob(running.job.id).status, "applying");
+    // A expiração roda no job periódico; o bootstrap é só leitura.
+    store.refreshExpiredJobs();
     const bootstrap = store.getBootstrap();
     assert.equal(store.getJob(lastsToday.id).status, "found", "a date-only deadline expires only after the end of that day");
     assert.equal(bootstrap.jobs.find((job) => job.id === lastsToday.id).lifecycle, "unknown");

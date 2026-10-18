@@ -21,6 +21,7 @@ No repositório:
 | `hermes/plugin/` | Pacote portátil Agent Plugins v1 (`plugin.json` + `skills/` + `mcp.json`), opcional, para distribuir skill e MCP juntos. `skills/` é cópia gerada por `node scripts/ops/build-hermes-plugin.mjs` (a CI confere com `--check`). |
 | `hermes/config.example.yaml` | Fragmentos para mesclar no `config.yaml` do Hermes (`mcp_servers.radar-vagas`, `browser.cdp_url`, `skills.config`). |
 | `hermes/cron/radar-watchdog.sh` | Watchdog para o cron sem LLM. |
+| `hermes/cron/radar-expire-jobs.sh` | Expiração de vagas para o cron sem LLM. |
 | `ops/hermes/radar.env.example` | Modelo único do `.env.local` do app. |
 | `ops/hermes/radar-s6-run.sh` | `run` do serviço s6. |
 
@@ -156,6 +157,16 @@ hermes cron run <job_id>      # dispara uma vez para testar
 Regras do cron sem agente ("Script-Only Cron Jobs"): o script tem de estar em `~/.hermes/scripts/` (= `/opt/data/scripts`); `.sh` roda sob bash; stdout vazio com saída 0 é tick silencioso; stdout não vazio é entregue; saída diferente de zero vira alerta de erro. O watchdog checa `http://127.0.0.1:${PORT:-8787}/api/health` (lendo só `PORT` do `.env.local`), fica em silêncio com `.radar-stopped` e, com `RADAR_WATCHDOG_RESTART=true`, pede reinício ao s6 enviando `SIGTERM` ao processo. O cron é disparado pelo ticker do gateway; com o gateway parado, não há watchdog ("Cron Troubleshooting" → "Is the gateway running?").
 
 Reinstale o script após atualizar o repositório (ele é copiado, não referenciado).
+
+Expiração de vagas: o servidor expira vagas encerradas na fonte ou com prazo vencido num timer interno (`RADAR_EXPIRATION_INTERVAL_MS`, padrão 15 min; `0` desliga); `GET /api/bootstrap` não escreve mais. Para expirar também com o dashboard parado, instale o cron sem LLM:
+
+```sh
+install -m 0755 hermes/cron/radar-expire-jobs.sh /opt/data/scripts/radar-expire-jobs.sh
+hermes cron create "every 30m" --no-agent --script radar-expire-jobs.sh \
+  --deliver telegram --name radar-expire-jobs
+```
+
+Ele roda `node scripts/ops/expire-jobs.mjs --quiet` e só escreve no Telegram se a expiração falhar.
 
 ## 10. Verificação
 
