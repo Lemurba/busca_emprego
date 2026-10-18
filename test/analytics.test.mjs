@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
 // Analytics do dashboard a partir de dados ingeridos pela própria aplicação.
 // Não existe carga demonstrativa: todo dado deste teste entra por upsertJob,
 // o mesmo caminho usado pela API de agentes e pela importação de rodadas.
-const directory = mkdtempSync(join(tmpdir(), "radar-analytics-"));
-process.env.RADAR_DB_PATH = join(directory, "analytics.sqlite");
-const store = await import(`../dist/src/db.js?analytics=${Date.now()}`);
+const { store, cleanup } = await openTempStore("radar-analytics", "analytics.sqlite");
+after(cleanup);
 
 const ingested = (id, overrides) => ({
   id,
@@ -25,7 +23,7 @@ const ingested = (id, overrides) => ({
   ...overrides,
 });
 
-try {
+test("Analytics totals, salaries, and map coordinates (somente dados ingeridos)", async () => {
   store.upsertJob({ ...ingested("job-1"), match_score: 88, salary_min: 9_000, salary_max: 12_000, latitude: -23.55, longitude: -46.63 });
   store.upsertJob({ ...ingested("job-2"), match_score: 84, salary_min: 11_000, salary_max: 15_000, latitude: -22.9, longitude: -43.17 });
   store.upsertJob({ ...ingested("job-3"), match_score: 71, salary_min: 8_000, salary_max: 10_000, latitude: -25.42, longitude: -49.27, opening_status: "closed", closed_at: new Date().toISOString() });
@@ -52,9 +50,5 @@ try {
   assert.deepEqual(liveData.stats.sources["API real, parceira"], 4, "source chart must preserve source labels containing commas");
   assert.deepEqual(liveCompany?.locations, ["Belo Horizonte, MG"], "company cards must preserve complete city/state labels");
   assert.deepEqual(liveCompany?.sources, ["API real, parceira"], "company cards must preserve complete source labels");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});
 
-console.log("Analytics totals, salaries, and map coordinates passed with ingested data only.");

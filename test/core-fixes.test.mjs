@@ -1,12 +1,13 @@
 /**
  * Regressões do núcleo de domínio (análise crítica 2026-10-11, seções 6 e 9; contratos C1/C2).
  * Cada bloco reproduz um defeito confirmado e trava o comportamento corrigido.
- * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { after, describe, test } from "node:test";
+import { importStore } from "./helpers/temp-db.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-core-fixes-"));
 process.env.RADAR_DB_PATH = join(directory, "core.sqlite");
@@ -14,8 +15,12 @@ process.env.HERMES_LINKED_RECIPIENT_ID = "tg-user";
 delete process.env.TELEGRAM_ALLOWED_USERS;
 delete process.env.TELEGRAM_HOME_CHANNEL;
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
-const store = await import(`../dist/src/db.js?core=${Date.now()}`);
-const { calculateScore } = await import("../dist/src/domain.js");
+const store = await importStore("core");
+after(() => {
+  store.db.close();
+  rmSync(directory, { recursive: true, force: true });
+});
+const { calculateScore } = await import("../src/domain.ts");
 
 const events = (jobId) => store.db.prepare("SELECT * FROM workflow_events WHERE job_id=? ORDER BY version").all(jobId);
 let counter = 0;
@@ -49,9 +54,11 @@ function claimed(worker = "worker-a", overrides = {}) {
 const authState = (applicationId) => store.db.prepare("SELECT state FROM application_authorizations WHERE application_id=? ORDER BY issued_at DESC LIMIT 1").get(applicationId)?.state;
 const application = (id) => store.listApplications().find((item) => item.id === id);
 
-try {
-  // 1. Single path for jobs.status: versioned events, DB-computed preconditions, no regression, cycles.
-  {
+
+describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1, C2)", () => {
+
+  test("1. caminho único para jobs.status", () => {
+    // 1. Single path for jobs.status: versioned events, DB-computed preconditions, no regression, cycles.
     const { job, application: app } = approvedJob({}, "manual");
     const current = store.getJob(job.id);
     assert.equal(current.status, "ready_to_apply");
@@ -89,10 +96,10 @@ try {
     store.transitionJob(discarded.id, { command: "reopen", expected_version: store.getJob(discarded.id).version, actor: "user", data: { reason: "Reconsiderar" } });
     assert.equal(events(discarded.id).at(-1).cycle, 2);
     assert.equal(store.db.prepare("SELECT workflow_cycle FROM jobs WHERE id=?").get(discarded.id).workflow_cycle, 2);
-  }
+  });
 
-  // 2. "Manter atual" in a field conflict re-selects existing evidence without a UNIQUE failure.
-  {
+  test("2. manter atual num conflito reaproveita a evidência", () => {
+    // 2. "Manter atual" in a field conflict re-selects existing evidence without a UNIQUE failure.
     const agent = store.createAgentConfig({
       name: "Enriquecedor núcleo", role_type: "job_enrichment", enabled: true, source_ids: ["fixture"],
       tool_scopes: ["browser.read", "jobs.read", "jobs.enrich"], allowed_domains: ["jobs.example.test"], browser_enabled: true,
@@ -107,10 +114,10 @@ try {
     const selected = store.db.prepare("SELECT e.observed_value_json FROM job_field_provenance p JOIN evidence_records e ON e.id=p.evidence_id WHERE p.job_id=? AND p.field_path='benefits' AND p.superseded_at IS NULL").all(job.id);
     assert.deepEqual(selected.map((row) => JSON.parse(row.observed_value_json)), ["Plano A"]);
     assert.equal(store.getJob(job.id).benefits, "Plano A");
-  }
+  });
 
-  // 3. match_scores: identical score twice updates the same (job, '', '') row.
-  {
+  test("3. match_scores: score idêntico atualiza a mesma linha", () => {
+    // 3. match_scores: identical score twice updates the same (job, '', '') row.
     const job = newJob();
     const six = { role_family: 80, skills: 80, seniority: 80, location_work_model: 80, compensation: 80, explicit_preferences: 80 };
     store.recordMatchScore({ job_id: job.id, scores: six });
@@ -124,19 +131,19 @@ try {
     // The workflow uses the stored score: now mark_strong_match passes from the database fact.
     store.transitionJob(job.id, { command: "normalize", expected_version: 0, actor: "user", data: {} });
     assert.equal(store.transitionJob(job.id, { command: "mark_strong_match", expected_version: 1, actor: "user", data: { score: 1 } }).job.status, "strong_match");
-  }
+  });
 
-  // 4. Learned preferences reach the dashboard (busca-emprego, not "default").
-  {
+  test("4. preferências aprendidas chegam ao dashboard", () => {
+    // 4. Learned preferences reach the dashboard (busca-emprego, not "default").
     const job = newJob({ title: "Cargo rejeitado para bootstrap" });
     store.recordJobFeedback(job.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas desta família de cargo.", confirmation: "SEM INTERESSE" });
     const preferences = store.getBootstrap().preferences;
     assert.ok(preferences.rules.some((rule) => JSON.parse(JSON.stringify(rule.match_json)).title_original === "Cargo rejeitado para bootstrap"));
     assert.deepEqual(store.listPreferenceState().rules.length, preferences.rules.length);
-  }
+  });
 
-  // 5. updateJob validates like upsertJob; match_score/source are not patchable.
-  {
+  test("5. updateJob valida como upsertJob", () => {
+    // 5. updateJob validates like upsertJob; match_score/source are not patchable.
     const job = newJob({ salary_min: 5000, salary_max: 7000, currency: "BRL" });
     assert.throws(() => store.updateJob(job.id, { application_url: "javascript:alert(1)" }), /URL/);
     assert.throws(() => store.updateJob(job.id, { salary_source_url: "javascript:alert(1)" }), /URL/);
@@ -150,10 +157,10 @@ try {
     assert.equal(updated.salary_source_url, "https://salary.example.test/x");
     assert.equal(updated.latitude, -23.5);
     assert.equal(store.getJob(job.id).match_score, 0);
-  }
+  });
 
-  // 6. Multi-table writes are atomic.
-  {
+  test("6. escritas multi-tabela são atômicas", () => {
+    // 6. Multi-table writes are atomic.
     const profiles = store.listProfiles().length;
     assert.throws(() => store.createProfessionalProfile({ facts: [{ type: "skill", value: "SQL", origin: "user", state: "confirmed" }, { type: "", value: "x" }] }, "tester"), /profile\.fact\.invalid/);
     assert.equal(store.listProfiles().length, profiles, "a failing fact leaves no partial profile behind");
@@ -163,10 +170,10 @@ try {
     const { job } = approvedJob();
     assert.throws(() => store.createApplication({ job_id: job.id, resume_id: store.listResumes().find((item) => item.job_id === job.id).id }), /Já existe/);
     assert.equal(store.listApplications().filter((item) => item.job_id === job.id).length, 1);
-  }
+  });
 
-  // 7 + 8. Dedupe identity, occurrences per round, suppression counter, closing by source.
-  {
+  test("7 + 8. deduplicação, ocorrências, supressão e fechamento pela fonte", () => {
+    // 7 + 8. Dedupe identity, occurrences per round, suppression counter, closing by source.
     const profile = store.createProfessionalProfile({ context: { role_families: ["Dados"] } }, "tester");
     store.answerProfileInterview(profile.id, "target_role", "Analista", "tester");
     store.confirmProfessionalProfile(profile.id, "tester");
@@ -205,10 +212,10 @@ try {
     assert.equal(closedJob.status, "expired");
     assert.equal(events(closedJob.id).at(-1).command, "expire");
     assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM field_conflicts WHERE job_id=? AND field_path='opening_status' AND status='pending'").get(closedJob.id).count, 0);
-  }
+  });
 
-  // 9. Expiration: date-only deadline lasts the whole day; applying jobs are left alone.
-  {
+  test("9. expiração por prazo só depois do fim do dia", () => {
+    // 9. Expiration: date-only deadline lasts the whole day; applying jobs are left alone.
     const today = new Date();
     const pad = (value) => String(value).padStart(2, "0");
     const dateOnly = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
@@ -225,10 +232,10 @@ try {
     assert.equal(events(pastDeadline.id).at(-1).command, "expire");
     assert.equal(store.getJob(running.job.id).status, "applying", "an in-progress application is never expired by a GET");
     assert.equal(application(running.application.id).status, "in_progress");
-  }
+  });
 
-  // 10. Decision toggles: one positive signal per vacancy; SEM TEMPO revokes the authorization.
-  {
+  test("10. alternar decisão conta um sinal e SEM TEMPO revoga autorização", () => {
+    // 10. Decision toggles: one positive signal per vacancy; SEM TEMPO revokes the authorization.
     const job = newJob({ title: "Cientista de Dados Sênior Único", seniority: "Sênior Único" });
     const positive = () => store.db.prepare("SELECT positive_count FROM preference_values WHERE facet_key='seniority' AND normalized_value='senior unico'").get()?.positive_count;
     store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
@@ -243,10 +250,10 @@ try {
     assert.equal(authState(prepared.application.id), "revoked");
     assert.equal(application(prepared.application.id).authorization_id, null);
     assert.equal(store.listAuthorizedApplications().some((item) => item.id === prepared.application.id), false);
-  }
+  });
 
-  // 11. APROVO: empty content never; review required for manual resumes too.
-  {
+  test("11. APROVO exige conteúdo e revisão", () => {
+    // 11. APROVO: empty content never; review required for manual resumes too.
     const job = newJob();
     store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
     const empty = store.createResume({ job_id: job.id, title: "Vazio" });
@@ -255,20 +262,20 @@ try {
     assert.equal(manual.review_status, "not_run", "the caller cannot pre-set a review verdict");
     assert.throws(() => store.approveResume(manual.id, "APROVO"), /ATS_REVIEW_REQUIRED/);
     assert.equal(store.approveResume(manual.id, "APROVO", { override_reason: "Revisado manualmente linha a linha" }).review_status, "override");
-  }
+  });
 
-  // 12. Agent runs get unique ids; an explicit id updates the same run.
-  {
+  test("12. execuções de agente têm ids únicos", () => {
+    // 12. Agent runs get unique ids; an explicit id updates the same run.
     const a = store.recordAgentRun({ agent_name: "Coletor", status: "running" });
     const b = store.recordAgentRun({ agent_name: "Coletor", status: "running" });
     assert.notEqual(a.id, b.id);
     const finished = store.recordAgentRun({ id: a.id, agent_name: "Coletor", status: "completed", found_count: 3 });
     assert.equal(finished.started_at, a.started_at, "updating a run keeps its start");
     assert.equal(finished.found_count, 3);
-  }
+  });
 
-  // 13. C1 — authorized submit/fail only by the claiming worker.
-  {
+  test("13. C1: envio/falha autorizados só pelo worker que reivindicou", () => {
+    // 13. C1 — authorized submit/fail only by the claiming worker.
     const run = claimed("worker-c1");
     assert.equal(store.getJob(run.job.id).status, "applying");
     assert.throws(() => store.updateApplication(run.application.id, { status: "failed" }), /application\.internal_route_required/);
@@ -294,10 +301,10 @@ try {
     assert.equal(store.getJob(failing.job.id).status, "ready_to_apply", "the job returns to the queue for human review");
     store.authorizeAutoApplication(failing.application.id, failing.resume.id, "AUTORIZO");
     assert.equal(authState(failing.application.id), "issued", "a failed execution can be authorized again");
-  }
+  });
 
-  // 14. C2 — inbound idempotency and reply correlation.
-  {
+  test("14. C2: idempotência de entrada e correlação de resposta", () => {
+    // 14. C2 — inbound idempotency and reply correlation.
     const asked = (worker) => {
       const run = claimed(worker);
       const question = store.createHumanQuestion(run.application.id, { field_ref: "cnh", question: "Possui CNH?", required: true, choices: ["Sim", "Não"] });
@@ -315,48 +322,45 @@ try {
     assert.equal(redelivered.duplicate, true);
     assert.equal(redelivered.question.id, first.question.id);
     assert.equal(store.listHumanQuestions(second.run.application.id)[0].status, "delivered", "a redelivered message never answers another question");
-  }
+  });
 
-  // 15. Band follows the rounded displayed value.
-  assert.equal(calculateScore([{ key: "edge", weight: 1, score: 79.996 }]).band, "strong_match");
+  test("15. faixa segue o valor arredondado exibido", () => {
+    // 15. Band follows the rounded displayed value.
+    assert.equal(calculateScore([{ key: "edge", weight: 1, score: 79.996 }]).band, "strong_match");
+  });
 
-  console.log("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1, C2) checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
-
-// Migration: legacy match_scores with NULL snapshot/round collapse to one row with ''.
-{
-  const legacyDirectory = mkdtempSync(join(tmpdir(), "radar-core-migration-"));
-  const legacyPath = join(legacyDirectory, "legacy.sqlite");
-  process.env.RADAR_DB_PATH = legacyPath;
-  const seed = await import(`../dist/src/db.js?seed=${Date.now()}`);
-  try {
-    seed.upsertJob({ id: "legacy-score-job", title: "Legado", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/legacy" });
-    seed.db.exec(`DROP TABLE match_scores; CREATE TABLE match_scores (
+  test("migração legada de match_scores (banco anterior ao versionamento)", async () => {
+    // Migration: legacy match_scores with NULL snapshot/round collapse to one row with ''.
+    const legacyDirectory = mkdtempSync(join(tmpdir(), "radar-core-migration-"));
+    const legacyPath = join(legacyDirectory, "legacy.sqlite");
+    process.env.RADAR_DB_PATH = legacyPath;
+    const seed = await importStore("seed");
+    try {
+      seed.upsertJob({ id: "legacy-score-job", title: "Legado", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/legacy" });
+      seed.db.exec(`DROP TABLE match_scores; CREATE TABLE match_scores (
       id TEXT PRIMARY KEY, project_id TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
       profile_snapshot_id TEXT, round_id TEXT, score_base REAL NOT NULL, coverage_percent REAL NOT NULL, band TEXT NOT NULL,
       preference_adjustment REAL NOT NULL DEFAULT 0, score_final REAL NOT NULL, criteria_json TEXT NOT NULL,
       evidence_json TEXT NOT NULL DEFAULT '[]', strengths_json TEXT NOT NULL DEFAULT '[]', gaps_json TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL, UNIQUE(job_id, profile_snapshot_id, round_id))`);
-    const insert = seed.db.prepare("INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,score_final,criteria_json,created_at) VALUES (?,?,?,NULL,NULL,?,?,?,?,'[]',?)");
-    insert.run("old-1", "busca-emprego", "legacy-score-job", 50, 100, "low_match", 50, "2026-01-01T00:00:00.000Z");
-    insert.run("old-2", "busca-emprego", "legacy-score-job", 70, 100, "review", 70, "2026-02-01T00:00:00.000Z");
-    // Banco anterior ao versionamento: sem "0001_baseline" registrado, o baseline roda de novo na abertura.
-    seed.db.exec("DELETE FROM schema_migrations WHERE name='0001_baseline'");
-  } finally {
-    seed.db.close();
-  }
-  const migrated = await import(`../dist/src/db.js?migrated=${Date.now()}`);
-  try {
-    const rows = migrated.db.prepare("SELECT id,profile_snapshot_id,round_id,score_final FROM match_scores WHERE job_id='legacy-score-job'").all();
-    assert.deepEqual(rows.map((row) => ({ ...row })), [{ id: "old-2", profile_snapshot_id: "", round_id: "", score_final: 70 }], "NULL scopes migrate to '' keeping the latest row");
-    migrated.recordMatchScore({ job_id: "legacy-score-job", scores: { role_family: 90, skills: 90, seniority: 90, location_work_model: 90, compensation: 90, explicit_preferences: 90 } });
-    assert.equal(migrated.db.prepare("SELECT COUNT(*) AS count FROM match_scores WHERE job_id='legacy-score-job'").get().count, 1);
-    console.log("Legacy match_scores migration checks passed.");
-  } finally {
-    migrated.db.close();
-    rmSync(legacyDirectory, { recursive: true, force: true });
-  }
-}
+      const insert = seed.db.prepare("INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,score_final,criteria_json,created_at) VALUES (?,?,?,NULL,NULL,?,?,?,?,'[]',?)");
+      insert.run("old-1", "busca-emprego", "legacy-score-job", 50, 100, "low_match", 50, "2026-01-01T00:00:00.000Z");
+      insert.run("old-2", "busca-emprego", "legacy-score-job", 70, 100, "review", 70, "2026-02-01T00:00:00.000Z");
+      // Banco anterior ao versionamento: sem "0001_baseline" registrado, o baseline roda de novo na abertura.
+      seed.db.exec("DELETE FROM schema_migrations WHERE name='0001_baseline'");
+    } finally {
+      seed.db.close();
+    }
+    const migrated = await importStore("migrated");
+    try {
+      const rows = migrated.db.prepare("SELECT id,profile_snapshot_id,round_id,score_final FROM match_scores WHERE job_id='legacy-score-job'").all();
+      assert.deepEqual(rows.map((row) => ({ ...row })), [{ id: "old-2", profile_snapshot_id: "", round_id: "", score_final: 70 }], "NULL scopes migrate to '' keeping the latest row");
+      migrated.recordMatchScore({ job_id: "legacy-score-job", scores: { role_family: 90, skills: 90, seniority: 90, location_work_model: 90, compensation: 90, explicit_preferences: 90 } });
+      assert.equal(migrated.db.prepare("SELECT COUNT(*) AS count FROM match_scores WHERE job_id='legacy-score-job'").get().count, 1);
+    } finally {
+      migrated.db.close();
+      rmSync(legacyDirectory, { recursive: true, force: true });
+    }
+  });
+
+});

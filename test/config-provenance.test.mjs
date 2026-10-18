@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
-const directory = mkdtempSync(join(tmpdir(), "radar-config-provenance-"));
-process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
-const store = await import(`../dist/src/db.js?config=${Date.now()}`);
+const { store, cleanup } = await openTempStore("radar-config-provenance", "test.sqlite");
+after(cleanup);
 
-try {
+test("Source configuration, agent publication/rollback, and field provenance", async () => {
   const source = store.upsertSourceConfig({ id: "glassdoor", name: "Glassdoor", source_type: "glassdoor", domain: "glassdoor.com", enabled: true, auth_strategy: "browser_profile", browser_profile_id: "hermes/glassdoor" }, "operator");
   assert.equal(source.browser_profile_id, "hermes/glassdoor");
   assert.equal(source.secret_ref, null);
@@ -65,8 +63,4 @@ try {
   assert.ok(provenance.evidence.some((item) => item.field_path === "benefits" && item.origin === "human"));
   assert.ok(provenance.conflicts.length >= 2);
 
-  console.log("Source configuration, agent publication/rollback, and field provenance checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

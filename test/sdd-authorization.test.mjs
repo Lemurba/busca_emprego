@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
-const directory = mkdtempSync(join(tmpdir(), "radar-sdd-authorization-"));
-process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
 process.env.HERMES_LINKED_RECIPIENT_ID = "telegram-user";
-const store = await import(`../dist/src/db.js?authorization=${Date.now()}`);
+const { store, cleanup } = await openTempStore("radar-sdd-authorization", "test.sqlite");
+after(cleanup);
 
 function preparedApplication(id, applicationUrl = "") {
   const job = store.upsertJob({
@@ -27,7 +25,7 @@ function authorize(prepared) {
   return store.listAuthorizedApplications().find((item) => item.id === prepared.application.id);
 }
 
-try {
+test("SDD authorization URL, nonce, claim, evidence, revocation, and resume", async () => {
   const missingUrl = preparedApplication("missing-url");
   assert.throws(() => store.authorizeAutoApplication(missingUrl.application.id, missingUrl.resume.id, "AUTORIZO"), /application\.url\.required/);
 
@@ -74,8 +72,4 @@ try {
     assert.equal(store.db.prepare("SELECT state FROM application_authorizations WHERE application_id=?").get(paused.application.id).state, "claimed");
   }
 
-  console.log("SDD authorization URL, nonce, claim, evidence, revocation, and resume checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

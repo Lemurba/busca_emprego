@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
-const directory = mkdtempSync(join(tmpdir(), "radar-sdd-ats-"));
-process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
-const store = await import(`../dist/src/db.js?ats=${Date.now()}`);
+const { store, cleanup } = await openTempStore("radar-sdd-ats", "test.sqlite");
+after(cleanup);
 
-try {
+test("SDD ATS confirmed-facts generation and independent review", async () => {
   const pdf = Buffer.from(`%PDF-1.4
 1 0 obj << /Type /Page /Contents 2 0 R >> endobj
 2 0 obj << /Length 33 >> stream
@@ -37,8 +35,4 @@ endstream endobj
   assert.equal(store.reviewResume(modified.id, { verdict: "pass" }).review_status, "fail");
   assert.throws(() => store.approveResume(modified.id, "APROVO"), /ATS_REVIEW_REQUIRED/);
 
-  console.log("SDD ATS confirmed-facts generation and independent review checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

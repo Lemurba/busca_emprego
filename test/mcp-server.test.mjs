@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -14,13 +15,20 @@ delete process.env.TELEGRAM_HOME_CHANNEL;
 delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
 
 const [{ createRadarMcpServer, RADAR_MCP_TOOLS }, store] = await Promise.all([
-  import("../dist/src/mcp-server.js"),
-  import("../dist/src/db.js"),
+  import("../src/mcp-server.ts"),
+  import("../src/db.ts"),
 ]);
 const server = createRadarMcpServer();
 const client = new Client({ name: "radar-mcp-test", version: "1.0.0" });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+after(async () => {
+  delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
+  await client.close();
+  await server.close();
+  store.db.close();
+  rmSync(directory, { recursive: true, force: true });
+});
 
 /** Every tool output is kept so the test can prove no nonce ever left the server. */
 const outputs = [];
@@ -67,7 +75,8 @@ function preparedApplication(id, applicationUrl) {
   return { job, resume, application };
 }
 
-try {
+
+test("MCP: ferramentas, escopo por agente, domínios, gate de automação, idempotência e nonce oculto", async () => {
   // ---- tool list matches the code constant and hermes/config.example.yaml exactly ----
   const tools = await client.listTools();
   const names = tools.tools.map(({ name }) => name).sort();
@@ -202,12 +211,4 @@ try {
   const everything = outputs.join("\n");
   assert.doesNotMatch(everything, /"nonce"/u);
   for (const nonce of nonces) assert.ok(!everything.includes(nonce), "nonce vazou em saída de ferramenta");
-
-  console.log(`MCP validado: ${names.length} ferramentas, escopo por agente, domínios, gate de automação, idempotência e nonce oculto.`);
-} finally {
-  delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
-  await client.close();
-  await server.close();
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

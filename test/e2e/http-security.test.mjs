@@ -1,5 +1,6 @@
 // Contrato C3: autenticação, CSRF, allowlist de Host, gate de TLS, leitura de corpo e erros.
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { request as httpRequest } from "node:http";
 
-const { errorResponse, isTlsRequest, parseAllowedHosts, isHostAllowed, safeEqual, SessionStore, sessionCookie } = await import("../dist/src/http-security.js");
+const { errorResponse, isTlsRequest, parseAllowedHosts, isHostAllowed, safeEqual, SessionStore, sessionCookie } = await import("../../dist/src/http-security.js");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-http-security-"));
 const serviceToken = "svc-" + "a".repeat(40);
@@ -59,19 +60,13 @@ function raw(port, { method = "GET", path = "/", headers = {}, chunks = [] }) {
   });
 }
 
-const results = [];
-async function t(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  ok   ${name}`); }
-  catch (error) { results.push({ name, ok: false, error }); console.log(`  FAIL ${name}\n       ${error?.stack ?? error}`); }
-}
-
 const server = await startServer();
 const { base, port } = server;
 const svc = { "x-radar-service-token": serviceToken };
 const json = { "content-type": "application/json" };
 
 try {
-  await t("sem credencial: /api/* responde 401; health/ready continuam abertos", async () => {
+  await test("sem credencial: /api/* responde 401; health/ready continuam abertos", async () => {
     const response = await fetch(`${base}/api/bootstrap`);
     assert.equal(response.status, 401);
     assert.equal((await response.json()).error, "unauthorized");
@@ -80,13 +75,13 @@ try {
     assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { "x-radar-service-token": "errado" } })).status, 401);
   });
 
-  await t("token de serviço dá acesso (header e Bearer)", async () => {
+  await test("token de serviço dá acesso (header e Bearer)", async () => {
     assert.equal((await fetch(`${base}/api/bootstrap`, { headers: svc })).status, 200);
     assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { authorization: `Bearer ${serviceToken}` } })).status, 200);
   });
 
   let cookie = "";
-  await t("login por /auth: cookie HttpOnly/SameSite=Strict, redirect 303 sem token na URL", async () => {
+  await test("login por /auth: cookie HttpOnly/SameSite=Strict, redirect 303 sem token na URL", async () => {
     const wrong = await fetch(`${base}/auth?token=errado`, { redirect: "manual" });
     assert.equal(wrong.status, 401);
     assert.equal(wrong.headers.get("set-cookie"), null);
@@ -105,7 +100,7 @@ try {
     assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { cookie: "radar_session=" + "x".repeat(43) } })).status, 401);
   });
 
-  await t("rota interna recusa sessão por cookie (só token de serviço)", async () => {
+  await test("rota interna recusa sessão por cookie (só token de serviço)", async () => {
     const response = await fetch(`${base}/api/authorized-applications`, { headers: { cookie } });
     assert.equal(response.status, 401);
     assert.equal((await response.json()).error, "internal_token_required");
@@ -114,7 +109,7 @@ try {
     assert.equal((await fetch(`${base}/api/authorized-applications`, { headers: svc })).status, 200);
   });
 
-  await t("rotas C1 submit/fail existem e validam o corpo", async () => {
+  await test("rotas C1 submit/fail existem e validam o corpo", async () => {
     const invalid = await fetch(`${base}/api/applications/x/submit`, { method: "POST", headers: { ...json, ...svc }, body: JSON.stringify({ worker_id: "w" }) });
     assert.equal(invalid.status, 400);
     assert.equal((await invalid.json()).error, "invalid_body");
@@ -124,7 +119,7 @@ try {
     assert.ok([404, 422, 409, 501].includes(missing.status), `status ${missing.status}`);
   });
 
-  await t("CSRF: text/plain → 415, Origin estrangeiro → 403, Origin do próprio host passa", async () => {
+  await test("CSRF: text/plain → 415, Origin estrangeiro → 403, Origin do próprio host passa", async () => {
     const plain = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { "content-type": "text/plain", cookie }, body: "{}" });
     assert.equal(plain.status, 415);
     assert.equal((await plain.json()).error, "unsupported_media_type");
@@ -135,7 +130,7 @@ try {
     assert.equal(same.status, 404);
   });
 
-  await t("Host fora da allowlist → 421 (DNS rebinding)", async () => {
+  await test("Host fora da allowlist → 421 (DNS rebinding)", async () => {
     const response = await raw(port, { path: "/api/health", headers: { host: "evil.example" } });
     assert.equal(response.status, 421);
     assert.equal(response.json.error, "host_not_allowed");
@@ -150,7 +145,7 @@ try {
     assert.ok(!isHostAllowed(undefined, allowed));
   });
 
-  await t("x-forwarded-proto só vale de loopback com RADAR_TRUST_PROXY_TLS=true", () => {
+  await test("x-forwarded-proto só vale de loopback com RADAR_TRUST_PROXY_TLS=true", () => {
     const fake = (remoteAddress, proto) => ({ headers: { "x-forwarded-proto": proto }, socket: { remoteAddress } });
     assert.equal(isTlsRequest(fake("192.168.0.50", "https"), true), false, "header forjado da LAN é ignorado");
     assert.equal(isTlsRequest(fake("127.0.0.1", "https"), false), false, "sem opt-in o header é ignorado");
@@ -161,7 +156,7 @@ try {
     assert.match(sessionCookie("id", 1000, true), /; Secure$/);
   });
 
-  await t("UTF-8 multibyte quebrado entre chunks chega íntegro", async () => {
+  await test("UTF-8 multibyte quebrado entre chunks chega íntegro", async () => {
     const title = "Programação ção ü 😀 — São Paulo";
     const bytes = Buffer.from(JSON.stringify({ id: "utf8-job", title, company: "Empresa Ação", source: "manual", source_url: "https://example.com/vaga/utf8" }), "utf8");
     const cut = bytes.indexOf(Buffer.from("ç", "utf8")) + 1; // corta no meio do "ç"
@@ -173,7 +168,7 @@ try {
     assert.equal(job.company, "Empresa Ação");
   });
 
-  await t("413 conta bytes (não caracteres), com e sem Content-Length", async () => {
+  await test("413 conta bytes (não caracteres), com e sem Content-Length", async () => {
     const body = JSON.stringify({ title: "é".repeat(600_000) }); // ~600 mil caracteres, ~1,2 MB
     assert.ok(body.length < 1024 * 1024 && Buffer.byteLength(body) > 1024 * 1024);
     const chunked = await raw(port, { method: "POST", path: "/api/jobs", headers: { ...json, ...svc, "transfer-encoding": "chunked" }, chunks: [body.slice(0, 300_000), body.slice(300_000)] }).catch((error) => ({ status: "reset", error }));
@@ -184,7 +179,7 @@ try {
     assert.equal((await fetch(`${base}/api/health`)).status, 200, "servidor segue de pé");
   });
 
-  await t("corpo JSON que não é objeto → 400 invalid_body; JSON quebrado → 400 invalid_json", async () => {
+  await test("corpo JSON que não é objeto → 400 invalid_body; JSON quebrado → 400 invalid_json", async () => {
     for (const payload of ["null", "[]", "5", "\"texto\""]) {
       const response = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, ...svc }, body: payload });
       assert.equal(response.status, 400, payload);
@@ -194,7 +189,7 @@ try {
     assert.equal((await broken.json()).error, "invalid_json");
   });
 
-  await t("zod: tipos errados e URL javascript: são recusados", async () => {
+  await test("zod: tipos errados e URL javascript: são recusados", async () => {
     const badUrl = await fetch(`${base}/api/jobs`, { method: "POST", headers: { ...json, ...svc }, body: JSON.stringify({ title: "x", company: "y", source: "manual", source_url: "javascript:alert(1)" }) });
     assert.equal(badUrl.status, 400);
     const body = await badUrl.json();
@@ -206,7 +201,7 @@ try {
     assert.equal(badType.status, 400);
   });
 
-  await t("rotas exatas: subcaminho desconhecido e ids ausentes → 404", async () => {
+  await test("rotas exatas: subcaminho desconhecido e ids ausentes → 404", async () => {
     for (const path of ["/api/nope", "/api/jobs/utf8-job/unknown-sub", "/api/jobs/nao-existe", "/api/rounds/nao-existe", "/api/rounds/nao-existe/duplicates", "/api/agents/x/versions/extra"]) {
       const response = await fetch(`${base}${path}`, { headers: svc });
       assert.equal(response.status, 404, path);
@@ -216,7 +211,7 @@ try {
     assert.equal(deleted.status, 404);
   });
 
-  await t("estáticos: traversal bloqueado, arquivo com extensão ausente → 404, SPA sem extensão → index", async () => {
+  await test("estáticos: traversal bloqueado, arquivo com extensão ausente → 404, SPA sem extensão → index", async () => {
     for (const path of ["/../package.json", "/%2e%2e/package.json", "/..%2f..%2fpackage.json", "/vendor/../../package.json"]) {
       const response = await raw(port, { path });
       assert.notEqual(response.status, 200, path);
@@ -231,7 +226,7 @@ try {
     assert.doesNotMatch(csp, /unpkg/);
   });
 
-  await t("erro interno vira 500 internal_error com mensagem genérica", () => {
+  await test("erro interno vira 500 internal_error com mensagem genérica", () => {
     const sqlite = Object.assign(new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed: jobs.id"), { code: "ERR_SQLITE_ERROR" });
     for (const error of [sqlite, new TypeError("Cannot read properties of undefined (reading 'x')"), "string solta"]) {
       const response = errorResponse(error);
@@ -248,14 +243,14 @@ try {
     assert.equal(domain.body.message, "Confirme digitando AUTORIZO para esta vaga.");
   });
 
-  await t("logout revoga a sessão e limpa o cookie", async () => {
+  await test("logout revoga a sessão e limpa o cookie", async () => {
     const response = await fetch(`${base}/api/logout`, { method: "POST", headers: { ...json, cookie }, body: "{}" });
     assert.equal(response.status, 200);
     assert.match(response.headers.get("set-cookie") ?? "", /radar_session=; .*Max-Age=0/);
     assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).status, 401);
   });
 
-  await t("primitivas: safeEqual e expiração de sessão", () => {
+  await test("primitivas: safeEqual e expiração de sessão", () => {
     assert.equal(safeEqual("abc", "abc"), true);
     assert.equal(safeEqual("abc", "abd"), false);
     assert.equal(safeEqual("", ""), false);
@@ -265,7 +260,7 @@ try {
     assert.equal(store.isValid(id, 1500), false);
   });
 
-  await t("sem RADAR_INTERNAL_SERVICE_TOKEN: rotas internas → 503; sem RADAR_DASHBOARD_TOKEN: /auth → 503", async () => {
+  await test("sem RADAR_INTERNAL_SERVICE_TOKEN: rotas internas → 503; sem RADAR_DASHBOARD_TOKEN: /auth → 503", async () => {
     const bare = await startServer({ RADAR_INTERNAL_SERVICE_TOKEN: undefined, RADAR_DASHBOARD_TOKEN: undefined });
     try {
       const internal = await fetch(`${bare.base}/api/authorized-applications`);
@@ -280,7 +275,7 @@ try {
     }
   });
 
-  await t("dashboard-link.mjs imprime o link e --send usa hermes send via stdin", () => {
+  await test("dashboard-link.mjs imprime o link e --send usa hermes send via stdin", () => {
     const appDir = join(directory, "app");
     spawnSync("mkdir", ["-p", appDir]);
     writeFileSync(join(appDir, ".env.local"), `PORT=666\nRADAR_BIND_HOST=0.0.0.0\nRADAR_DASHBOARD_TOKEN="tok-123"\n`);
@@ -308,6 +303,3 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
-const failed = results.filter((item) => !item.ok);
-console.log(`\nsegurança HTTP: ${results.length - failed.length} ok, ${failed.length} falha(s)`);
-if (failed.length) process.exit(1);

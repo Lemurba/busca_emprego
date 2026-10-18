@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
-const directory = mkdtempSync(join(tmpdir(), "radar-sdd-score-"));
-process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
-const store = await import(`../dist/src/db.js?score=${Date.now()}`);
+const { store, cleanup } = await openTempStore("radar-sdd-score", "test.sqlite");
+after(cleanup);
 const six = { role_family: 70, skills: 70, seniority: 70, location_work_model: 70, compensation: 70, explicit_preferences: 70 };
 
-try {
+test("SDD score preference matching", async () => {
   const liked = store.upsertJob({
     id: "liked", title: "Engenheiro de Dados", company: "A", source: "fixture", source_url: "https://a.example/jobs/1",
     seniority: "Pleno", location: "São Paulo", work_model: "Remoto",
@@ -25,8 +23,4 @@ try {
   assert.equal(unrelatedScore.preference_adjustment, 0, "unrelated vacancy must not receive global preference bonus");
   assert.equal(unrelatedScore.score_final, unrelatedScore.score_base);
 
-  console.log("SDD score preference matching checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

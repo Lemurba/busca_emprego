@@ -23,6 +23,7 @@
  * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -30,9 +31,9 @@ import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startFakeRadarApi } from "./fixtures/fake-radar-api.mjs";
+import { startFakeRadarApi } from "../fixtures/fake-radar-api.mjs";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const token = `inbound-token-${randomUUID()}`;
 const LINKED = "1650486356";
 const INTRUDER = "999000111";
@@ -144,18 +145,6 @@ async function askedDeliveredQuestion(application, fieldRef, messageId, question
   return created.id;
 }
 
-const results = [];
-const t = async (name, fn) => {
-  try {
-    await fn();
-    results.push({ name, ok: true });
-    console.log(`  ok   ${name}`);
-  } catch (error) {
-    results.push({ name, ok: false, error: String(error?.message ?? error).slice(0, 300) });
-    console.log(`  FAIL ${name}\n       ${String(error?.message ?? error).slice(0, 300)}`);
-  }
-};
-
 let instance = null;
 let fake = null;
 try {
@@ -166,7 +155,7 @@ try {
   let alphaQuestion = "";
   let alphaMessage = null;
 
-  await t("/radar responder <código> do usuário autorizado registra e retoma a candidatura", async () => {
+  await test("/radar responder <código> do usuário autorizado registra e retoma a candidatura", async () => {
     alphaQuestion = await askedDeliveredQuestion(alpha.application, "disponibilidade", 777, "Pode iniciar em 30 dias?");
     assert.equal((await appState(alpha.application.id)).status, "needs_review", "pergunta aberta deveria pausar a candidatura");
     alphaMessage = message({ text: `/radar responder ${codeOf(alphaQuestion)} sim, em 30 dias` });
@@ -181,7 +170,7 @@ try {
     assert.match(readFileSync(logPath, "utf8"), new RegExp(`registrada question=${alphaQuestion}`, "u"));
   });
 
-  await t("mesma mensagem reentregue (mesmo message_id) é no-op duplicado", async () => {
+  await test("mesma mensagem reentregue (mesmo message_id) é no-op duplicado", async () => {
     const before = await myQuestions();
     const result = await inbound(alphaMessage);
     // A pergunta já saiu das abertas: o script responde que não há pergunta com o código.
@@ -197,7 +186,7 @@ try {
     assert.equal((await question(alphaQuestion)).answer, "sim, em 30 dias");
   });
 
-  await t("texto livre sem comando nem reply não responde pergunta aberta", async () => {
+  await test("texto livre sem comando nem reply não responde pergunta aberta", async () => {
     const beta = await preparedApplication("beta");
     const id = await askedDeliveredQuestion(beta.application, "cnh", 778, "Possui CNH categoria B?");
     const result = await inbound(message({ text: "sim" }));
@@ -208,14 +197,14 @@ try {
     assert.equal((await appState(beta.application.id)).status, "needs_review");
   });
 
-  await t("usuário fora da allowlist é recusado sem tocar o estado", async () => {
+  await test("usuário fora da allowlist é recusado sem tocar o estado", async () => {
     const id = (await myQuestions()).find((q) => q.status === "delivered").id;
     const result = await inbound(message({ user_id: INTRUDER, chat_id: INTRUDER, text: `/radar responder ${codeOf(id)} sim` }));
     assert.equal(result.status, 4, `esperava 4, veio ${result.status}: ${result.stdout}${result.stderr}`);
     assert.equal((await question(id)).status, "delivered");
   });
 
-  await t("pergunta obrigatória recusa /radar pular e aceita reply correlacionado", async () => {
+  await test("pergunta obrigatória recusa /radar pular e aceita reply correlacionado", async () => {
     const id = (await myQuestions()).find((q) => q.status === "delivered" && q.field_ref === "cnh").id;
     const skipped = await inbound(message({ text: `/radar pular ${codeOf(id)}` }));
     assert.equal(skipped.status, 2, `esperava 2, veio ${skipped.status}: ${skipped.stdout}${skipped.stderr}`);
@@ -229,7 +218,7 @@ try {
     assert.equal(done.reply_to_message_ref, `telegram:${LINKED}:778`);
   });
 
-  await t("reply escolhe a pergunta certa entre duas abertas", async () => {
+  await test("reply escolhe a pergunta certa entre duas abertas", async () => {
     const gamma = await preparedApplication("gamma");
     const delta = await preparedApplication("delta");
     const gammaId = await askedDeliveredQuestion(gamma.application, "idioma", 801, "Fala inglês avançado?");
@@ -243,7 +232,7 @@ try {
     assert.equal((await question(gammaId)).status, "delivered");
   });
 
-  await t("--dry-run não altera estado e --list/--recent só leem", async () => {
+  await test("--dry-run não altera estado e --list/--recent só leem", async () => {
     const open = (await myQuestions()).find((q) => q.status === "delivered");
     const dry = await inbound(message({ text: `/radar responder ${codeOf(open.id)} sim` }), ["--dry-run"]);
     assert.equal(dry.status, 0, `${dry.stdout}${dry.stderr}`);
@@ -267,7 +256,7 @@ try {
   base = fake.baseUrl;
   const answerCalls = () => fake.requests.filter((r) => r.path.endsWith("/answer"));
 
-  await t("sem chat_id ou sem user_id: recusa fechada, sem chamar o app", async () => {
+  await test("sem chat_id ou sem user_id: recusa fechada, sem chamar o app", async () => {
     const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:10` });
     const before = fake.requests.length;
     const noChat = await inbound(message({ chat_id: undefined, text: `/radar responder ${codeOf(q.id)} sim` }));
@@ -282,7 +271,7 @@ try {
     assert.equal(q.status, "delivered");
   });
 
-  await t("texto livre não é consumido: nenhuma chamada de resposta", async () => {
+  await test("texto livre não é consumido: nenhuma chamada de resposta", async () => {
     fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:11` });
     const before = answerCalls().length;
     const result = await inbound(message({ text: "qual o clima amanhã?" }));
@@ -290,7 +279,7 @@ try {
     assert.equal(answerCalls().length, before);
   });
 
-  await t("comando envia inbound_message_id e sender_id, sem reply_to_message_ref; sem x-forwarded-proto", async () => {
+  await test("comando envia inbound_message_id e sender_id, sem reply_to_message_ref; sem x-forwarded-proto", async () => {
     const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:12` });
     const msg = message({ text: `/radar responder ${codeOf(q.id)} linha 1\nlinha 2` });
     const result = await inbound(msg, [], { RADAR_FORWARDED_PROTO: "" });
@@ -307,7 +296,7 @@ try {
     assert.ok(!lines.some((line) => line.startsWith("linha 2")), "log não pode quebrar linha com texto do usuário");
   });
 
-  await t("mensagem duplicada (resposta {duplicate:true}) é sucesso sem efeito", async () => {
+  await test("mensagem duplicada (resposta {duplicate:true}) é sucesso sem efeito", async () => {
     const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:13` });
     const msg = message({ text: "resposta por reply", reply_to_message_id: "13" });
     const first = await inbound(msg);
@@ -320,7 +309,7 @@ try {
     assert.equal(q.status, "delivered", "duplicada não pode alterar o estado");
   });
 
-  await t("/radar parar só pelo comando explícito; código inexistente não registra", async () => {
+  await test("/radar parar só pelo comando explícito; código inexistente não registra", async () => {
     const q = fake.addQuestion({ telegram_message_ref: `telegram:${LINKED}:14` });
     const missing = await inbound(message({ text: "/radar parar zzzzzz" }));
     assert.equal(missing.status, 6);
@@ -342,7 +331,7 @@ try {
   const notify = (flags, extra) => run(["scripts/ops/notify-human-questions.mjs", ...flags], { env: notifyEnv(extra) });
   for (const q of fake.questions.values()) if (q.status !== "answered") q.status = "answered";
 
-  await t("notify: entrega com message_id real marca delivered, com código e instruções", async () => {
+  await test("notify: entrega com message_id real marca delivered, com código e instruções", async () => {
     const q = fake.addQuestion({ status: "pending", question: "Pode viajar?" });
     const result = await notify(["--send"]);
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
@@ -356,7 +345,7 @@ try {
     assert.equal(refs["telegram:424242:777"].question_id, q.id);
   });
 
-  await t("notify: sem message_id na saída marca delivery_failed (delivery_unconfirmed)", async () => {
+  await test("notify: sem message_id na saída marca delivery_failed (delivery_unconfirmed)", async () => {
     const q = fake.addQuestion({ status: "pending" });
     const result = await notify(["--send"], { RADAR_TELEGRAM_SHIM_MODE: "noid" });
     assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
@@ -365,7 +354,7 @@ try {
     q.status = "answered";
   });
 
-  await t("notify: --send-command só aceita argv JSON e --limit é validado", async () => {
+  await test("notify: --send-command só aceita argv JSON e --limit é validado", async () => {
     const q = fake.addQuestion({ status: "pending" });
     const shellish = await notify(["--send"], { RADAR_TELEGRAM_SEND_COMMAND: `${process.execPath} ${shimPath}; touch /tmp/pwn` });
     assert.equal(shellish.status, 1);
@@ -377,7 +366,7 @@ try {
     assert.equal(q.status, "pending");
   });
 
-  await t("notify: lock de outra execução impede envio duplicado", async () => {
+  await test("notify: lock de outra execução impede envio duplicado", async () => {
     const q = [...fake.questions.values()].find((item) => item.status === "pending");
     writeFileSync(join(directory, "notify.lock"), "12345\n");
     const blocked = await notify(["--send"]);
@@ -397,6 +386,3 @@ try {
   if (!process.env.RADAR_KEEP_TMP) rmSync(directory, { recursive: true, force: true });
 }
 
-const failures = results.filter((item) => !item.ok);
-console.log(`\npontes Telegram: ${results.length - failures.length} ok, ${failures.length} falha(s)`);
-process.exit(failures.length ? 1 : 0);
