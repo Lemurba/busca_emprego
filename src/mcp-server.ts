@@ -25,6 +25,7 @@ import {
   recordMatchScore,
   startSearchRound,
   submitAuthorizedApplication,
+  validateSourceBatch,
 } from "./db.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
 import { RADAR_MCP_TOOLS } from "./mcp-tools.js";
@@ -320,8 +321,11 @@ export function createRadarMcpServer() {
     for (const item of items) {
       for (const field of ["source_url", "job_url", "linkedin_post_url", "application_url"]) if (typeof item[field] === "string" && item[field]) requireAllowedDomain(agent, String(item[field]));
     }
+    // Valida o lote antes de abrir rodada: lote inválido não deixa rodada órfã.
+    const batchInput = { source_id, items, next_cursor: next_cursor ?? null };
+    validateSourceBatch(source_id, batchInput);
     const roundId = round_id ?? String(startSearchRound({ source_ids: [source_id] }, PROJECT_ID, `agent:${agent.id}`).id);
-    const batch = ingestRoundBatch(roundId, source_id, { source_id, items, next_cursor: next_cursor ?? null }, PROJECT_ID, agent.id);
+    const batch = ingestRoundBatch(roundId, source_id, batchInput, PROJECT_ID, agent.id);
     return { round_id: roundId, ...batch };
   }));
 

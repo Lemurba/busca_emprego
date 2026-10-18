@@ -1294,7 +1294,7 @@ const sourceItemFields = new Set([
   "posted_at", "deadline_at", "opening_status", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs"
 ]);
 
-function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
+export function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
   if (String(batch.source_id ?? sourceId) !== sourceId || !Array.isArray(batch.items) || batch.items.length > 25) throw new Error("SCHEMA_INVALID:source.items");
   const items = (batch.items as unknown[]).map((value, index) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`SCHEMA_INVALID:source.items.${index}`);
