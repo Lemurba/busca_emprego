@@ -161,7 +161,7 @@ const statusColumns = [
   { title: "Encerradas", statuses: ["expired", "discarded"], target: null }
 ];
 const movableStatusValues = ["validation", "strong_match", "review"];
-const portalNames = new Map(DEFAULT_JOB_PORTALS.map((portal) => [portal.id, portal.name]));
+const portalNames = new Map<string, string>(DEFAULT_JOB_PORTALS.map((portal) => [portal.id, portal.name]));
 type VisualFilter = { type: "source" | "status" | "lifecycle" | "location" | "job"; value: string; label: string };
 type SortKey = "match" | "deadline" | "salary" | "updated";
 
@@ -394,7 +394,8 @@ function visualFilteredJobs(data: Data) {
   const filter = state.visualFilter;
   if (!filter) return data.jobs;
   if (filter.type === "job") return data.jobs.filter((job) => job.id === filter.value);
-  return data.jobs.filter((job) => String(job[filter.type]) === filter.value);
+  const field = filter.type as Exclude<VisualFilter["type"], "job">;
+  return data.jobs.filter((job) => String(job[field]) === filter.value);
 }
 
 function visualFilterSummary(data: Data, showJobsLink = true) {
@@ -1183,7 +1184,7 @@ function showAgentModal(id?: string) {
   const checked = (value: boolean | undefined) => value ? "checked" : "";
   const role = agent?.role_type ?? "source_scout";
   const selectedSources = new Set(agent?.source_ids ?? []);
-  const selectedPortalDomains = new Set(DEFAULT_JOB_PORTALS.filter((portal) => selectedSources.has(portal.id)).map((portal) => portal.domain));
+  const selectedPortalDomains = new Set<string>(DEFAULT_JOB_PORTALS.filter((portal) => selectedSources.has(portal.id)).map((portal) => portal.domain));
   const customSources = (agent?.source_ids ?? []).filter((source) => !portalNames.has(source));
   const customDomains = (agent?.allowed_domains ?? []).filter((domain) => !selectedPortalDomains.has(domain));
   openModal(agent ? `Editar ${agent.name}` : "Novo agente", agent ? "Salvar cria um rascunho; a nova versão só vale depois de publicada." : "O agente nasce ativo, com instruções e portais padrão que você pode ajustar.", `
