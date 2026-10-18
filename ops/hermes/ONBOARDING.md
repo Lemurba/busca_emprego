@@ -156,7 +156,12 @@ node scripts/ops/dashboard-link.mjs          # imprime http://<host>:<PORT>/auth
 node scripts/ops/dashboard-link.mjs --send   # envia o link pelo Telegram do Hermes (hermes send)
 ```
 
-`GET /auth?token=...` troca o `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` (HttpOnly, SameSite=Strict) e redireciona para `/`. O host usado precisa estar em `RADAR_ALLOWED_HOSTS`. Para trocar o acesso, rotacione `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
+`GET /auth?token=...` troca o `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` (HttpOnly, SameSite=Strict) e redireciona para a base do dashboard (`RADAR_BASE_PATH`, padrão `/`). O host usado precisa estar em `RADAR_ALLOWED_HOSTS`. Para trocar o acesso, rotacione `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
+
+O dashboard pode ser publicado de duas formas:
+
+1. **Host/porta próprios** (padrão): `RADAR_BASE_PATH=/` e `RADAR_PUBLIC_URL=http://<host>:<PORT>` (ou `https://radar.local` atrás de um proxy dedicado). O cookie usa `Path=/`.
+2. **Subcaminho no proxy do Hermes**: inclua `ops/hermes/nginx-radar.conf.example` no virtual host TLS existente e, no `.env.local`, defina `RADAR_BASE_PATH=/plugins/busca-emprego/` (o mesmo prefixo do `location`), `RADAR_PUBLIC_URL=https://<host-do-hermes>/plugins/busca-emprego`, `RADAR_ALLOWED_HOSTS=<host-do-hermes>` e `RADAR_TRUST_PROXY_TLS=true`. O HTML recebe `<base href="/plugins/busca-emprego/">`, todos os assets e chamadas `api/...` são relativos a ela, `/auth` redireciona para o prefixo e o cookie fica com `Path=/plugins/busca-emprego` (não vaza para o resto do host). O servidor aceita o caminho com ou sem o prefixo, então funciona com `proxy_pass` que remove o prefixo (o exemplo) ou que o repassa.
 
 ## 9. Watchdog
 
@@ -181,6 +186,8 @@ hermes cron create "every 30m" --no-agent --script radar-expire-jobs.sh \
 ```
 
 Ele roda `node scripts/ops/expire-jobs.mjs --quiet` e só escreve no Telegram se a expiração falhar.
+
+O backup agendado (`hermes/cron/radar-backup.sh`: backup, teste de restore, cópia criptografada fora do host e rotação) é instalado do mesmo jeito, com `"every 24h"` e `--name radar-backup`; configuração e chaves em `docs/operations-runbook.md`, seção 5.
 
 ## 10. Verificação
 

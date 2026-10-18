@@ -11,3 +11,4 @@ npm-debug.log*
 .radar/
 __pycache__/
 *.pyc
+*.sqlite.processes/

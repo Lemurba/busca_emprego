@@ -8,7 +8,8 @@
 //
 // Variáveis (ambiente tem precedência sobre .env.local):
 //   RADAR_APP_DIR      diretório do app com .env.local (padrão: raiz do repositório)
-//   RADAR_PUBLIC_URL   URL base pela qual o dashboard é aberto (ex.: http://192.168.0.10:666)
+//   RADAR_PUBLIC_URL   URL base pela qual o dashboard é aberto (ex.: http://192.168.0.10:666 ou,
+//                      atrás do proxy em subcaminho, https://hermes.example/plugins/busca-emprego)
 //   RADAR_BIND_HOST / PORT   usados quando RADAR_PUBLIC_URL não existe (padrão 127.0.0.1:8787)
 //   RADAR_DASHBOARD_TOKEN    obrigatório
 //   RADAR_HERMES_BIN   binário do Hermes (padrão /opt/hermes/bin/hermes, senão "hermes")
@@ -61,7 +62,7 @@ function baseUrl() {
     let parsed;
     try { parsed = new URL(publicUrl); } catch { parsed = null; }
     if (!parsed || !["http:", "https:"].includes(parsed.protocol)) {
-      console.error("RADAR_PUBLIC_URL inválida: use http(s)://host[:porta]");
+      console.error("RADAR_PUBLIC_URL inválida: use http(s)://host[:porta][/subcaminho]");
       process.exit(2);
     }
     return publicUrl.replace(/\/+$/u, "");
