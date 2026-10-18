@@ -8,19 +8,22 @@ import { AGENT_ROLE_SCOPES } from "./agent-defaults.js";
 import {
   claimAuthorizedApplication,
   createHumanQuestion,
-  createJobFromAgent,
   createResume,
   db,
   enrichJobFromAgent,
   failAuthorizedApplication,
   getJob,
+  ingestJobFromAgent,
+  ingestRoundBatch,
   listAgentConfigs,
   listApplications,
   listAuthorizedApplications,
   listHumanQuestions,
   listSourceConfigs,
   proposeAgentPrompt,
+  recordAgentRun,
   recordMatchScore,
+  startSearchRound,
   submitAuthorizedApplication,
 } from "./db.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
@@ -62,6 +65,17 @@ const SAFE_MESSAGES: Record<string, string> = {
   "agent.prompt_optimization.reason.invalid": "Motivo da proposta inválido.",
   "agent.prompt_optimization.prompt.invalid": "Prompt proposto inválido ou idêntico ao atual.",
   "job.not_found": "Vaga não encontrada.",
+  "job.suppressed": "Vaga oculta por uma regra \"Não tenho interesse\"; não gaste esforço com ela.",
+  "job.required_fields.invalid": "Informe título, empresa e fonte da vaga.",
+  "SCHEMA_INVALID": "Item do lote fora do esquema (job_url, title e company são obrigatórios; até 25 itens).",
+  "PROFILE_CONFIRMATION_REQUIRED": "Confirme o perfil profissional no dashboard antes de iniciar a rodada.",
+  "ROUND_NO_SOURCES": "A fonte não está configurada ou ativa.",
+  "ROUND_SOURCES_NOT_READY": "A fonte não está pronta (termos, autenticação ou smoke test pendentes).",
+  "round.not_found": "Rodada não encontrada.",
+  "round.not_running": "A rodada já terminou; inicie outra.",
+  "round.source.not_found": "A fonte não faz parte da rodada.",
+  "round.source.not_runnable": "A fonte já terminou nesta rodada.",
+  "agent.published_version.required": "O agente não tem versão publicada.",
   "job.salary.invalid": "Faixa salarial inválida.",
   "job.coordinates.invalid": "Coordenadas inválidas.",
   "application.not_found": "Candidatura não encontrada.",
@@ -272,22 +286,68 @@ export function createRadarMcpServer() {
   }, async () => execute(() => ({ sources: listSourceConfigs() })));
 
   server.registerTool("radar_get_job", {
-    description: "Obtém uma vaga e seu estado atual no Kanban.",
-    inputSchema: { job_id: z.string().min(1) },
+    description: "Obtém uma vaga e seu estado atual no Kanban. Vagas ocultadas por regra \"Não tenho interesse\" só com include_suppressed.",
+    inputSchema: { job_id: z.string().min(1), include_suppressed: z.boolean().default(false) },
     annotations: { readOnlyHint: true },
-  }, async ({ job_id }) => execute(() => {
+  }, async ({ job_id, include_suppressed }) => execute(() => {
     const job = getJob(job_id);
     if (!job) throw new ToolError("job.not_found", SAFE_MESSAGES["job.not_found"]!);
+    if (job.suppressed && !include_suppressed) throw new ToolError("job.suppressed", SAFE_MESSAGES["job.suppressed"]!);
     return { job };
   }));
 
   server.registerTool("radar_discover_job", {
-    description: "Registra uma vaga descoberta usando permissões do agente coletor publicado (escopo jobs.create; URLs dentro dos domínios permitidos).",
+    description: "Registra uma vaga descoberta usando permissões do agente coletor publicado (escopo jobs.create; URLs dentro dos domínios permitidos). Vaga já conhecida (mesma URL, ou mesma empresa + título + local, ou mesma descrição) vira nova ocorrência, não erro.",
     inputSchema: { agent_id: agentId, ...jobFields },
   }, async ({ agent_id, ...job }) => execute(() => {
     const agent = requireAgent(agent_id, "jobs.create");
     for (const url of [job.source_url, job.linkedin_post_url, job.job_url, job.application_url]) if (url) requireAllowedDomain(agent, url);
-    return { job: createJobFromAgent(agent.id, job, PROJECT_ID) };
+    const { job: saved, ...ingestion } = ingestJobFromAgent(agent.id, job, PROJECT_ID);
+    return { job: saved, ingestion };
+  }));
+
+  server.registerTool("radar_ingest_batch", {
+    description: "Ingere um lote (até 25 itens) de uma fonte numa rodada de busca, com deduplicação, ocorrências e supressão (escopo jobs.create; URLs nos domínios permitidos). Sem round_id, inicia uma rodada para a fonte; envie next_cursor enquanto houver mais lotes.",
+    inputSchema: {
+      agent_id: agentId,
+      source_id: z.string().min(1),
+      round_id: z.string().min(1).optional(),
+      items: z.array(z.record(z.string(), z.unknown())).min(1).max(25),
+      next_cursor: z.string().min(1).nullable().optional(),
+    },
+  }, async ({ agent_id, source_id, round_id, items, next_cursor }) => execute(() => {
+    const agent = requireAgent(agent_id, "jobs.create");
+    for (const item of items) {
+      for (const field of ["source_url", "job_url", "linkedin_post_url", "application_url"]) if (typeof item[field] === "string" && item[field]) requireAllowedDomain(agent, String(item[field]));
+    }
+    const roundId = round_id ?? String(startSearchRound({ source_ids: [source_id] }, PROJECT_ID, `agent:${agent.id}`).id);
+    const batch = ingestRoundBatch(roundId, source_id, { source_id, items, next_cursor: next_cursor ?? null }, PROJECT_ID, agent.id);
+    return { round_id: roundId, ...batch };
+  }));
+
+  server.registerTool("radar_record_agent_run", {
+    description: "Registra início/fim de uma execução do agente com custo, tokens e latência (painel de execuções). Reenvie com o mesmo run_id para fechar a execução.",
+    inputSchema: {
+      agent_id: agentId,
+      run_id: z.string().min(1).max(120).optional(),
+      status: z.enum(["running", "completed", "failed"]),
+      found_count: z.number().int().min(0).optional(),
+      message: z.string().max(500).optional(),
+      model_effective: z.string().max(120).optional(),
+      input_tokens: z.number().int().min(0).optional(),
+      output_tokens: z.number().int().min(0).optional(),
+      cost: z.number().min(0).optional(),
+      latency_ms: z.number().int().min(0).optional(),
+      started_at: z.string().max(40).optional(),
+      finished_at: z.string().max(40).optional(),
+    },
+  }, async ({ agent_id, run_id, ...input }) => execute(() => {
+    const agent = requireAgent(agent_id);
+    // Uma execução pertence ao agente que a abriu: outro agente não a reescreve.
+    const existing = run_id ? db.prepare("SELECT agent_id FROM agent_runs WHERE id=?").get(run_id) as { agent_id: string | null } | undefined : undefined;
+    if (existing && existing.agent_id !== agent.id) throw new ToolError("agent_run.agent_mismatch", "A execução pertence a outro agente.");
+    const name = listAgentConfigs(PROJECT_ID).find((item) => item.id === agent.id)?.name ?? agent.id;
+    return { run: recordAgentRun({ ...input, ...(run_id ? { id: run_id } : {}), agent_id: agent.id, agent_name: name }) };
   }));
 
   server.registerTool("radar_enrich_job", {

@@ -200,6 +200,7 @@ const FRIENDLY: Record<string, string> = {
   "application.url_mismatch": "A URL observada não corresponde à URL autorizada.",
   "job.archived": "Esta vaga foi excluída. Restaure-a antes de alterá-la.",
   "job.not_archived": "Esta vaga não está excluída.",
+  "job.not_suppressed": "Esta vaga não está oculta.",
   "job.archive.confirmation_required": "Confirme a exclusão com EXCLUIR.",
   "job.archive.application_in_progress": "A candidatura desta vaga está sendo enviada agora; aguarde antes de excluir.",
   "decision.undo.nothing_to_undo": "Não há decisão para desfazer nesta vaga.",

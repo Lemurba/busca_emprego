@@ -44,10 +44,12 @@ mcp_servers:
         - radar_list_open_questions
         # escrita (exigem agent_id de agente publicado/ativo com o escopo do papel)
         - radar_discover_job
+        - radar_ingest_batch
         - radar_enrich_job
         - radar_create_resume
         - radar_propose_agent_prompt
         - radar_record_score
+        - radar_record_agent_run
         - radar_claim_application
         - radar_submit_application
         - radar_fail_application

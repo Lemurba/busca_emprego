@@ -1682,7 +1682,7 @@ export function ingestSourceItems(sourceId: string, items: unknown[], options: {
   return tx(() => validated.map((item) => ingestSourceItem(item, { projectId, sourceId, roundId: null, agentId: options.agentId ?? null })));
 }
 
-export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego") {
+export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego", agentId: string | null = null) {
   const round = getRound(roundId, projectId);
   if (!round) throw new Error("round.not_found");
   const roundSource = (round.sources as Record<string, unknown>[]).find((source) => source.source_id === sourceId);
@@ -1709,7 +1709,7 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   db.prepare("DELETE FROM round_checkpoints WHERE round_id=? AND source_id=? AND payload_hash=? AND status<>'completed'").run(roundId, sourceId, payloadHash);
   db.prepare(`INSERT INTO round_checkpoints (id,round_id,source_id,batch_number,cursor,payload_hash,status,created_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(checkpointId, roundId, sourceId, batchNumber, nextCursor, payloadHash, "started", now());
-  for (const item of items) results.push(ingestSourceItem(item, { projectId, sourceId, roundId, agentId: null }));
+  for (const item of items) results.push(ingestSourceItem(item, { projectId, sourceId, roundId, agentId }));
   const timestamp = now();
   const sourceStatus = nextCursor ? "running" : "completed";
   db.prepare("UPDATE round_checkpoints SET status='completed' WHERE id=? AND status='started'").run(checkpointId);
