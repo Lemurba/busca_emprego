@@ -2871,9 +2871,9 @@ export function listHumanQuestions(applicationId?: string) {
 }
 
 const agentRoles = new Set(["coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator", "preference_learner", "resume_writer", "ats_reviewer", "application_assistant", "custom"]);
-const safeAgentTools = new Set(["agent.invoke", "browser.read", "jobs.read", "jobs.write", "jobs.create", "jobs.enrich", "salary.lookup", "resume.read", "resume.write", "preferences.write", "application.prepare", "telegram.question"]);
+const safeAgentTools = new Set(["agent.invoke", "agents.propose", "browser.read", "jobs.read", "jobs.write", "jobs.create", "jobs.enrich", "salary.lookup", "resume.read", "resume.write", "preferences.write", "application.prepare", "telegram.question"]);
 const roleAgentTools: Record<string, Set<string>> = {
-  coordinator: new Set(["agent.invoke", "jobs.read"]),
+  coordinator: new Set(["agent.invoke", "agents.propose", "jobs.read"]),
   source_scout: new Set(["browser.read", "jobs.read", "jobs.create"]),
   job_enrichment: new Set(["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"]),
   normalizer_deduper: new Set(["jobs.read", "jobs.write"]),
@@ -2992,6 +2992,15 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
   };
 }
 
+/** Snapshots publicados de todos os agentes do projeto (o que listagem e execuções enxergam). */
+export function listPublishedAgentConfigs(projectId = "busca-emprego"): AgentConfig[] {
+  return listAgentConfigs(projectId).flatMap((agent) => {
+    const published = publishedAgentConfig(agent.id, projectId);
+    // Pausa imediata (linha viva desativada) também vale para o snapshot.
+    return published ? [{ ...published, enabled: published.enabled && agent.enabled }] : [];
+  });
+}
+
 export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const values = validateAgentConfigInput({
     ...input,
@@ -3066,6 +3075,11 @@ function activateDefaultSourcesOnce(projectId = "busca-emprego") {
 
 activateDefaultSourcesOnce();
 
+/**
+ * Salva a alteração como rascunho em `agent_config_versions`. A linha viva de `agent_configs`
+ * só muda em publicação/rollback (issue #11): rascunho nunca governa listagem nem execução.
+ * Única exceção: pausar (`enabled: false`) vale na hora, porque só reduz permissões.
+ */
 export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
   if (!current) throw new Error("agent.not_found");
@@ -3073,8 +3087,8 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   const values = validateAgentConfigInput(merged);
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
   const versionId = insertAgentVersion(id, nextVersion, "draft", values, actor);
-  db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,model_id=?,reasoning_effort=?,max_input_tokens=?,max_output_tokens=?,max_cost_per_run=?,fallback_policy=?,structured_output_required=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
-    .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, values.modelId, values.reasoningEffort, values.maxInputTokens, values.maxOutputTokens, values.maxCostPerRun, values.fallbackPolicy, values.structuredOutputRequired ? 1 : 0, nextVersion, versionId, now(), id, projectId);
+  db.prepare("UPDATE agent_configs SET draft_version_id=?,updated_at=? WHERE id=? AND project_id=?").run(versionId, now(), id, projectId);
+  if (input.enabled === false) db.prepare("UPDATE agent_configs SET enabled=0 WHERE id=? AND project_id=?").run(id, projectId);
   audit("agent_config", id, "draft_created", { actor, version: nextVersion, version_id: versionId, changed_fields: Object.keys(input) });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
