@@ -15,7 +15,7 @@ const [{ createRadarMcpServer }, store] = await Promise.all([
   import("../dist/src/mcp-server.js"),
   import("../dist/src/db.js"),
 ]);
-const server = createRadarMcpServer();
+const server = createRadarMcpServer({ role: "coleta" });
 const client = new Client({ name: "radar-ingestao-test", version: "1.0.0" });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
