@@ -70,7 +70,9 @@ mcp_servers:
         - radar_get_job
         # escrita
         - radar_discover_job
+        - radar_ingest_batch
         - radar_enrich_job
+        - radar_record_agent_run
       resources: false
       prompts: false
 

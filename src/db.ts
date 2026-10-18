@@ -555,6 +555,15 @@ ensureColumn("jobs", "canonical_url", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("jobs", "role_family", "TEXT");
 ensureColumn("jobs", "role_family_confidence", "REAL");
 ensureColumn("jobs", "suppressed", "INTEGER NOT NULL DEFAULT 0");
+// Regras "Não tenho interesse" que ocultaram a vaga (motivo exibido em "Ocultadas") e a marca
+// de quando o usuário a reexibiu: reexibida, a vaga não volta a ser ocultada pelas mesmas buscas.
+ensureColumn("jobs", "suppressed_rule_ids", "TEXT NOT NULL DEFAULT '[]'");
+ensureColumn("jobs", "suppression_dismissed_at", "TEXT");
+// Chaves de deduplicação entre portais: empresa + título normalizado + local, e hash da descrição.
+ensureColumn("jobs", "dedup_key", "TEXT");
+ensureColumn("jobs", "description_hash", "TEXT");
+db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs(project_id, dedup_key)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_description_hash ON jobs(project_id, description_hash)");
 // Exclusão reversível: a vaga sai das listas, mas continua no banco para restauração e deduplicação.
 ensureColumn("jobs", "archived_at", "TEXT");
 ensureColumn("jobs", "archived_reason", "TEXT");
@@ -783,6 +792,7 @@ function migrateExistingAgentVersions() {
 }
 
 migrateExistingAgentVersions();
+backfillDedupKeysOnce();
 
 /** Canonicalização sem lançar: URLs antigas que a regra atual recusa ficam como estão. */
 function recanonicalizedUrl(value: unknown): string {
@@ -862,10 +872,25 @@ function mapApplication(row: Record<string, unknown>): Application {
   return row as unknown as Application;
 }
 
-/** Vagas visíveis. Vagas excluídas (arquivadas) só entram com includeArchived, para deduplicação. */
-export function listJobs(options: { includeArchived?: boolean } = {}): Job[] {
-  const where = options.includeArchived ? "" : "WHERE archived_at IS NULL";
+/**
+ * Vagas visíveis: sem as excluídas (arquivadas) e sem as ocultadas por regra "Não tenho interesse".
+ * includeArchived (deduplicação) devolve todas as vagas, ocultadas inclusive; includeSuppressed
+ * inclui só as ocultadas.
+ */
+export function listJobs(options: { includeArchived?: boolean; includeSuppressed?: boolean } = {}): Job[] {
+  const where = options.includeArchived ? "" : (options.includeSuppressed ? "WHERE archived_at IS NULL" : "WHERE archived_at IS NULL AND suppressed=0");
   return (db.prepare(`SELECT * FROM jobs ${where} ORDER BY match_score DESC, updated_at DESC`).all() as Record<string, unknown>[]).map(mapJob);
+}
+
+/** Vagas ocultadas por regras ativas, com o motivo (regra) de cada uma: a visão "Ocultadas" do painel. */
+export function listSuppressedJobs(projectId = "busca-emprego") {
+  const rules = new Map((db.prepare("SELECT id,match_json,reason,state FROM preference_rules WHERE project_id=?").all(projectId) as Record<string, unknown>[])
+    .map((rule) => [String(rule.id), { id: String(rule.id), reason: String(rule.reason ?? ""), state: String(rule.state), match_json: parseObject(rule.match_json) }]));
+  return (db.prepare("SELECT id,title,company,location,source,suppressed_rule_ids,updated_at FROM jobs WHERE suppressed=1 AND archived_at IS NULL AND project_id=? ORDER BY updated_at DESC").all(projectId) as Record<string, unknown>[])
+    .map((row) => {
+      const ruleIds = parseJsonArray(row.suppressed_rule_ids);
+      return { id: String(row.id), title: String(row.title), company: String(row.company), location: String(row.location ?? ""), source: String(row.source ?? ""), updated_at: String(row.updated_at ?? ""), rule_ids: ruleIds, rules: ruleIds.flatMap((id) => rules.get(id) ?? []) };
+    });
 }
 
 /** Todas as vagas excluídas do projeto: a lista de Configurações é o único caminho para restaurá-las. */
@@ -1007,6 +1032,7 @@ export function getBootstrap(projectId = "busca-emprego") {
   const sources = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.source] = (acc[job.source] ?? 0) + 1; return acc; }, {});
   const locations = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {});
   const salaries = jobs.filter((job) => job.salary_min != null).map((job) => job.salary_min as number);
+  const suppressedJobs = listSuppressedJobs(projectId);
   return {
     jobs,
     resumes: listResumes(),
@@ -1025,8 +1051,10 @@ export function getBootstrap(projectId = "busca-emprego") {
     sourceConfigs: listSourceConfigs(projectId),
     enrichmentEvents: listJobEnrichmentEvents(),
     archivedJobs: listArchivedJobs(projectId),
+    suppressedJobs,
     stats: {
       total: jobs.length,
+      suppressed: suppressedJobs.length,
       strongMatches: jobs.filter((job) => job.status === "strong_match" || job.match_score >= 80).length,
       awaitingReview: jobs.filter((job) => ["found", "validation", "review"].includes(job.status)).length,
       selected: jobs.filter((job) => ["selected", "resume", "resume_approved", "ready_to_apply"].includes(job.status)).length,
@@ -1300,7 +1328,9 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
     const rawInput = input as unknown as Record<string, unknown>;
     db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
       .run(String(rawInput.project_id ?? currentJob?.project_id ?? "busca-emprego"), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
+    db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?").run(jobDedupKey(job.title, job.company, job.location), jobDescriptionHash(job.description, job.company), id);
     audit("job", id, currentJob ? "updated" : "discovered", { changed_fields: Object.keys(input) });
+    applySuppression(id);
   });
   return getJob(id);
 }
@@ -1324,7 +1354,7 @@ const sourceItemFields = new Set([
   "posted_at", "deadline_at", "opening_status", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs"
 ]);
 
-function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
+export function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
   if (String(batch.source_id ?? sourceId) !== sourceId || !Array.isArray(batch.items) || batch.items.length > 25) throw new Error("SCHEMA_INVALID:source.items");
   const items = (batch.items as unknown[]).map((value, index) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`SCHEMA_INVALID:source.items.${index}`);
@@ -1480,6 +1510,91 @@ function activeSuppression(job: Job, projectId = "busca-emprego", rules: Suppres
 }
 
 /**
+ * Aplica as regras ativas "Não tenho interesse" à vaga (todo caminho de criação/atualização:
+ * upsertJob, ingestão em lote e descoberta por agente). Cada regra conta a vaga uma única vez;
+ * vaga com decisão humana ou reexibida pelo usuário não é ocultada. Devolve as regras aplicadas.
+ */
+function applySuppression(jobId: string): string[] {
+  const row = db.prepare("SELECT * FROM jobs WHERE id=?").get(jobId) as Record<string, unknown> | undefined;
+  if (!row) return [];
+  const job = mapJob(row);
+  const previous = job.suppressed ? parseJsonArray(row.suppressed_rule_ids) : [];
+  if (row.suppression_dismissed_at || (job.decision && job.decision !== "pending")) return previous;
+  const projectId = job.project_id ?? "busca-emprego";
+  const matched = activeSuppression(job, projectId);
+  const added = matched.filter((ruleId) => !previous.includes(ruleId));
+  if (!added.length) return previous;
+  const timestamp = now();
+  db.prepare("UPDATE jobs SET suppressed=1,suppressed_rule_ids=? WHERE id=?").run(JSON.stringify([...previous, ...added]), jobId);
+  for (const ruleId of added) db.prepare("UPDATE preference_rules SET suppressed_count=suppressed_count+1,updated_at=? WHERE id=?").run(timestamp, ruleId);
+  audit("job", jobId, "suppressed", { rule_ids: added });
+  return [...previous, ...added];
+}
+
+/** Ação "Reexibir" da visão Ocultadas: a vaga volta ao painel e as regras atuais não a ocultam de novo. */
+export function unsuppressJob(id: string, actor = "user") {
+  const job = getJob(id);
+  if (!job) throw new Error("job.not_found");
+  if (!job.suppressed) throw new Error("job.not_suppressed");
+  const timestamp = now();
+  tx(() => {
+    db.prepare("UPDATE jobs SET suppressed=0,suppressed_rule_ids='[]',suppression_dismissed_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, id);
+    audit("job", id, "unsuppressed", { actor });
+  });
+  return getJob(id);
+}
+
+/** Chave "empresa + título normalizado + local"; sem local conhecido não há chave (evita fundir vagas distintas). */
+function jobDedupKey(title: unknown, company: unknown, location: unknown): string | null {
+  const companyPart = companyKey(String(company ?? ""));
+  const titlePart = normalizeComparableText(String(title ?? ""));
+  const locationPart = normalizeComparableText(String(location ?? ""));
+  if (!companyPart || !titlePart || !locationPart || ["nao informado", "unknown", "desconhecido"].includes(locationPart)) return null;
+  return `${companyPart}|${titlePart}|${locationPart}`;
+}
+
+/** Hash da descrição normalizada (com a empresa); descrições curtas demais não identificam a vaga. */
+function jobDescriptionHash(description: unknown, company: unknown): string | null {
+  const text = normalizeComparableText(String(description ?? ""));
+  const companyPart = companyKey(String(company ?? ""));
+  if (text.length < 200 || !companyPart) return null;
+  return createHash("sha256").update(`${companyPart}|${text}`).digest("hex");
+}
+
+/** Preenche as chaves de deduplicação das vagas gravadas antes delas existirem. */
+function backfillDedupKeysOnce() {
+  const rows = db.prepare("SELECT id,title,company,location,description FROM jobs WHERE dedup_key IS NULL AND description_hash IS NULL").all() as Record<string, unknown>[];
+  const update = db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?");
+  for (const row of rows) {
+    const dedupKey = jobDedupKey(row.title, row.company, row.location);
+    const descriptionHash = jobDescriptionHash(row.description, row.company);
+    if (dedupKey || descriptionHash) update.run(dedupKey, descriptionHash, String(row.id));
+  }
+}
+
+/**
+ * Dedup multi-chave entre portais (depois da identidade exata por id/URL canônica): mesma
+ * empresa + título normalizado + local, ou mesma descrição. Duas vagas da mesma fonte com
+ * ids de origem diferentes continuam distintas (são publicações diferentes do portal).
+ */
+function findDedupKeyMatch(projectId: string, incoming: { sourceId: string; sourceJobId: string | null; title: string; company: string; location: string | null; description: string | null }): { job: Job; reason: string } | null {
+  const keys: Array<[string, string | null, string]> = [
+    ["dedup_key", jobDedupKey(incoming.title, incoming.company, incoming.location), "same_company_title_location"],
+    ["description_hash", jobDescriptionHash(incoming.description, incoming.company), "same_description_hash"],
+  ];
+  for (const [column, value, reason] of keys) {
+    if (!value) continue;
+    const rows = db.prepare(`SELECT * FROM jobs WHERE project_id=? AND ${column}=? ORDER BY created_at LIMIT 10`).all(projectId, value) as Record<string, unknown>[];
+    for (const candidate of rows.map(mapJob)) {
+      const sameSource = candidate.source === incoming.sourceId;
+      if (sameSource && incoming.sourceJobId && candidate.source_job_id && candidate.source_job_id !== incoming.sourceJobId) continue;
+      return { job: candidate, reason };
+    }
+  }
+  return null;
+}
+
+/**
  * A source reporting the vacancy as closed is authoritative for the opening fields: the job
  * is closed (opening_status/closed_at) and, while no application is under way, expired via the workflow.
  */
@@ -1537,7 +1652,136 @@ function findFuzzyMatches(index: FuzzyIndex, incoming: FuzzyJobCandidate, limit 
   return matches;
 }
 
-export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego") {
+type IngestContext = {
+  projectId: string; sourceId: string; roundId: string | null; agentId: string | null;
+  // Fuzzy (#24): índice por empresa montado antes do lock, mais as vagas novas do próprio lote.
+  fuzzyIndex: FuzzyIndex; batchFuzzyIndex: FuzzyIndex; precomputed?: FuzzyMatch[];
+};
+
+/**
+ * Um item de fonte (schema de validateSourceBatch) passa pela identidade exata, pela dedup
+ * multi-chave e pela fuzzy; vaga nova é criada, vaga revista vira ocorrência + evidência.
+ * Roda dentro da transação do chamador (ingestRoundBatch / ingestSourceItems).
+ */
+function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
+  const { projectId, sourceId, roundId, agentId } = ctx;
+  const sourceUrl = canonicalizeJobUrl(String(item.source_url ?? item.job_url));
+  const jobUrl = canonicalizeJobUrl(String(item.job_url));
+  // Sem ID nativo informado, usa o ID que a URL do portal expõe ("linkedin:123", "gupy:456"...).
+  const sourceJobId = item.source_job_id == null ? extractSourceJobId(jobUrl) : String(item.source_job_id);
+  // Exact identity (domain.compareExactIdentity): same source job id within the source, or the
+  // same canonical URL *and* the same normalized company. A URL alone never merges employers.
+  const incoming = { sourceId, sourceJobId, sourceUrl: jobUrl, company: String(item.company) };
+  let existingJob: Job | null = null;
+  let reason = "different_identity";
+  const occurrences = [
+    ...(sourceJobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND source_id=? AND source_job_id=? ORDER BY observed_at DESC LIMIT 5").all(projectId, sourceId, sourceJobId) as Record<string, unknown>[] : []),
+    ...(db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND canonical_url=? ORDER BY observed_at DESC LIMIT 20").all(projectId, jobUrl) as Record<string, unknown>[]),
+  ];
+  for (const occurrence of occurrences) {
+    const candidate = getJob(String(occurrence.job_id));
+    if (!candidate) continue;
+    const decision = compareExactIdentity(incoming, {
+      sourceId: String(occurrence.source_id), sourceJobId: occurrence.source_job_id == null ? null : String(occurrence.source_job_id),
+      sourceUrl: String(occurrence.canonical_url), company: candidate.company,
+    });
+    if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
+  }
+  if (!existingJob) {
+    for (const candidate of (db.prepare("SELECT * FROM jobs WHERE project_id=? AND (canonical_url=? OR job_url=?) ORDER BY created_at LIMIT 10").all(projectId, jobUrl, jobUrl) as Record<string, unknown>[]).map(mapJob)) {
+      const decision = compareExactIdentity(incoming, { sourceId: candidate.source, sourceJobId: candidate.source_job_id ?? null, sourceUrl: candidate.job_url || candidate.canonical_url || jobUrl, company: candidate.company });
+      if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
+    }
+  }
+  if (!existingJob) {
+    // A mesma vaga vista em outro portal (outra URL): empresa + título + local, ou descrição.
+    const keyed = findDedupKeyMatch(projectId, { sourceId, sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? null : String(item.location_text), description: item.description == null ? null : String(item.description) });
+    if (keyed) { existingJob = keyed.job; reason = keyed.reason; }
+  }
+  const multiKeyMatch = ["same_company_title_location", "same_description_hash"].includes(reason);
+  let action = existingJob ? "sighting" : "new";
+  const jobId = existingJob?.id ?? idFor(`canonical-job|${projectId}|${jobUrl}|${companyKey(String(item.company))}`);
+  let fuzzy: FuzzyMatch | null = null;
+  if (!existingJob) {
+    // Candidatos pré-calculados; dentro do lock só confirma que a candidata ainda existe.
+    fuzzy = [...(ctx.precomputed ?? findFuzzyMatches(ctx.fuzzyIndex, fuzzyFromItem(item))), ...findFuzzyMatches(ctx.batchFuzzyIndex, fuzzyFromItem(item))]
+      .find((match) => match.id !== jobId && db.prepare("SELECT 1 FROM jobs WHERE id=?").get(match.id)) ?? null;
+    if (fuzzy) action = "possible_duplicate";
+  }
+  const jobInput: any = {
+    id: jobId, project_id: projectId, source_job_id: sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? "Não informado" : String(item.location_text),
+    work_model: item.work_model == null || item.work_model === "unknown" ? "Não informado" : String(item.work_model), seniority: item.seniority == null ? "Não informado" : String(item.seniority),
+    description: item.description == null ? "" : String(item.description), benefits: Array.isArray(item.benefits) ? item.benefits.map(String).join("\n") : String(item.benefits ?? ""),
+    requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
+    additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
+    application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at)
+  };
+  // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
+  const job = existingJob ?? upsertJob(jobInput);
+  if (!job) throw new Error("job.persist.failed");
+  if (!existingJob) addToFuzzyIndex(ctx.batchFuzzyIndex, job.id, fuzzyFromItem(item));
+  // One occurrence per (round, source, item): the same item repeated across batches of a
+  // round is the same sighting, so the batch hash is not part of the identity. Fora de
+  // rodada (descoberta avulsa por agente), cada vez que a vaga é revista é uma nova ocorrência.
+  const occurrenceId = idFor(`occurrence|${projectId}|${roundId ?? `direct:${randomUUID()}`}|${sourceId}|${sourceJobId ?? jobUrl}`);
+  db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at,opening_status)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,opening_status=excluded.opening_status,payload_hash=excluded.payload_hash`)
+    .run(occurrenceId, projectId, job.id, roundId, sourceId, sourceJobId, String(item.source_url ?? item.job_url), jobUrl, jobPayloadHash(item), now(), String(item.opening_status ?? "unknown"));
+  // Uma sighting é reavaliada contra as regras atuais (a vaga nova já passou por upsertJob);
+  // applySuppression é idempotente: cada vaga conta uma única vez por regra.
+  const suppressed = applySuppression(job.id);
+  if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId ?? undefined);
+  for (const [field, value] of Object.entries(jobInput)) {
+    if (["id", "project_id", "source_job_id", "source"].includes(field) || value == null || value === "") continue;
+    // Vista em outro portal (dedup multi-chave), a URL diferente fica na ocorrência, não vira conflito.
+    if (existingJob && multiKeyMatch && ["source_url", "job_url", "linkedin_post_url", "application_url"].includes(field)) continue;
+    // A closure reported by the source is applied by closeJobFromSource, not parked as a conflict.
+    if (field === "opening_status" && value === "closed") continue;
+    const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl, confidence: 0.8, origin: "agent", runId: roundId ?? undefined, agentId: agentId ?? undefined, sourceId });
+    if (!existingJob) {
+      selectEvidence(job.id, field, evidence.id, agentId ?? sourceId, evidence.timestamp);
+      continue;
+    }
+    const currentValue = (existingJob as unknown as Record<string, unknown>)[field];
+    const sameValue = JSON.stringify(currentValue ?? null) === JSON.stringify(value ?? null);
+    if (sameValue) {
+      db.prepare(`INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at,superseded_at)
+        VALUES (?,?,?,?,?,?)`).run(job.id, field, evidence.id, sourceId, evidence.timestamp, evidence.timestamp);
+      continue;
+    }
+    let selected = db.prepare(`SELECT e.id,e.origin FROM job_field_provenance p JOIN evidence_records e ON e.id=p.evidence_id
+      WHERE p.job_id=? AND p.field_path=? AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id, field) as { id: string; origin: string } | undefined;
+    if (!selected) {
+      const legacy = addEvidence({ projectId, jobId: job.id, field, value: currentValue, sourceUrl: "legacy://job", confidence: 0.75, origin: "legacy" });
+      selectEvidence(job.id, field, legacy.id, "migration", legacy.timestamp);
+      selected = { id: legacy.id, origin: "legacy" };
+    }
+    db.prepare(`INSERT OR IGNORE INTO field_conflicts (id,job_id,field_path,current_evidence_id,candidate_evidence_id,status,reason,created_at)
+      VALUES (?,?,?,?,?,'pending',?,?)`).run(idFor(`conflict|${job.id}|${field}|${evidence.id}`), job.id, field, selected.id, evidence.id,
+        selected.origin === "human" ? "human_value_protected" : "source_disagreement", evidence.timestamp);
+  }
+  if (fuzzy && job.id !== fuzzy.id) {
+    db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(idFor(`possible|${job.id}|${fuzzy.id}`), projectId, job.id, fuzzy.id, fuzzy.decision.similarity, JSON.stringify(fuzzy.decision.reasons), now());
+  }
+  return { source_job_id: sourceJobId, job_id: job.id, action, reason, suppressed: suppressed.length > 0, occurrence_id: occurrenceId };
+}
+
+/**
+ * Caminho único de ingestão fora de rodada (conectores, descoberta por agente): mesma validação,
+ * identidade, dedup multi-chave e supressão de ingestRoundBatch, sem checkpoint de rodada.
+ * Cada item revisto vira nova ocorrência da vaga canônica.
+ */
+export function ingestSourceItems(sourceId: string, items: unknown[], options: { projectId?: string; agentId?: string | null } = {}) {
+  const projectId = options.projectId ?? "busca-emprego";
+  const { items: validated } = validateSourceBatch(sourceId, { source_id: sourceId, items });
+  const fuzzyIndex = buildFuzzyIndex(projectId);
+  const batchFuzzyIndex: FuzzyIndex = new Map();
+  return tx(() => validated.map((item) => ingestSourceItem(item, { projectId, sourceId, roundId: null, agentId: options.agentId ?? null, fuzzyIndex, batchFuzzyIndex })));
+}
+
+export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego", agentId: string | null = null) {
   const round = getRound(roundId, projectId);
   if (!round) throw new Error("round.not_found");
   const roundSource = (round.sources as Record<string, unknown>[]).find((source) => source.source_id === sourceId);
@@ -1570,104 +1814,7 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   db.prepare("DELETE FROM round_checkpoints WHERE round_id=? AND source_id=? AND payload_hash=? AND status<>'completed'").run(roundId, sourceId, payloadHash);
   db.prepare(`INSERT INTO round_checkpoints (id,round_id,source_id,batch_number,cursor,payload_hash,status,created_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(checkpointId, roundId, sourceId, batchNumber, nextCursor, payloadHash, "started", now());
-  for (const item of items) {
-    const sourceUrl = canonicalizeJobUrl(String(item.source_url ?? item.job_url));
-    const jobUrl = canonicalizeJobUrl(String(item.job_url));
-    // Sem ID nativo informado, usa o ID que a URL do portal expõe ("linkedin:123", "gupy:456"...).
-    const sourceJobId = item.source_job_id == null ? extractSourceJobId(jobUrl) : String(item.source_job_id);
-    // Exact identity (domain.compareExactIdentity): same source job id within the source, or the
-    // same canonical URL *and* the same normalized company. A URL alone never merges employers.
-    const incoming = { sourceId, sourceJobId, sourceUrl: jobUrl, company: String(item.company) };
-    let existingJob: Job | null = null;
-    let reason = "different_identity";
-    const occurrences = [
-      ...(sourceJobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND source_id=? AND source_job_id=? ORDER BY observed_at DESC LIMIT 5").all(projectId, sourceId, sourceJobId) as Record<string, unknown>[] : []),
-      ...(db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND canonical_url=? ORDER BY observed_at DESC LIMIT 20").all(projectId, jobUrl) as Record<string, unknown>[]),
-    ];
-    for (const occurrence of occurrences) {
-      const candidate = getJob(String(occurrence.job_id));
-      if (!candidate) continue;
-      const decision = compareExactIdentity(incoming, {
-        sourceId: String(occurrence.source_id), sourceJobId: occurrence.source_job_id == null ? null : String(occurrence.source_job_id),
-        sourceUrl: String(occurrence.canonical_url), company: candidate.company,
-      });
-      if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
-    }
-    if (!existingJob) {
-      for (const candidate of (db.prepare("SELECT * FROM jobs WHERE project_id=? AND (canonical_url=? OR job_url=?) ORDER BY created_at LIMIT 10").all(projectId, jobUrl, jobUrl) as Record<string, unknown>[]).map(mapJob)) {
-        const decision = compareExactIdentity(incoming, { sourceId: candidate.source, sourceJobId: candidate.source_job_id ?? null, sourceUrl: candidate.job_url || candidate.canonical_url || jobUrl, company: candidate.company });
-        if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
-      }
-    }
-    let action = existingJob ? "sighting" : "new";
-    const jobId = existingJob?.id ?? idFor(`canonical-job|${projectId}|${jobUrl}|${companyKey(String(item.company))}`);
-    let fuzzy: FuzzyMatch | null = null;
-    if (!existingJob) {
-      // Candidatos pré-calculados; dentro do lock só confirma que a candidata ainda existe.
-      fuzzy = [...(fuzzyMatches.get(item) ?? []), ...findFuzzyMatches(batchFuzzyIndex, fuzzyFromItem(item))]
-        .find((match) => match.id !== jobId && db.prepare("SELECT 1 FROM jobs WHERE id=?").get(match.id)) ?? null;
-      if (fuzzy) action = "possible_duplicate";
-    }
-    const jobInput: any = {
-      id: jobId, project_id: projectId, source_job_id: sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? "Não informado" : String(item.location_text),
-      work_model: item.work_model == null || item.work_model === "unknown" ? "Não informado" : String(item.work_model), seniority: item.seniority == null ? "Não informado" : String(item.seniority),
-      description: item.description == null ? "" : String(item.description), benefits: Array.isArray(item.benefits) ? item.benefits.map(String).join("\n") : String(item.benefits ?? ""),
-      requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
-      additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
-      application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at)
-    };
-    // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
-    const job = existingJob ?? upsertJob(jobInput);
-    if (!job) throw new Error("job.persist.failed");
-    if (!existingJob) addToFuzzyIndex(batchFuzzyIndex, job.id, fuzzyFromItem(item));
-    // One occurrence per (round, source, item): the same item repeated across batches of a
-    // round is the same sighting, so the batch hash is not part of the identity.
-    const occurrenceId = idFor(`occurrence|${projectId}|${roundId}|${sourceId}|${sourceJobId ?? jobUrl}`);
-    db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at,opening_status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,opening_status=excluded.opening_status,payload_hash=excluded.payload_hash`)
-      .run(occurrenceId, projectId, job.id, roundId, sourceId, sourceJobId, String(item.source_url ?? item.job_url), jobUrl, jobPayloadHash(item), now(), String(item.opening_status ?? "unknown"));
-    const wasSuppressed = Boolean(existingJob?.suppressed);
-    const suppressed = activeSuppression(job, projectId);
-    if (suppressed.length && !wasSuppressed) {
-      // Count each suppressed vacancy once, not once per repeated sighting.
-      db.prepare("UPDATE jobs SET suppressed=1 WHERE id=?").run(job.id);
-      for (const ruleId of suppressed) db.prepare("UPDATE preference_rules SET suppressed_count=suppressed_count+1,updated_at=? WHERE id=?").run(now(), ruleId);
-    }
-    if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId);
-    for (const [field, value] of Object.entries(jobInput)) {
-      if (["id", "project_id", "source_job_id", "source"].includes(field) || value == null || value === "") continue;
-      // A closure reported by the source is applied by closeJobFromSource, not parked as a conflict.
-      if (field === "opening_status" && value === "closed") continue;
-      const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl, confidence: 0.8, origin: "agent", runId: roundId, sourceId });
-      if (!existingJob) {
-        selectEvidence(job.id, field, evidence.id, sourceId, evidence.timestamp);
-        continue;
-      }
-      const currentValue = (existingJob as unknown as Record<string, unknown>)[field];
-      const sameValue = JSON.stringify(currentValue ?? null) === JSON.stringify(value ?? null);
-      if (sameValue) {
-        db.prepare(`INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at,superseded_at)
-          VALUES (?,?,?,?,?,?)`).run(job.id, field, evidence.id, sourceId, evidence.timestamp, evidence.timestamp);
-        continue;
-      }
-      let selected = db.prepare(`SELECT e.id,e.origin FROM job_field_provenance p JOIN evidence_records e ON e.id=p.evidence_id
-        WHERE p.job_id=? AND p.field_path=? AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id, field) as { id: string; origin: string } | undefined;
-      if (!selected) {
-        const legacy = addEvidence({ projectId, jobId: job.id, field, value: currentValue, sourceUrl: "legacy://job", confidence: 0.75, origin: "legacy" });
-        selectEvidence(job.id, field, legacy.id, "migration", legacy.timestamp);
-        selected = { id: legacy.id, origin: "legacy" };
-      }
-      db.prepare(`INSERT OR IGNORE INTO field_conflicts (id,job_id,field_path,current_evidence_id,candidate_evidence_id,status,reason,created_at)
-        VALUES (?,?,?,?,?,'pending',?,?)`).run(idFor(`conflict|${job.id}|${field}|${evidence.id}`), job.id, field, selected.id, evidence.id,
-          selected.origin === "human" ? "human_value_protected" : "source_disagreement", evidence.timestamp);
-    }
-    if (fuzzy && job.id !== fuzzy.id) {
-      db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
-        VALUES (?,?,?,?,?,?,?)`).run(idFor(`possible|${job.id}|${fuzzy.id}`), projectId, job.id, fuzzy.id, fuzzy.decision.similarity, JSON.stringify(fuzzy.decision.reasons), now());
-    }
-    results.push({ source_job_id: sourceJobId, job_id: job.id, action, reason, suppressed: suppressed.length > 0 });
-  }
+  for (const item of items) results.push(ingestSourceItem(item, { projectId, sourceId, roundId, agentId, fuzzyIndex, batchFuzzyIndex, precomputed: fuzzyMatches.get(item) }));
   const timestamp = now();
   const sourceStatus = nextCursor ? "running" : "completed";
   db.prepare("UPDATE round_checkpoints SET status='completed' WHERE id=? AND status='started'").run(checkpointId);
@@ -2824,6 +2971,10 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
 export function listPreferenceState(projectId = "busca-emprego") {
   const rules = (db.prepare("SELECT * FROM preference_rules WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[])
     .map((row) => ({ ...row, source_feedback_ids: parseJsonArray(row.source_feedback_ids), match_json: JSON.parse(String(row.match_json)) }));
+  // Contagem viva (o que de fato está oculto agora); suppressed_count guarda o total histórico.
+  const hidden = new Map<string, number>();
+  for (const job of listSuppressedJobs(projectId)) for (const ruleId of job.rule_ids) hidden.set(ruleId, (hidden.get(ruleId) ?? 0) + 1);
+  for (const rule of rules as Record<string, unknown>[]) rule.hidden_count = hidden.get(String(rule.id)) ?? 0;
   const values = db.prepare("SELECT * FROM preference_values WHERE project_id=? ORDER BY facet_key,normalized_value").all(projectId);
   const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString();
   const suggestions = db.prepare(`SELECT detail_key, COUNT(DISTINCT job_id) AS evidence_count
@@ -2902,9 +3053,12 @@ export function restoreJob(id: string, actor = "user") {
 function refreshSuppression(projectId: string) {
   const rules = activeSuppressionRules(projectId);
   const suppressed = (db.prepare("SELECT * FROM jobs WHERE project_id=? AND suppressed=1").all(projectId) as Record<string, unknown>[]).map(mapJob);
-  const clear = db.prepare("UPDATE jobs SET suppressed=0 WHERE id=?");
+  const clear = db.prepare("UPDATE jobs SET suppressed=0,suppressed_rule_ids='[]' WHERE id=?");
+  const keep = db.prepare("UPDATE jobs SET suppressed_rule_ids=? WHERE id=?");
   for (const job of suppressed) {
-    if (!activeSuppression(job, projectId, rules).length) clear.run(job.id);
+    const matched = activeSuppression(job, projectId, rules);
+    if (!matched.length) clear.run(job.id);
+    else keep.run(JSON.stringify(matched), job.id);
   }
 }
 
@@ -3442,28 +3596,42 @@ export function deleteSourceConfig(id: string, actor: string, projectId = "busca
   return { deleted: true };
 }
 
-export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+/** Converte a vaga descrita por um agente no item de fonte de validateSourceBatch (campos desconhecidos são ignorados). */
+function agentJobItem(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
+  const raw = input as unknown as Record<string, unknown>;
+  const item: Record<string, unknown> = {
+    source_id: input.source, title: input.title, company: input.company, source_url: input.source_url,
+    job_url: input.job_url || input.linkedin_post_url || input.application_url || input.source_url,
+  };
+  if (raw.location != null) item.location_text = raw.location;
+  for (const field of ["source_job_id", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period", "posted_at", "deadline_at", "opening_status", "linkedin_post_url", "application_url"]) {
+    if (raw[field] != null && raw[field] !== "") item[field] = raw[field];
+  }
+  return item;
+}
+
+/**
+ * Descoberta por agente (radar_discover_job / webhook job.discovered) pelo mesmo caminho da
+ * ingestão em lote: identidade canônica, dedup multi-chave, ocorrência e supressão. Rever uma
+ * vaga existente registra nova ocorrência e devolve a vaga canônica (sem sobrescrevê-la).
+ */
+export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
   const agent = publishedAgentConfig(agentId, projectId);
   if (!agent || !agent.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
   if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
+  if (!String(input.source ?? "").trim() || !String(input.title ?? "").trim() || !String(input.company ?? "").trim()) throw new Error("job.required_fields.invalid");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
-  const identityUrl = input.job_url || input.linkedin_post_url || input.application_url || input.source_url;
-  const canonicalIdentityUrl = identityUrl ? canonicalizeJobUrl(identityUrl) : "";
-  const candidateId = input.id || idFor(`${input.source}|${canonicalIdentityUrl}|${input.title}|${input.company}`);
-  // Job, evidence and provenance are created together or not at all.
+  // Job, evidence, occurrence and provenance are created together or not at all.
   return tx(() => {
-    if (getJob(candidateId)) throw new Error("agent.jobs.create_existing.forbidden");
-    const job = upsertJob(input);
-    if (job) {
-      for (const [field, value] of Object.entries(input)) {
-        if (field === "id" || value == null || value === "") continue;
-        const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl: job.source_url, confidence: 0.8, origin: "agent", agentId, sourceId: input.source });
-        selectEvidence(job.id, field, evidence.id, agentId, evidence.timestamp);
-      }
-    }
-    audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
-    return job;
+    const [result] = ingestSourceItems(input.source, [agentJobItem(input)], { projectId, agentId });
+    if (!result) throw new Error("job.persist.failed");
+    audit("job", result.job_id, result.action === "sighting" ? "sighted_by_agent" : "created_by_agent", { agent_id: agentId, action: result.action, reason: result.reason });
+    return { ...result, job: getJob(result.job_id) };
   });
+}
+
+export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+  return ingestJobFromAgent(agentId, input, projectId).job;
 }
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
