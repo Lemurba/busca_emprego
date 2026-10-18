@@ -397,7 +397,7 @@ const routes: Route[] = [
 ];
 
 // Coleta determinística (issue #16): empresas curadas por conector e fila de enriquecimento por LLM.
-routes.push(...connectorRoutes(actor, projectId).map((route): Route => ({ method: route.method, pattern: r(route.path), handler: ({ res, params, body }) => ok(res, route.status, route.handler({ params, body })) })));
+routes.push(...connectorRoutes(projectId).map((route): Route => ({ method: route.method, pattern: r(route.path), handler: ({ actor, res, params, body }) => ok(res, route.status, route.handler({ actor, params, body })) })));
 
 function matchRoute(method: string, pathname: string): { route: Route; params: string[] } | null {
   for (const route of routes) {

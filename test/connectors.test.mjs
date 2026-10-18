@@ -226,7 +226,7 @@ try {
   }
 
   // --- Lista curada (store + rotas) ---------------------------------------------------------
-  const routes = Object.fromEntries(connectorRoutes("tester", "busca-emprego").map((route) => [`${route.method} ${route.path}`, route.handler]));
+  const routes = Object.fromEntries(connectorRoutes("busca-emprego").map((route) => [`${route.method} ${route.path}`, (ctx) => route.handler({ actor: "tester", ...ctx })]));
   {
     const created = routes["POST /api/connectors/companies"]({ params: [], body: { connector: "greenhouse", slug: "Exemplo", name: "Exemplo Tech" } });
     assert.equal(created.slug, "exemplo", "slug do Greenhouse é normalizado para minúsculas");
