@@ -162,7 +162,7 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/profiles"), handler: ({ res }) => ok(res, 200, listProfiles(projectId)) },
   { method: "POST", pattern: r("/api/profiles"), handler: ({ res, body }) => ok(res, 201, createProfessionalProfile(body, actor, projectId)) },
   { method: "GET", pattern: r("/api/profile/active"), handler: ({ res }) => ok(res, 200, getProfile(listProfiles(projectId).find((profile) => profile.status === "confirmed")?.id ?? "", projectId)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor)) },
+  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor, params[0]!)) },
   { method: "GET", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params }) => ok(res, 200, listProfileFacts(params[0]!)) },
   { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params, body }) => ok(res, 201, addProfileFact(params[0]!, body, actor)) },
   { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ res, params }) => ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)) },

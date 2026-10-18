@@ -1897,10 +1897,11 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   return mapProfileFact(db.prepare("SELECT * FROM profile_facts WHERE id=?").get(id) as Record<string, unknown>);
 }
 
-export function reviewProfileFact(id: string, state: string, actor = "user") {
+/** Revisa um fato; com `profileId`, o fato precisa pertencer a esse perfil (senão, não encontrado). */
+export function reviewProfileFact(id: string, state: string, actor = "user", profileId?: string) {
   if (!["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
   const row = db.prepare("SELECT f.*,p.status AS profile_status FROM profile_facts f JOIN professional_profiles p ON p.id=f.profile_id WHERE f.id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row) throw new Error("profile.fact.not_found");
+  if (!row || (profileId !== undefined && row.profile_id !== profileId)) throw new Error("profile.fact.not_found");
   if (row.profile_status !== "draft") throw new Error("profile.draft_required");
   if (state === "confirmed" && row.origin !== "user" && row.evidence_page == null && !String(row.evidence_excerpt ?? "").trim()) throw new Error("profile.fact.evidence.required");
   db.prepare("UPDATE profile_facts SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
@@ -2037,6 +2038,7 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
 }
 
 export function updateResume(id: string, patch: Partial<Resume>) {
+  if (!db.prepare("SELECT id FROM resumes WHERE id = ?").get(id)) throw new Error("resume.not_found");
   if (patch.status === "approved") throw new Error("A aprovação exige confirmação humana explícita.");
   const allowed = ["base_resume_id", "title", "status", "content", "keywords", "changes"] as const;
   if (patch.base_resume_id && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(patch.base_resume_id)) throw new Error("Currículo-base selecionado não encontrado.");
@@ -2357,7 +2359,7 @@ export function updateApplication(id: string, patch: Partial<Application>) {
   const allowed = ["resume_id", "status", "current_step", "submitted_at", "notes", "evidence_ref"] as const;
   const normalized = { ...patch } as Partial<Application>;
   const current = listApplications().find((application) => application.id === id);
-  if (!current) return null;
+  if (!current) throw new Error("application.not_found");
   // Re-sending the current status (e.g. a form that only edits notes) is not a transition.
   if (normalized.status !== undefined && normalized.status === current.status) delete normalized.status;
   const validStatuses = ["queued", "in_progress", "needs_review", "submitted", "accepted", "rejected", "failed"];
