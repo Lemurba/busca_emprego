@@ -673,3 +673,11 @@ body.auth-required .app-shell, body.auth-required .mobile-tabbar { display: none
 @media (hover: none) {
   .chart-control[data-tooltip]::after { display: none; }
 }
+
+/* #34 — score explicável, cobertura de requisitos, teste de leitura e eliminatórios */
+.notice.danger { border-color: var(--red-line); color: var(--red-fg); background: var(--red-bg); }
+.signal-table { width: 100%; border-collapse: collapse; font-size: var(--type-sm); }
+.signal-table th, .signal-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.signal-table td.num, .signal-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.signal-table small { display: block; color: var(--muted); }
+.parser-view { max-height: 320px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--type-xs); white-space: pre-wrap; overflow-wrap: anywhere; }

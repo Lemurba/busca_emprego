@@ -261,8 +261,8 @@ const routes: Route[] = [
     attachment(res, file.mimeType, file.fileName, file.data);
   } },
   // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
-  { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, getResumeParseCheck(params[0]!)) },
-  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params }) => ok(res, 200, await runResumeParseCheck(params[0]!)) },
+  { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params }) => ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }) },
   { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: async ({ res, params, body }) => {
     const input = validateBody(schemas.resumeApprove, body);
     await ensureResumeParseCheck(params[0]!);

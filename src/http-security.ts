@@ -4,6 +4,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { isWorkflowError } from "./workflow.js";
+import { DomainValidationError } from "./domain.js";
 
 export class HttpError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string, public readonly details?: unknown) {
@@ -240,6 +241,10 @@ export type ErrorResponse = { status: number; body: { error: string; message: st
 export function errorResponse(error: unknown): ErrorResponse & { internal: boolean } {
   if (error instanceof HttpError) {
     return { status: error.status, body: { error: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) }, internal: false };
+  }
+  // Regras puras do domínio (ex.: critério de score inválido) são erro do cliente, não 500.
+  if (error instanceof DomainValidationError) {
+    return { status: 422, body: { error: `validation.${error.field}`, message: error.message }, internal: false };
   }
   if (isWorkflowError(error)) {
     return { status: error.httpStatus, body: { error: error.code, message: error.message, details: error.details }, internal: false };
