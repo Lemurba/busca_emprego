@@ -157,6 +157,16 @@ async function readCapped(response: Response, maxBytes: number): Promise<{ body:
   return { body: new TextDecoder("utf-8", { fatal: false }).decode(buffer), truncated };
 }
 
+/** A resolução DNS também respeita o tempo total da verificação. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal, url: string): Promise<T> {
+  if (signal.aborted) return Promise.reject(new LivenessFetchError("timeout", "Tempo esgotado.", url));
+  return new Promise<T>((resolvePromise, reject) => {
+    const onAbort = () => reject(new LivenessFetchError("timeout", "Tempo esgotado.", url));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolvePromise, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 /** GET com todas as travas; lança LivenessFetchError (nunca devolve conteúdo de destino recusado). */
 export async function safeGet(input: string, options: SafeGetOptions): Promise<SafeResponse> {
   const controller = new AbortController();
@@ -167,7 +177,7 @@ export async function safeGet(input: string, options: SafeGetOptions): Promise<S
   try {
     for (let hop = 0; ; hop += 1) {
       const url = assertSafeUrl(current);
-      await assertPublicResolution(url.hostname, options.lookup);
+      await untilAborted(assertPublicResolution(url.hostname, options.lookup), controller.signal, url.href);
       await limiter.wait(url.hostname);
       if (controller.signal.aborted) throw new LivenessFetchError("timeout", "Tempo esgotado.", url.href);
       let response: Response;
