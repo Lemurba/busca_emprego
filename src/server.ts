@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -81,7 +82,7 @@ function isInternalRequest(method: string | undefined, pathname: string) {
   return method === "GET" && pathname === "/api/authorized-applications"
     || method === "POST" && (
       pathname === "/api/agent-events"
-      || /^\/api\/applications\/[^/]+\/(?:claim|questions|submit|fail)$/u.test(pathname)
+      || /^\/api\/applications\/[^/]+\/(?:claim|questions|submit|fail|final-confirmation|final-confirmation\/poll)$/u.test(pathname)
       || /^\/api\/rounds\/[^/]+\/(?:batch|status)$/u.test(pathname)
       || /^\/api\/jobs\/[^/]+\/score$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
@@ -91,12 +92,27 @@ function isInternalRequest(method: string | undefined, pathname: string) {
 function isAutomationRequest(method: string | undefined, pathname: string) {
   return method === "GET" && pathname === "/api/authorized-applications"
     || method === "POST" && (
-      /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|questions|submit|fail)$/u.test(pathname)
+      /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|questions|submit|fail|final-confirmation|final-confirmation\/poll|confirm-final)$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
     );
 }
 
+/**
+ * #32 — decisões humanas: só a sessão do dashboard (o token de serviço dos agentes não serve).
+ * Autorizar (AUTORIZO), confirmar/cancelar o envio final (ENVIAR), mudar o kill-switch/limites
+ * e ver a captura da confirmação final.
+ */
+function isHumanOnlyRequest(method: string | undefined, pathname: string) {
+  return method === "PUT" && pathname === "/api/settings/automation"
+    || method === "POST" && /^\/api\/applications\/[^/]+\/(?:authorize-auto|confirm-final|cancel-final)$/u.test(pathname)
+    || method === "GET" && /^\/api\/applications\/[^/]+\/evidence\/[^/]+$/u.test(pathname);
+}
+
 function assertAuthenticated(req: IncomingMessage, pathname: string) {
+  if (isHumanOnlyRequest(req.method, pathname)) {
+    if (hasSession(req)) return;
+    throw new HttpError(hasServiceToken(req) ? 403 : 401, hasServiceToken(req) ? "session_required" : "unauthorized", hasServiceToken(req) ? "Esta ação exige a sessão do dashboard (decisão humana); o token de serviço não serve." : "Sessão ausente ou expirada. Abra o link de acesso enviado pelo Hermes.");
+  }
   if (isInternalRequest(req.method, pathname)) {
     if (!serviceToken()) throw new HttpError(503, "internal_token_not_configured", "O token de serviço interno não está configurado no servidor.");
     if (!hasServiceToken(req)) throw new HttpError(401, "internal_token_required", "Esta rota aceita somente o token de serviço interno.");
@@ -148,6 +164,8 @@ function attachment(res: ServerResponse, mimeType: string, fileName: string, dat
 }
 
 const S = "([^/]+)";
+/** Captura PNG de até 2 MB em base64 (~2,8 MB) + resumo dos campos. */
+const FINAL_CONFIRMATION_BODY_LIMIT = 4 * 1024 * 1024;
 const r = (path: string) => new RegExp(`^${path.replaceAll("{id}", S)}$`, "u");
 
 const routes: Route[] = [
@@ -292,7 +310,18 @@ const routes: Route[] = [
   } },
   { method: "POST", pattern: r("/api/applications/{id}/submit"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationSubmit, body);
-    ok(res, 200, submitAuthorizedApplication(params[0]!, { worker_id: input.worker_id, evidence_ref: input.evidence_ref, ...(input.observed_url ? { observed_url: input.observed_url } : {}) }));
+    ok(res, 200, submitAuthorizedApplication(params[0]!, { worker_id: input.worker_id, evidence_ref: input.evidence_ref, observed_url: input.observed_url, submit_token: input.submit_token }));
+  } },
+  // #32 — dry-run: o executor para antes do clique final e pede a 2ª confirmação humana.
+  { method: "POST", pattern: r("/api/applications/{id}/final-confirmation"), bodyLimit: FINAL_CONFIRMATION_BODY_LIMIT, handler: ({ res, params, body }) => ok(res, 200, requestFinalConfirmation(params[0]!, validateBody(schemas.applicationFinalConfirmation, body))) },
+  { method: "POST", pattern: r("/api/applications/{id}/final-confirmation/poll"), handler: ({ res, params, body }) => ok(res, 200, pollFinalConfirmation(params[0]!, validateBody(schemas.applicationFinalPoll, body).worker_id)) },
+  { method: "POST", pattern: r("/api/applications/{id}/confirm-final"), handler: ({ res, params, body }) => ok(res, 200, confirmFinalSubmission(params[0]!, validateBody(schemas.applicationConfirmFinal, body).confirmation, actor)) },
+  { method: "POST", pattern: r("/api/applications/{id}/cancel-final"), handler: ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, cancelFinalConfirmation(params[0]!, actor)); } },
+  { method: "GET", pattern: r("/api/applications/{id}/evidence/{id}"), handler: ({ res, params }) => {
+    const evidence = getApplicationEvidence(params[0]!, params[1]!);
+    if (!evidence) throw notFound("Evidência não encontrada.");
+    res.writeHead(200, { "content-type": evidence.mime, "content-length": evidence.data.length, "content-disposition": "inline", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    res.end(evidence.data);
   } },
   { method: "POST", pattern: r("/api/applications/{id}/fail"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationFail, body);
@@ -306,6 +335,10 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/applications/{id}/revoke-auto"), handler: ({ res, params }) => ok(res, 200, revokeAutoApplication(params[0]!)) },
   { method: "POST", pattern: r("/api/applications/{id}/questions"), handler: ({ res, params, body }) => ok(res, 201, createHumanQuestion(params[0]!, body)) },
   { method: "PATCH", pattern: r("/api/applications/{id}"), handler: ({ res, params, body }) => ok(res, 200, updateApplication(params[0]!, validateBody(schemas.applicationPatch, body) as never)) },
+
+  // #32 — kill-switch, limite diário e allowlist de ATS (mudança só pela sessão do dashboard).
+  { method: "GET", pattern: r("/api/settings/automation"), handler: ({ res }) => ok(res, 200, automationOverview()) },
+  { method: "PUT", pattern: r("/api/settings/automation"), handler: ({ res, body }) => ok(res, 200, updateAutomationSettings(validateBody(schemas.automationSettings, body), actor)) },
 
   // Preferências e perguntas humanas
   { method: "GET", pattern: r("/api/preferences"), handler: ({ res }) => ok(res, 200, listPreferenceState(projectId)) },

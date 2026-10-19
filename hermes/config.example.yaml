@@ -23,8 +23,9 @@ mcp_servers:
       RADAR_ENVIRONMENT: production
       TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
       TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
-      # Gate da candidatura automática: sem "true" a fila, claim/verify/submit/fail e as
-      # perguntas humanas respondem automation_disabled.
+      # Gate da candidatura automática: sem "true" a fila, claim/verify, confirmação final,
+      # submit/fail e as perguntas humanas respondem automation_disabled. É o teto: o
+      # kill-switch do painel (settings no SQLite) pausa tudo mesmo com "true".
       RADAR_AUTO_APPLICATION_ENABLED: "${env:RADAR_AUTO_APPLICATION_ENABLED}"
     # untrusted: toda ferramenta sem `readOnlyHint: true` pede aprovação antes de rodar e
     # falha fechada onde ninguém pode aprovar (cron, execução desassistida).
@@ -49,6 +50,8 @@ mcp_servers:
         - radar_propose_agent_prompt
         - radar_record_score
         - radar_claim_application
+        - radar_request_final_confirmation
+        - radar_get_final_confirmation
         - radar_submit_application
         - radar_fail_application
         - radar_ask_human

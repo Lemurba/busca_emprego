@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { FIELDS_SUMMARY, TINY_PNG_BASE64 } from "./helpers/final-confirmation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const directory = mkdtempSync(join(tmpdir(), "radar-mcp-test-"));
@@ -139,14 +140,14 @@ test("MCP: ferramentas, escopo por agente, domínios, gate de automação, idemp
   // ---- candidatura automática desligada ----
   const assistant = store.createAgentConfig({
     name: "Assistente MCP", role_type: "application_assistant", tool_scopes: ["jobs.read", "application.prepare", "telegram.question"],
-    allowed_domains: ["example.test"], prompt: "Candidatar somente com autorização.",
+    allowed_domains: ["greenhouse.io"], prompt: "Candidatar somente com autorização.",
   }, "test");
-  const first = preparedApplication("mcp-submit", "https://jobs.example.test/mcp-submit/apply");
-  const second = preparedApplication("mcp-fail", "https://jobs.example.test/mcp-fail/apply");
+  const first = preparedApplication("mcp-submit", "https://boards.greenhouse.io/exemplo/jobs/mcp-submit");
+  const second = preparedApplication("mcp-fail", "https://boards.greenhouse.io/exemplo/jobs/mcp-fail");
   await refused("radar_list_authorized_applications", {}, "automation_disabled");
   await refused("radar_claim_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" }, "automation_disabled");
-  await refused("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://jobs.example.test/mcp-submit/apply" }, "automation_disabled");
-  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "x", observed_url: "https://jobs.example.test/mcp-submit/apply" }, "automation_disabled");
+  await refused("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://boards.greenhouse.io/exemplo/jobs/mcp-submit" }, "automation_disabled");
+  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "x", submit_token: "x", observed_url: "https://boards.greenhouse.io/exemplo/jobs/mcp-submit" }, "automation_disabled");
   await refused("radar_fail_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", reason: "x" }, "automation_disabled");
   process.env.RADAR_AUTO_APPLICATION_ENABLED = "true";
 
@@ -160,9 +161,9 @@ test("MCP: ferramentas, escopo por agente, domínios, gate de automação, idemp
   }
 
   // ---- verify / claim ----
-  const verified = await ok("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://jobs.example.test/mcp-submit/apply?utm_source=x#top" });
+  const verified = await ok("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://boards.greenhouse.io/exemplo/jobs/mcp-submit?utm_source=x#top" });
   assert.equal(verified.match, true);
-  assert.equal((await ok("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://jobs.example.test/outra" })).match, false);
+  assert.equal((await ok("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://boards.greenhouse.io/exemplo/jobs/outra" })).match, false);
   await refused("radar_verify_application", { agent_id: assistant.id, application_id: first.application.id, observed_url: "https://evil.example.com/apply" }, "agent.domain.forbidden");
   // O assistente padrão não tem domínios configurados: não pode reservar.
   await refused("radar_claim_application", { agent_id: defaultAssistant.id, application_id: first.application.id, worker_id: "w1" }, "agent.domain.forbidden");
@@ -187,11 +188,28 @@ test("MCP: ferramentas, escopo por agente, domínios, gate de automação, idemp
   assert.ok(!(await ok("radar_list_open_questions")).questions.some((question) => question.id === questionId));
 
   // ---- submit ----
-  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/mcp-submit/apply" }, "application.claim.worker_mismatch");
-  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/outra" }, "application.url_mismatch");
-  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:ok", observed_url: "https://evil.example.com/apply" }, "agent.domain.forbidden");
-  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: "https://jobs.example.test/mcp-submit/apply" });
-  const submitted = await ok("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:confirmation:1", observed_url: "https://jobs.example.test/mcp-submit/apply" });
+  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", evidence_ref: "portal:ok", submit_token: "x", observed_url: "https://boards.greenhouse.io/exemplo/jobs/mcp-submit" }, "application.claim.worker_mismatch");
+  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:ok", submit_token: "x", observed_url: "https://boards.greenhouse.io/exemplo/jobs/outra" }, "application.url_mismatch");
+  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:ok", submit_token: "x", observed_url: "https://evil.example.com/apply" }, "agent.domain.forbidden");
+  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: "https://boards.greenhouse.io/exemplo/jobs/mcp-submit" });
+  // #32: dry-run — sem confirmação final humana não há token e o envio é recusado.
+  const submitUrl = "https://boards.greenhouse.io/exemplo/jobs/mcp-submit";
+  await refused("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:ok", observed_url: submitUrl, submit_token: "inventado" }, "application.final_confirmation_required");
+  assert.equal((await ok("radar_get_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" })).confirmation.status, "not_requested");
+  await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: TINY_PNG_BASE64 }, "application.claim.worker_mismatch");
+  await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: Buffer.from("não é png").toString("base64") }, "application.evidence.screenshot_invalid");
+  const requested = await ok("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: TINY_PNG_BASE64 });
+  assert.equal(requested.application.status, "awaiting_final_confirmation");
+  assert.ok(requested.evidence_id);
+  assert.equal((await ok("radar_get_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" })).confirmation.status, "pending");
+  store.confirmFinalSubmission(first.application.id, "ENVIAR", "test-user");
+  const confirmed = (await ok("radar_get_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" })).confirmation;
+  assert.equal(confirmed.status, "confirmed");
+  assert.ok(confirmed.submit_token);
+  const again = (await ok("radar_get_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" })).confirmation;
+  assert.equal(again.submit_token, undefined, "o token só é entregue uma vez");
+  assert.equal(again.token_delivered, true);
+  const submitted = await ok("radar_submit_application", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", evidence_ref: "portal:confirmation:1", observed_url: submitUrl, submit_token: confirmed.submit_token });
   assert.equal(submitted.application.status, "submitted");
   assert.equal(submitted.application.evidence_ref, "portal:confirmation:1");
 
@@ -203,7 +221,7 @@ test("MCP: ferramentas, escopo por agente, domínios, gate de automação, idemp
 
   // ---- agente desativado também é recusado no fluxo de candidatura ----
   store.updateAgentConfig(assistant.id, { enabled: false }, "test");
-  await refused("radar_verify_application", { agent_id: assistant.id, application_id: second.application.id, observed_url: "https://jobs.example.test/mcp-fail/apply" }, "agent.disabled");
+  await refused("radar_verify_application", { agent_id: assistant.id, application_id: second.application.id, observed_url: "https://boards.greenhouse.io/exemplo/jobs/mcp-fail" }, "agent.disabled");
 
   // ---- o nonce nunca aparece em nenhuma saída ----
   const nonces = store.db.prepare("SELECT nonce FROM application_authorizations").all().map((row) => row.nonce);
