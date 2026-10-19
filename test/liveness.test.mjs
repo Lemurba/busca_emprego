@@ -169,7 +169,7 @@ describe("verificação genérica de página", () => {
 describe("travas contra SSRF e tamanho", () => {
   test("localhost, IP privado literal e http são recusados sem requisição", async () => {
     const before = requests.length;
-    for (const url of ["https://127.0.0.1/vaga", "https://localhost/vaga", "https://192.168.0.10/vaga", "http://vagas.example.com/vaga", "https://user:pw@vagas.example.com/vaga", "https://[::1]/vaga"]) {
+    for (const url of ["https://127.0.0.1/vaga", "https://localhost/vaga", "https://192.168.0.10/vaga", "http://vagas.example.com/vaga", "https://user:pw@vagas.example.com/vaga", "https://[::1]/vaga", "https://vagas.example.com:22/vaga"]) {
       const result = await check({ job_url: url });
       assert.deepEqual([result.status, result.method], ["unknown", "refused"], url);
     }

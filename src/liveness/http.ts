@@ -126,7 +126,10 @@ export interface SafeResponse {
 
 function assertSafeUrl(input: string): URL {
   try {
-    return assertPublicHttpsUrl(input);
+    const url = assertPublicHttpsUrl(input);
+    // Só a porta padrão do HTTPS: a verificação não serve para sondar outras portas.
+    if (url.port && url.port !== "443") throw new Error("Porta não permitida");
+    return url;
   } catch (error) {
     throw new LivenessFetchError("refused", error instanceof Error ? error.message : "URL recusada", input);
   }
