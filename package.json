@@ -7,7 +7,7 @@
     "node": ">=22.16"
   },
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --outfile=dist/public/app.js",
+    "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --jsx=automatic --jsx-import-source=preact --outfile=dist/public/app.js",
     "test": "node --import tsx --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"test/*.test.mjs\" && npm run test:py",
     "test:unit": "node --import tsx --test \"test/*.test.mjs\"",
     "test:e2e": "npm run build && node --test \"test/e2e/*.test.mjs\"",
@@ -20,7 +20,9 @@
     "typecheck:web": "tsc -p tsconfig.web.json --noEmit"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@biomejs/biome": "2.5.15",
+    "@playwright/test": "1.56.1",
     "@types/node": "^24.3.0",
     "esbuild": "^0.25.9",
     "tsx": "^4.20.5",
@@ -32,6 +34,7 @@
     "leaflet": "1.9.4",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "6.3.289",
+    "preact": "10.29.8",
     "zod": "^4.6.5"
   }
 }
