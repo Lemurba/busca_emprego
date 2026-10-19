@@ -134,6 +134,12 @@ test.describe("smoke de UI", () => {
     await page.keyboard.press("Escape");
     await cards.first().getByRole("button", { name: "Versões" }).click();
     await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    // Recarregar os dados re-renderiza a página no lugar (diff do Preact; innerHTML no legado).
+    const total = await cards.count();
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(cards).toHaveCount(total);
     expect(errors, "erros de console").toEqual([]);
   });
 });
