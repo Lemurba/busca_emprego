@@ -97,4 +97,7 @@ test("remover e corrigir trechos aparam separadores", () => {
   assert.equal(removeSpans(text, [...google, ...percent]), "Engenheiro (2020 – 2023)\nAumentei a receita com TypeScript.");
   assert.equal(replaceSpans(text, google, "Acme"), "Engenheiro — Acme (2020 – 2023)\nAumentei a receita (40%) com TypeScript.\n- Acme");
   assert.throws(() => removeSpans(text, [[5, 2]]), /resume\.facts\.span_invalid/);
+  const sentence = "Aumentei a receita em 40%.\nReduzi custos em 35% na Initech.";
+  const numbers = extractClaims(sentence).filter((claim) => claim.kind === "number").map((claim) => [claim.start, claim.end]);
+  assert.equal(removeSpans(sentence, numbers), "Aumentei a receita.\nReduzi custos na Initech.", "preposição órfã sai junto");
 });

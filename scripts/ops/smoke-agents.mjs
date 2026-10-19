@@ -438,9 +438,11 @@ try {
     expect("editar", await api("PATCH", `/api/resumes/${gen.id}`, { status: "review", content: "skills: Analista de Dados\ncertificacao: INVENTADA" }), 200);
     const review = expect("review fail", await api("POST", `/api/resumes/${gen.id}/review`, { verdict: "pass" }), 200);
     assert.equal(review.review_status, "fail");
-    const approve = await api("POST", `/api/resumes/${gen.id}/approve`, { confirmation: "APROVO" });
-    expect("aprovar inválido", approve, 422);
-    assert.match(String(approve.data?.error ?? ""), /ATS_/);
+    assert.ok((review.review_findings ?? []).some((finding) => String(finding).startsWith("facts.unverified")), "certificação inventada sem checagem de fatos");
+    // A certificação inventada cai primeiro na checagem de fatos (#31): 409, sem exceção por justificativa.
+    const approve = await api("POST", `/api/resumes/${gen.id}/approve`, { confirmation: "APROVO", override_reason: "Revisado manualmente pelo smoke" });
+    expect("aprovar inválido", approve, 409);
+    assert.equal(approve.data?.error, "resume.unverified_facts");
   });
 
   // ---------- 8. candidatura ----------

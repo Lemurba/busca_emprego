@@ -543,12 +543,14 @@ function cleanLine(line: string): string {
 
 /** Remove os trechos e apara separadores órfãos; uma linha que fica sem conteúdo some. */
 export function removeSpans(content: string, spans: readonly Span[]): string {
-  const marker = "\u0000";
+  const marker = "\uE000"; // caractere de uso privado: não aparece em currículo
   const marked = replaceSpans(content, spans, marker);
   const lines: string[] = [];
   for (const line of marked.split("\n")) {
     if (!line.includes(marker)) { lines.push(line); continue; }
-    const cleaned = cleanLine(line.replaceAll(marker, ""));
+    // Preposição que só introduzia o trecho removido ("custos em 35% na Acme") sai junto.
+    const withoutDangling = line.replace(/(?<![\p{L}\p{N}])(?:em|de|do|da|por|para|com|of|in|by|at|from|to|for)\s+\uE000(?=\s*(?:[,.;:)!?]|$|\s(?:na|no|nas|nos|em|de|do|da|com|para|por|at|in|of|on|for|and|e|com)(?![\p{L}\p{N}])))/giu, marker);
+    const cleaned = cleanLine(withoutDangling.replaceAll(marker, ""));
     if (/[\p{L}\p{N}]/u.test(cleaned)) lines.push(cleaned);
   }
   return lines.join("\n");

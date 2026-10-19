@@ -267,6 +267,22 @@ Registra que o usuário revisou a versão salva do currículo. Corpo:
 
 A vaga precisa continuar marcada como de interesse. A resposta `200` contém o currículo aprovado. A aprovação não inicia candidatura e não concede autorização automática.
 
+Antes de qualquer outra regra, a checagem de fatos roda de novo: se a versão tiver afirmação bloqueante sem fato confirmado, a resposta é `409 resume.unverified_facts`, mesmo com `override_reason` (a justificativa só dispensa os demais achados da revisão ATS).
+
+### Checagem de fatos do currículo
+
+Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extraídas e conferidas contra os fatos confirmados do snapshot do perfil (o do currículo ou, sem ele, o do perfil ativo). Números, datas, empresas, cargos, títulos acadêmicos e certificações sem fato confirmado ficam `pending` e bloqueiam o APROVO; tecnologia fora do perfil é só aviso (`warning`).
+
+| Rota | Uso |
+| --- | --- |
+| `GET /api/resumes/{id}/facts` | `{ resume_version, pending, warnings, covered, resolved }`; cada item tem `claim_id`, `claim_kind`, `claim_text`, `spans` e `status` |
+| `POST /api/resumes/{id}/facts/{claimId}` | Só com sessão do painel (token de serviço → `403`). Corpo `{ "action": "confirm" \| "correct" \| "remove", "replacement"?: string }` |
+
+- `confirm`: cria a versão N+1 do perfil (cópia da confirmada + o fato com origem `user`), confirma, gera snapshot novo e religa o currículo a ele; o conteúdo não muda.
+- `correct` / `remove`: troca ou remove todas as ocorrências do trecho e salva nova versão do currículo, checada de novo.
+
+`POST /api/resumes/{id}/review` calcula o veredito no servidor (`verdict: "pass"` do cliente é ignorado; `verdict: "fail"` e `findings` só endurecem). Achados: `facts.unverified:N`, `content.empty`, `content.placeholder` (rascunho-padrão do painel) e, para o redator, as checagens estritas de fatos usados. Conteúdo sem nenhuma afirmação verificável passa. O bootstrap traz `fact_check: { pending, warnings }` em cada currículo e `radar_create_resume` devolve `fact_check.pending` para o agente.
+
 ### Biblioteca de PDFs-base
 
 | Método e rota | Uso |

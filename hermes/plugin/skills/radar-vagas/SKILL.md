@@ -63,6 +63,7 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 ## Currículo e candidatura
 
 - Crie currículo ATS (`radar_create_resume`, com o `agent_id` do redator) somente para vaga marcada como interesse e usando fatos confirmados.
+- Checagem de fatos: a resposta de `radar_create_resume` traz `fact_check.pending` (números, datas, empresas, cargos, títulos e certificações sem fato confirmado no perfil). Cada pendência bloqueia o `APROVO`, sem exceção. Não invente: reescreva sem o trecho ou peça à pessoa para confirmá-lo no painel. `fact_check.warnings` (tecnologias fora do perfil) só avisa.
 - Registre a compatibilidade com `radar_record_score` (agente avaliador): nota 0–100 por critério e `null` quando não houver dado — falta de dado não é nota baixa.
 - PDF e DOCX são gerados pelo aplicativo e ficam no Kanban para revisão e download.
 - Aprovação do currículo (`APROVO`) não autoriza candidatura. Use apenas a fila de `radar_list_authorized_applications` (itens com `AUTORIZO` vigente: id, vaga, hash da URL e validade). Com `automation_disabled`, pare: a candidatura automática está desligada.
