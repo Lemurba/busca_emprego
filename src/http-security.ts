@@ -201,6 +201,8 @@ const FRIENDLY: Record<string, string> = {
   "job.archived": "Esta vaga foi excluída. Restaure-a antes de alterá-la.",
   "job.not_archived": "Esta vaga não está excluída.",
   "job.archive.confirmation_required": "Confirme a exclusão com EXCLUIR.",
+  "job.liveness.stale": "Verifique se a vaga ainda está aberta (Verificar agora) antes de autorizar: a última confirmação tem mais de 24 h ou não indicou vaga aberta.",
+  "job.closed": "Esta vaga está encerrada na fonte.",
   "job.archive.application_in_progress": "A candidatura desta vaga está sendo enviada agora; aguarde antes de excluir.",
   "decision.undo.nothing_to_undo": "Não há decisão para desfazer nesta vaga.",
   "decision.undo.application_locked": "A decisão não pode ser desfeita: a candidatura está em andamento ou já foi enviada.",

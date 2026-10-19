@@ -62,6 +62,7 @@ const SAFE_MESSAGES: Record<string, string> = {
   "agent.prompt_optimization.reason.invalid": "Motivo da proposta inválido.",
   "agent.prompt_optimization.prompt.invalid": "Prompt proposto inválido ou idêntico ao atual.",
   "job.not_found": "Vaga não encontrada.",
+  "job.closed": "Vaga encerrada na fonte: não avalie vagas fechadas.",
   "job.salary.invalid": "Faixa salarial inválida.",
   "job.coordinates.invalid": "Coordenadas inválidas.",
   "application.not_found": "Candidatura não encontrada.",
@@ -354,6 +355,8 @@ export function createRadarMcpServer() {
     },
   }, async ({ agent_id, ...input }) => execute(() => {
     requireAgent(agent_id, "jobs.write");
+    // #33: vaga fechada (verificação de vaga viva ou fonte) não entra na avaliação.
+    if (getJob(input.job_id)?.opening_status === "closed") throw new ToolError("job.closed", SAFE_MESSAGES["job.closed"]!);
     return { score: recordMatchScore({ ...input, project_id: PROJECT_ID }) };
   }));
 

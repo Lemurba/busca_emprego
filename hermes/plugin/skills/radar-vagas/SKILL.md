@@ -51,6 +51,7 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 - Registre achado com `radar_discover_job`; depois descarte o contexto de coleta.
 - Use pesquisa salarial separada (`radar_enrich_job`), uma vaga por execução, sempre com URL, data e confiança.
 - Normalize e avalie somente dados persistidos. Dado ausente continua ausente.
+- Vaga encerrada (`opening_status: closed`) não é avaliada: `radar_record_score` recusa com `job.closed`. Quem verifica se a vaga continua aberta é o próprio Radar (cron sem LLM); não tente checar isso pelo navegador.
 - Quando a otimização estiver ativa, use descrição curta, prompt atual e feedback confirmado para propor melhoria com `radar_propose_agent_prompt`. Explique o motivo. A ferramenta cria rascunho; o usuário revisa e publica no dashboard.
 
 ## Entrevista

@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addProfileFact, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { checkJobLivenessNow, listJobsForLivenessCheck, refreshExpiredJobs } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, clearedSessionCookie, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -78,9 +79,10 @@ function hasSession(req: IncomingMessage) {
 }
 
 function isInternalRequest(method: string | undefined, pathname: string) {
-  return method === "GET" && pathname === "/api/authorized-applications"
+  return method === "GET" && (pathname === "/api/authorized-applications" || pathname === "/api/liveness/due")
     || method === "POST" && (
       pathname === "/api/agent-events"
+      || pathname === "/api/liveness/refresh-expired"
       || /^\/api\/applications\/[^/]+\/(?:claim|questions|submit|fail)$/u.test(pathname)
       || /^\/api\/rounds\/[^/]+\/(?:batch|status)$/u.test(pathname)
       || /^\/api\/jobs\/[^/]+\/score$/u.test(pathname)
@@ -241,6 +243,13 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/jobs/{id}/restore"), handler: ({ res, params }) => ok(res, 200, restoreJob(params[0]!, actor)) },
   { method: "POST", pattern: r("/api/jobs/{id}/decision/undo"), handler: ({ res, params, body }) => ok(res, 200, undoJobDecision(params[0]!, validateBody(schemas.jobUndoDecision, body), actor)) },
   { method: "GET", pattern: r("/api/jobs/{id}/feedback"), handler: ({ res, params }) => ok(res, 200, listJobFeedback(params[0]!)) },
+  // Vaga viva (#33): verificação determinística agora (dashboard) e fila do cron sem LLM (token interno).
+  { method: "POST", pattern: r("/api/jobs/{id}/check-liveness"), handler: async ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, await checkJobLivenessNow(params[0]!)); } },
+  { method: "GET", pattern: r("/api/liveness/due"), handler: ({ req, res }) => {
+    const limit = Number(new URL(req.url ?? "/", "http://radar.invalid").searchParams.get("limit") ?? 50);
+    ok(res, 200, listJobsForLivenessCheck({ limit: Number.isFinite(limit) ? limit : 50, projectId }));
+  } },
+  { method: "POST", pattern: r("/api/liveness/refresh-expired"), handler: ({ res }) => ok(res, 200, { expired: refreshExpiredJobs() }) },
   { method: "GET", pattern: r("/api/jobs/{id}"), handler: ({ res, params }) => {
     const job = getJob(params[0]!);
     if (!job) throw notFound("Vaga não encontrada.");

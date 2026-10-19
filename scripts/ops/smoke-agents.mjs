@@ -463,6 +463,13 @@ try {
     expect("autorizar inválido", r, 400);
     assert.match(`${r.data?.error ?? ""} ${r.data?.message ?? ""}`, /AUTORIZO/);
   });
+  await t("AUTORIZO sem verificação recente de vaga aberta é recusado (job.liveness.stale)", async () => {
+    const r = await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" });
+    expect("autorizar sem verificação", r, 422);
+    assert.equal(r.data?.error, "job.liveness.stale");
+    // Confirmação humana de que a vaga está aberta (no uso real: "Verificar agora" ou o cron de vaga viva).
+    expect("confirmar vaga aberta", await api("PATCH", `/api/jobs/${job0}`, { opening_status: "open", opening_checked_at: new Date().toISOString() }), 200);
+  });
   await t("autorização explícita AUTORIZO entra na fila", async () => {
     expect("autorizar", await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" }), 200);
     const queue = expect("fila", await api("GET", "/api/authorized-applications"), 200);
