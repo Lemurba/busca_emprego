@@ -52,8 +52,8 @@ test("Production foundation feedback, validation, and persisted workflow", async
   }), /alterado|version/i);
 
   assert.throws(() => store.upsertJob({
-    title: "Inválida", company: "Exemplo", source: "fixture", source_url: "http://example.test/jobs/4"
-  }), /HTTPS/);
+    title: "Inválida", company: "Exemplo", source: "fixture", source_url: "ftp://example.test/jobs/4"
+  }), /HTTP/);
   assert.throws(() => store.upsertJob({
     title: "Salário inválido", company: "Exemplo", source: "fixture", source_url: "https://example.test/jobs/5", salary_min: 10, salary_max: 5, currency: "BRL"
   }), /salary/);
@@ -94,9 +94,13 @@ test("Production foundation feedback, validation, and persisted workflow", async
   });
   assert.equal(discovered.job_url, "https://company.example.test/jobs/1");
   assert.match(discovered.description, /integral/);
-  assert.throws(() => store.createJobFromAgent(scout.id, {
-    id: discovered.id, title: "Tentativa de sobrescrita", company: "Empresa", source: "site autorizado", source_url: "https://company.example.test/jobs/1"
-  }), /create_existing/);
+  // Rever a vaga não é erro nem sobrescreve o cartão: vira nova ocorrência da vaga canônica.
+  const resighted = store.createJobFromAgent(scout.id, {
+    id: "id-escolhido-pelo-agente", title: "Tentativa de sobrescrita", company: "Empresa", source: "site autorizado", source_url: "https://company.example.test/jobs/1"
+  });
+  assert.equal(resighted.id, discovered.id);
+  assert.equal(store.getJob(discovered.id).title, "Analista EHS");
+  assert.equal(store.listJobOccurrences(discovered.id).length, 2);
   assert.throws(() => store.createAgentConfig({
     name: "Agente inseguro", role_type: "custom", tool_scopes: ["applications.submit"], editable_fields: []
   }, "tester"), /tool_scopes.forbidden/);

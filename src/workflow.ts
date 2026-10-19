@@ -1,4 +1,5 @@
 import type { JobStatus } from "./types.js";
+import { DomainError } from "./errors.js";
 
 export type CompletionResult = "hired" | "rejected" | "withdrawn" | "no_response";
 
@@ -65,14 +66,17 @@ export type WorkflowErrorCode =
   | "INVALID_COMMAND";
 
 /** Error safe to serialize at an HTTP boundary. */
-export class WorkflowError extends Error {
+export class WorkflowError extends DomainError {
+  declare readonly code: WorkflowErrorCode;
+  declare readonly details: Readonly<Record<string, unknown>>;
+
   constructor(
-    public readonly code: WorkflowErrorCode,
+    code: WorkflowErrorCode,
     public readonly httpStatus: 409 | 422,
     message: string,
-    public readonly details: Readonly<Record<string, unknown>> = {},
+    details: Readonly<Record<string, unknown>> = {},
   ) {
-    super(message);
+    super(code, httpStatus, details, message);
     this.name = "WorkflowError";
   }
 

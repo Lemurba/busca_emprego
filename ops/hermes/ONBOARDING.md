@@ -19,46 +19,55 @@ No repositório:
 | --- | --- |
 | `.hermes/skills/radar-vagas/SKILL.md` | Skill de projeto — **fonte única** da skill. |
 | `hermes/plugin/` | Pacote portátil Agent Plugins v1 (`plugin.json` + `skills/` + `mcp.json`), opcional, para distribuir skill e MCP juntos. `skills/` é cópia gerada por `node scripts/ops/build-hermes-plugin.mjs` (a CI confere com `--check`). |
-| `hermes/config.example.yaml` | Fragmentos para mesclar no `config.yaml` do Hermes (`mcp_servers.radar-vagas`, `browser.cdp_url`, `skills.config`). |
+| `hermes/config.example.yaml` | Fragmentos para mesclar no `config.yaml` do Hermes (um `mcp_servers.radar-vagas-<papel>` por papel, `browser.cdp_url`, `skills.config`). |
 | `hermes/cron/radar-watchdog.sh` | Watchdog para o cron sem LLM. |
+| `hermes/cron/radar-expire-jobs.sh` | Expiração de vagas para o cron sem LLM. |
 | `ops/hermes/radar.env.example` | Modelo único do `.env.local` do app. |
 | `ops/hermes/radar-s6-run.sh` | `run` do serviço s6. |
 
 ## 1. Regras
 
-1. Segredos do app (`RADAR_INTERNAL_SERVICE_TOKEN`, `RADAR_DASHBOARD_TOKEN`) só existem em `.env.local` (modo 600). Segredos do Hermes (bot do Telegram, chaves de provedor) só existem em `/opt/data/.env`. Nunca peça ou cole segredo no chat: superfícies de mensagem do Hermes não pedem segredos em conversa ("Skills System" → "Secure Setup on Load").
+1. Segredos do app (`RADAR_INTERNAL_SERVICE_TOKEN`, `RADAR_DASHBOARD_TOKEN`) só existem em `.env.local` (modo 600, dono `radar`). O Hermes recebe apenas o token de serviço (no seu `.env`), que não alcança os portões humanos. Segredos do Hermes (bot do Telegram, chaves de provedor) só existem em `/opt/data/.env`. Nunca peça ou cole segredo no chat: superfícies de mensagem do Hermes não pedem segredos em conversa ("Skills System" → "Secure Setup on Load").
 2. Logins de portais vão para o cofre de credenciais do Hermes (seção 6), nunca para o banco do Radar.
 3. `APROVO` aprova uma versão de currículo; somente `AUTORIZO` permite candidatura automática para vaga, currículo, versão e URL exatos. CAPTCHA, MFA ou dúvida pausam o fluxo; nunca são contornados.
 4. O Telegram é o do gateway do Hermes. Não crie outro bot.
 
 ## 2. Instalar o app
 
+O dashboard roda com um **usuário Unix dedicado** (`radar`), separado do usuário do Hermes (`hermes`). Interesse, `APROVO`, candidatura e `AUTORIZO` só valem com a sessão do dashboard (`docs/security.md` → "Portões humanos"); o isolamento impede que o agente leia `RADAR_DASHBOARD_TOKEN` ou grave direto no SQLite.
+
 ```sh
-mkdir -p /opt/data/dashboard
+# como root, uma vez
+adduser -D -H -s /sbin/nologin radar 2>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin radar
+mkdir -p /opt/data/dashboard && chown radar:radar /opt/data/dashboard
+# daqui em diante como radar (ex.: s6-setuidgid radar sh)
 git clone <url-do-repositorio> /opt/data/dashboard/busca_emprego
 cd /opt/data/dashboard/busca_emprego
 npm ci && npm run build && npm test   # Node >= 22.16 (node:sqlite com isTransaction); a CI usa Node 22.16 e 24
 cp ops/hermes/radar.env.example .env.local && chmod 600 .env.local
+mkdir -p data && chmod 700 data   # radar.sqlite, -wal e -shm nascem com modo 600 (umask 077 no run do s6)
 ```
+
+Confira: `ls -l .env.local data/` mostra dono `radar` e modo `-rw-------`; `su -s /bin/sh hermes -c 'cat /opt/data/dashboard/busca_emprego/.env.local'` precisa falhar. O código do release não pode ser gravável pelo `hermes`. `radar-s6-run.sh` recusa subir se `.env.local` não estiver em modo 600.
 
 Preencha `.env.local` (veja os comentários do modelo): `RADAR_OPERATOR_ID`, `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_DASHBOARD_TOKEN` (32 bytes aleatórios cada, gerados na máquina), `RADAR_ALLOWED_HOSTS` com o nome/IP pelo qual o dashboard será aberto e, se quiser, `PORT` (padrão 8787). Nenhum IP ou caminho específico de máquina vai para arquivos versionados.
 
 ## 3. Serviço s6
 
-O container do Hermes usa s6. O serviço do Radar é um longrun cujo `run` executa, como o usuário `hermes`:
+O container do Hermes usa s6. O serviço do Radar é um longrun cujo `run` executa, como o usuário dedicado `radar`:
 
 ```sh
 #!/bin/sh
-exec s6-setuidgid hermes /opt/data/dashboard/busca_emprego/ops/hermes/radar-s6-run.sh
+exec s6-setuidgid radar /opt/data/dashboard/busca_emprego/ops/hermes/radar-s6-run.sh
 ```
 
-`radar-s6-run.sh` lê `.env.local` **sem** `source`: exporta apenas as chaves da sua allowlist, herda `TELEGRAM_ALLOWED_USERS`/`TELEGRAM_HOME_CHANNEL` do `/opt/data/.env` quando vazias e grava o log em `${RADAR_LOG_DIR:-/opt/data/logs}/radar-vagas.log`.
+`radar-s6-run.sh` lê `.env.local` **sem** `source`: exporta apenas as chaves da sua allowlist, herda `TELEGRAM_ALLOWED_USERS`/`TELEGRAM_HOME_CHANNEL` do `/opt/data/.env` quando vazias e legíveis (com o usuário `radar` o `.env` do Hermes normalmente não é legível: preencha as duas no `.env.local`) e grava o log em `${RADAR_LOG_DIR:-/opt/data/logs}/radar-vagas.log`.
 
 Como `/run` é volátil, o diretório `/run/service/radar-vagas` precisa ser recriado a cada boot. O mecanismo oficial para isso é um gateway hook em `/opt/data/hooks/<nome>/` (`HOOK.yaml` com `events: [gateway:startup]` + `handler.py`) — "Event Hooks" → "Gateway event hooks"; o diretório é confiável por posicionamento e carregado na partida do gateway. O hook cria `run`, `supervise/` e `event/` e dispara `s6-svscanctl -a`.
 
 Notas de operação:
 
-- O app **deve** rodar como `hermes` (`ps -eo pid,user,cmd | grep dist/src/server.js`).
+- O app **deve** rodar como `radar`, nunca como `hermes` (`ps -eo pid,user,cmd | grep dist/src/server.js`).
 - `s6-svstat /run/service/radar-vagas` funciona sem root; `s6-svc -d/-u/-r` não (o FIFO `supervise/control` é do root). Sem root, reinicie com `kill -TERM <pid>`: o s6 recria o processo.
 - Parada manual intencional: `touch /opt/data/dashboard/busca_emprego/.radar-stopped` (o watchdog fica em silêncio). Remova o arquivo ao voltar.
 
@@ -72,33 +81,52 @@ hermes skills trust /opt/data/dashboard/busca_emprego
 
 Skills em `<raiz>/.hermes/skills/` só carregam depois de `hermes skills trust`, e têm a maior precedência dentro do projeto ("Skills System" → "Project-Local Skills" → "Trusting a project").
 
-Opção B — pacote portátil `hermes/plugin/` (para levar skill + MCP a outra instalação): copie o diretório para `~/.hermes/plugins/radar-vagas/`, depois `hermes plugins list` e `hermes plugins enable radar-vagas`. Pacotes portáteis instalam desabilitados; a skill fica namespaced (`agent-plugin-<slug>-<hash>`, veja `skills_list`) e o servidor MCP mantém o nome `radar-vagas`. O `mcp.json` não contém credenciais — a documentação proíbe ("Plugins" → "Portable Agent Plugins v1 packages"). O `plugin.json` pede `trust: untrusted` para o servidor pela extensão `com.nousresearch.hermes`. Valide com `hermes plugins validate hermes/plugin`.
+Opção B — pacote portátil `hermes/plugin/` (para levar skill + MCP a outra instalação): copie o diretório para `~/.hermes/plugins/radar-vagas/`, depois `hermes plugins list` e `hermes plugins enable radar-vagas`. Pacotes portáteis instalam desabilitados; a skill fica namespaced (`agent-plugin-<slug>-<hash>`, veja `skills_list`) e os servidores MCP mantêm os nomes `radar-vagas-<papel>`. O `mcp.json` não contém credenciais — a documentação proíbe ("Plugins" → "Portable Agent Plugins v1 packages"). O `plugin.json` pede `trust: untrusted` para cada servidor pela extensão `com.nousresearch.hermes`. Valide com `hermes plugins validate hermes/plugin`.
 
-Use **uma** das opções. Se as duas estiverem ativas, a entrada `mcp_servers.radar-vagas` do `config.yaml` vence a do pacote, inclusive o `trust` (mesma seção).
+Use **uma** das opções. Se as duas estiverem ativas, as entradas `mcp_servers.radar-vagas-<papel>` do `config.yaml` vencem as do pacote, inclusive o `trust` (mesma seção).
 
 ## 5. Servidor MCP
 
-Acrescente ao `/opt/data/.env` (valores não secretos, por máquina):
+Acrescente ao `/opt/data/.env` (por máquina):
 
 ```sh
 RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
 RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+# IDs no dashboard (Agentes) ou por `radar_list_agents`:
+RADAR_COORDINATOR_AGENT_ID=<id do Coordenador do Radar>
+RADAR_EXECUTOR_AGENT_ID=<id do Assistente de candidatura>
+# Para as pontes do Telegram e o executor (rodam como hermes). Mesmo valor do .env.local;
+# o token de serviço recebe 403 nos portões humanos. Nunca coloque RADAR_DASHBOARD_TOKEN aqui.
+RADAR_INTERNAL_SERVICE_TOKEN=<valor>
 ```
 
-Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste:
+**Pendente (#10):** o servidor MCP ainda abre o SQLite diretamente em vez de falar com o dashboard por HTTP. Com o banco em modo 600 do `radar`, o subprocesso MCP precisa rodar como `radar` (comando fixo, sem shell; por exemplo uma regra `sudo` restrita a `node /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js`). As ferramentas MCP não incluem nenhum portão humano.
+
+Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste cada servidor:
 
 ```sh
-hermes mcp test radar-vagas
+for papel in coordenador coleta curriculo executor; do hermes mcp test "radar-vagas-$papel"; done
 ```
+
+Um servidor MCP por papel (mesmo `dist/src/mcp-server.js`, separado por `RADAR_MCP_ROLE`):
+
+| Servidor | `RADAR_MCP_ROLE` | Agentes aceitos | Vínculo `RADAR_MCP_AGENT_ID` |
+| --- | --- | --- | --- |
+| `radar-vagas-coordenador` | `coordenador` | `coordinator` (escopo `agents.propose`) | obrigatório |
+| `radar-vagas-coleta` | `coleta` | `source_scout`, `job_enrichment` | opcional (um bloco por coletor isola portais) |
+| `radar-vagas-curriculo` | `curriculo` | `resume_writer`, `match_evaluator` | opcional |
+| `radar-vagas-executor` | `executor` | `application_assistant` | obrigatório |
+
+Cada processo registra só as ferramentas do papel (`tools.include` igual a `RADAR_MCP_ROLES` em `src/mcp-tools.ts`); `claim`/`verify`/`submit`/`fail`/`ask_human` existem apenas no executor. Com vínculo, `agent_id` divergente no argumento é recusado (`agent.binding.mismatch`); agente de outro papel é recusado com `agent.role.forbidden`. Sem `RADAR_MCP_ROLE` o processo sobe em `leitura` (só `radar_list_agents`, `radar_list_sources`, `radar_get_job`).
 
 Pontos do fragmento ("MCP Config Reference"):
 
 - `${env:VAR}` é resolvido a partir do `.env` do perfil ("Environment variable references").
 - O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_DB_PATH` está no `env` do servidor ("Security" → "MCP Credential Handling").
-- `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics").
+- `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics"); o servidor já se limita ao papel, e o filtro é a segunda barreira.
 - `trust: untrusted`: toda chamada sem `readOnlyHint: true` pede aprovação e falha fechada em execuções desassistidas, como cron ("Server keys" → `trust`). Agendamentos que precisem gravar devem usar os scripts de `scripts/ops/` com o token interno, não o MCP.
 
-Alternativa por CLI: `hermes mcp add radar-vagas --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` e depois ajustar `env`, `trust` e `tools.include` no `config.yaml`.
+Alternativa por CLI: `hermes mcp add radar-vagas-coleta --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` (um por papel) e depois ajustar `env` (`RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`), `trust` e `tools.include` no `config.yaml`.
 
 ## 6. Navegador e logins de portais
 
@@ -134,14 +162,21 @@ Configure o Telegram do gateway do Hermes ("Messaging" → "Telegram Setup"): `T
 
 ## 8. Dashboard
 
-Toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` (agentes e scripts) ou a sessão do dashboard. Para abrir o dashboard, gere o link de sessão:
+Toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` (agentes e scripts) ou a sessão do dashboard; os portões humanos (interesse, `APROVO`, candidatura, `AUTORIZO`, revogação, publicação de agente…) exigem a sessão e respondem `403` ao token. Para abrir o dashboard, o operador gera o link de sessão **como `radar`** (o `hermes` não lê o `RADAR_DASHBOARD_TOKEN`):
 
 ```sh
-node scripts/ops/dashboard-link.mjs          # imprime http://<host>:<PORT>/auth?token=...
-node scripts/ops/dashboard-link.mjs --send   # envia o link pelo Telegram do Hermes (hermes send)
+s6-setuidgid radar node scripts/ops/dashboard-link.mjs          # imprime http://<host>:<PORT>/auth?token=...
+s6-setuidgid radar node scripts/ops/dashboard-link.mjs --send   # envia o link pelo Telegram do Hermes (hermes send)
 ```
 
-`GET /auth?token=...` troca o `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` (HttpOnly, SameSite=Strict) e redireciona para `/`. O host usado precisa estar em `RADAR_ALLOWED_HOSTS`. Para trocar o acesso, rotacione `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
+Atrás de proxy, não registre a query string de `/auth` (`ops/hermes/nginx-radar.conf.example`). Tentativas erradas em `/auth` são limitadas por IP de origem; o link correto sempre entra.
+
+`GET /auth?token=...` troca o `RADAR_DASHBOARD_TOKEN` por um cookie `radar_session` (HttpOnly, SameSite=Strict) e redireciona para a base do dashboard (`RADAR_BASE_PATH`, padrão `/`). O host usado precisa estar em `RADAR_ALLOWED_HOSTS`. Para trocar o acesso, rotacione `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
+
+O dashboard pode ser publicado de duas formas:
+
+1. **Host/porta próprios** (padrão): `RADAR_BASE_PATH=/` e `RADAR_PUBLIC_URL=http://<host>:<PORT>` (ou `https://radar.local` atrás de um proxy dedicado). O cookie usa `Path=/`.
+2. **Subcaminho no proxy do Hermes**: inclua `ops/hermes/nginx-radar.conf.example` no virtual host TLS existente e, no `.env.local`, defina `RADAR_BASE_PATH=/plugins/busca-emprego/` (o mesmo prefixo do `location`), `RADAR_PUBLIC_URL=https://<host-do-hermes>/plugins/busca-emprego`, `RADAR_ALLOWED_HOSTS=<host-do-hermes>` e `RADAR_TRUST_PROXY_TLS=true`. O HTML recebe `<base href="/plugins/busca-emprego/">`, todos os assets e chamadas `api/...` são relativos a ela, `/auth` redireciona para o prefixo e o cookie fica com `Path=/plugins/busca-emprego` (não vaza para o resto do host). O servidor aceita o caminho com ou sem o prefixo, então funciona com `proxy_pass` que remove o prefixo (o exemplo) ou que o repassa.
 
 ## 9. Watchdog
 
@@ -157,11 +192,23 @@ Regras do cron sem agente ("Script-Only Cron Jobs"): o script tem de estar em `~
 
 Reinstale o script após atualizar o repositório (ele é copiado, não referenciado).
 
+Expiração de vagas: o servidor expira vagas encerradas na fonte ou com prazo vencido num timer interno (`RADAR_EXPIRATION_INTERVAL_MS`, padrão 15 min; `0` desliga); `GET /api/bootstrap` não escreve mais. Para expirar também com o dashboard parado, instale o cron sem LLM:
+
+```sh
+install -m 0755 hermes/cron/radar-expire-jobs.sh /opt/data/scripts/radar-expire-jobs.sh
+hermes cron create "every 30m" --no-agent --script radar-expire-jobs.sh \
+  --deliver telegram --name radar-expire-jobs
+```
+
+Ele roda `node scripts/ops/expire-jobs.mjs --quiet` e só escreve no Telegram se a expiração falhar.
+
+O backup agendado (`hermes/cron/radar-backup.sh`: backup, teste de restore, cópia criptografada fora do host e rotação) é instalado do mesmo jeito, com `"every 24h"` e `--name radar-backup`; configuração e chaves em `docs/operations-runbook.md`, seção 5.
+
 ## 10. Verificação
 
 1. `curl -fsS http://127.0.0.1:${PORT:-8787}/api/health` e `/api/ready`.
 2. `node scripts/ops/smoke-agents.mjs` (instância isolada) e `node scripts/ops/live-prod-check.mjs` (produção).
-3. `hermes mcp test radar-vagas`; numa sessão, `skills_list` mostra `radar-vagas`.
+3. `hermes mcp test radar-vagas-<papel>` para os quatro papéis; numa sessão, `skills_list` mostra `radar-vagas`.
 4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido.
 5. `node scripts/ops/notify-human-questions.mjs` (simulação) e `node scripts/ops/telegram-diagnose.mjs`.
 6. `node test/e2e/executor.test.mjs` (após `npm run build`) antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.

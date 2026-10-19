@@ -15,6 +15,8 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 
 - Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes (porta canônica 8787; a instalação pode trocar `PORT` no `.env.local`).
 - Autenticação: toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` com o valor de `RADAR_INTERNAL_SERVICE_TOKEN` **ou** o cookie `radar_session` do dashboard (obtido em `GET /auth?token=<RADAR_DASHBOARD_TOKEN>`). Sem credencial: `401`. Sem token interno configurado no servidor: `503 internal_token_not_configured`.
+- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil, termos de fonte e criação/publicação/rollback de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
+- Auditoria: o ator gravado vem da credencial — `human:dashboard` (sessão), `service:<nome>` (token; `<nome>` do header opcional `x-radar-service-name`, padrão `internal`) e `agent:<agent_id>` (MCP). `GET /api/jobs/{id}/history` devolve transições e decisões da vaga com o ator.
 - O `Host` precisa estar em `RADAR_ALLOWED_HOSTS`; rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
@@ -109,13 +111,12 @@ Retorna a vaga pelo identificador, incluindo `description`, `responsibilities`, 
 
 ### `POST /api/jobs`
 
-Cria ou atualiza uma vaga (upsert). Campos obrigatórios para criação: `title`, `company`, `source`, `source_url`.
+Cadastro manual de vaga (dashboard ou script). Campos obrigatórios: `title`, `company`, `source`, `source_url`. O corpo é estrito: `id`, `match_score`, `project_id`, `status`, `decision` e qualquer campo fora da tabela abaixo resultam em `400 invalid_body`. A rota nunca sobrescreve: se a vaga (mesma origem, URL, cargo e empresa) já existe, responde `422 job.already_exists` (use `PATCH /api/jobs/{id}`); se ela foi excluída, `422 job.archived` (restaure-a antes). Os campos enviados ficam com proveniência humana. Agentes registram vagas por `POST /api/agent-events` (`job.discovered`) ou pelo MCP.
 
 Campos de entrada:
 
 | Campo | Tipo | Obrigatório na criação | Padrão / valores |
 | --- | --- | --- | --- |
-| `id` | `string` | Não | Identificador estável; recomendado para atualizações |
 | `title` | `string` | Sim | Cargo |
 | `company` | `string` | Sim | Empresa |
 | `location` | `string` | Não | `"Não informado"` |
@@ -141,15 +142,11 @@ Campos de entrada:
 | `opening_checked_at` | `string \| null` | Não | `null`; data ISO 8601 em que a abertura foi conferida |
 | `deadline_at` | `string \| null` | Não | `null`; prazo ISO 8601 informado pela fonte |
 | `closed_at` | `string \| null` | Não | `null`; data ISO 8601 em que o fechamento foi confirmado |
-| `decision` | `string` | Não | Campos recebidos são ignorados. A decisão só muda em `POST /api/jobs/{id}/decision` |
-| `decision_at` | `string \| null` | Não | Preenchido pelo servidor na rota de decisão |
 | `description` | `string` | Não | `""`; descrição, requisitos ou observações |
 | `responsibilities` | `string` | Não | `""`; responsabilidades encontradas |
 | `requirements` | `string` | Não | `""`; requisitos encontrados |
 | `benefits` | `string` | Não | `""`; benefícios encontrados |
 | `additional_information` | `string` | Não | `""`; demais informações relevantes |
-| `match_score` | `integer` | Não | `0`; aderência estimada de 0 a 100 |
-| `status` | `string` | Não | O valor recebido é ignorado na ingestão; vaga nova começa em `found`. O status de vaga existente é preservado |
 | `posted_at` | `string \| null` | Não | `null`; data ISO 8601 de publicação |
 
 O servidor preenche `created_at` e `updated_at`; não os envie. A ingestão também preserva a decisão/status de uma vaga existente para que agentes não avancem o fluxo controlado pelo usuário.
@@ -327,6 +324,7 @@ A vaga deve estar marcada como de interesse, o currículo associado deve estar a
 | --- | --- | --- |
 | `list` | `GET /api/authorized-applications` | exige `RADAR_AUTO_APPLICATION_ENABLED=true` e o token interno; mostra `nonce`, hash da URL e TTL |
 | `claim --application <id>` | `POST /api/applications/{id}/claim` | usa o `nonce` da fila, grava o estado local em `.radar/executor/<id>.json` |
+| `heartbeat` | `POST /api/applications/{id}/heartbeat` | renova o lease do claim (`{worker_id}` → `lease_expires_at`); rode logo antes do clique final — erro significa não enviar |
 | `verify --observed-url <url>` | — (mesma `canonicalizeJobUrl` de `dist/src/domain.js`) | aborta se a URL aberta difere da autorizada |
 | `submit --evidence-ref <ref>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id` e sem evidência observada no portal |
 | `fail --reason <código>` | `POST /api/applications/{id}/fail` | grava só o código do motivo; a vaga volta para revisão |
