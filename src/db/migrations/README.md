@@ -13,7 +13,8 @@ Toda mudança de schema (tabela, coluna, índice) e toda migração de dados pas
   pendentes na ordem do array `MIGRATIONS` (`index.ts`), grava cada id e faz `COMMIT`. Se algo
   falhar, o lote inteiro é desfeito. Dashboard e servidor MCP podem subir juntos sobre o mesmo
   arquivo: um espera o outro (`busy_timeout`) e cada migração roda uma única vez.
-- `0001_baseline` é o schema histórico completo + as migrações de dados antigas. É idempotente
+- `0001_baseline` é o schema histórico completo (inclusive `dashboard_sessions` e as tabelas dos
+  conectores, antes criadas no import de `src/connectors/store.ts`) + as migrações de dados antigas. É idempotente
   porque bancos anteriores ao versionamento também a executam (e só ganham o registro).
 
 ## Ids reservados (branches em paralelo)
@@ -53,8 +54,8 @@ quando foi escrita. O runner aplica qualquer id ausente, mesmo que um id maior j
    - já roda dentro da transação `BEGIN EXCLUSIVE`: **não** use `BEGIN`/`COMMIT`
      (se precisar de atomicidade parcial use `tx(db, fn)` de `../connection.js`, que vira SAVEPOINT);
    - não altere pragmas que exigem estar fora de transação (`journal_mode`, `foreign_keys`);
-   - não importe `src/db.ts` (import circular): use só `db` recebido, `../util.js`,
-     `../agent-configs.js` e módulos sem estado;
+   - não importe `src/db.ts` nem módulos que o importam (import circular): use só o `db` recebido,
+     `../util.js`, `../agent-configs.js`, `../dedup-keys.js`, `../../domain.js` e módulos sem estado;
    - nunca edite uma migração já publicada; corrija com uma nova.
 4. Teste: `test/migrations.test.mjs` mostra como abrir um banco temporário e chamar
    `migrate()`; acrescente lá (ou num teste da feature) o caso da sua migração.

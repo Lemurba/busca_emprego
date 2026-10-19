@@ -223,6 +223,51 @@ describe("#32 executor", () => {
     store.updateAutomationSettings({ ats_allowlist: store.automationOverview().ats_allowlist.concat(["greenhouse.io", "lever.co"]) }, "lan-user");
   });
 
+  test("lease × espera humana: aguardando confirmação final ou pausado não perde o lease; TTL ainda vale", () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const expireLease = (run) => store.db.prepare("UPDATE application_authorizations SET lease_expires_at=? WHERE application_id=? AND state='claimed'").run(past, run.application.id);
+
+    // Aguardando o ENVIAR: lease vencido não derruba a reserva; o ENVIAR renova o lease.
+    const waiting = claimed("worker-lease-wait");
+    request(waiting);
+    expireLease(waiting);
+    store.expireAuthorizations();
+    assert.equal(authOf(waiting.application.id).state, "claimed");
+    assert.equal(appOf(waiting.application.id).status, "awaiting_final_confirmation");
+    store.confirmFinalSubmission(waiting.application.id, "ENVIAR", "lan-user");
+    assert.ok(authOf(waiting.application.id).lease_expires_at > new Date().toISOString(), "o ENVIAR reinicia o lease");
+    const token = store.pollFinalConfirmation(waiting.application.id, waiting.worker).submit_token;
+    assert.equal(submit(waiting, token).status, "submitted");
+
+    // Executor trabalhando (in_progress) sem heartbeat: o lease vence normalmente (#18).
+    const silent = claimed("worker-lease-silent");
+    expireLease(silent);
+    store.expireAuthorizations();
+    assert.equal(authOf(silent.application.id).state, "expired");
+    assert.equal(appOf(silent.application.id).status, "needs_review");
+
+    // Pausado pelo kill-switch: lease vencido não expira; religar renova o lease.
+    const paused = claimed("worker-lease-pause");
+    store.updateAutomationSettings({ enabled: false }, "lan-user");
+    expireLease(paused);
+    store.expireAuthorizations();
+    assert.equal(authOf(paused.application.id).state, "claimed");
+    store.updateAutomationSettings({ enabled: true }, "lan-user");
+    assert.equal(appOf(paused.application.id).status, "in_progress");
+    assert.ok(authOf(paused.application.id).lease_expires_at > new Date().toISOString(), "religar reinicia o lease");
+    store.failAuthorizedApplication(paused.application.id, { worker_id: paused.worker, reason: "fim do teste" });
+
+    // Espera humana além do TTL da emissão: expira sem envio e volta para revisão.
+    const stale = claimed("worker-lease-ttl");
+    request(stale);
+    store.db.prepare("UPDATE application_authorizations SET lease_expires_at=?,expires_at=? WHERE application_id=? AND state='claimed'").run(past, past, stale.application.id);
+    store.expireAuthorizations();
+    assert.equal(authOf(stale.application.id).state, "expired");
+    assert.equal(authOf(stale.application.id).revocation_reason, "expired_waiting_human");
+    assert.equal(appOf(stale.application.id).status, "needs_review");
+    assert.equal(store.getJob(stale.job.id).status, "ready_to_apply");
+  });
+
   test("dia operacional em America/Sao_Paulo (UTC-3)", () => {
     const late = automationDayBounds(Date.parse("2026-10-20T02:30:00.000Z"));
     assert.equal(late.date, "2026-10-19", "23h30 em São Paulo ainda é o dia 19");

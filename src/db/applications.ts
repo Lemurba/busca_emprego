@@ -29,6 +29,12 @@ import { idFor, now } from "./util.js";
  * Ao religar, essas candidaturas voltam para `in_progress` com o mesmo worker, que precisa
  * pedir uma nova confirmação final antes de enviar. `fail` continua permitido durante a pausa.
  *
+ * Lease do claim (#18): enquanto a execução espera o humano (`awaiting_final_confirmation` ou
+ * pausada pelo kill-switch) o lease sozinho não derruba a reserva — ela vale até o mais tardio
+ * entre o lease e o TTL da emissão (`expires_at`).
+ * Pedir a confirmação, confirmar (ENVIAR), consultar (poll) e religar reiniciam o lease, para que
+ * o worker não perca a reserva logo depois de uma espera longa do usuário.
+ *
  * Este módulo não importa src/db.ts (import circular): db.ts monta o executor com
  * `createExecutor(deps)` passando a conexão e as funções internas que ele reaproveita.
  */
@@ -122,6 +128,8 @@ export type ExecutorDeps = {
   revokeAuthorizationRows: (applicationId: string, reason: string) => void;
   abortApplyingJob: (jobId: string, reason: string, actor: string) => void;
   listApplications: () => Application[];
+  /** #18 — fim de um lease novo do claim (o mesmo do heartbeat). */
+  leaseExpiresAt: () => string;
 };
 
 export function createExecutor(deps: ExecutorDeps) {
@@ -184,7 +192,7 @@ export function createExecutor(deps: ExecutorDeps) {
       db.prepare(`INSERT INTO application_evidence (id,application_id,authorization_id,kind,mime,sha256,data,summary_json,observed_url,created_by,created_at)
         VALUES (?,?,?,'final_confirmation','image/png',?,?,?,?,?,?)`).run(evidenceId, applicationId, String(authorization.id), sha256Hex(screenshot), screenshot, JSON.stringify(fields), canonicalizeJobUrl(String(input.observed_url)), `worker:${worker}`, timestamp);
       const updated = db.prepare(`UPDATE application_authorizations SET final_confirmation_requested_at=?,final_evidence_id=?,final_confirmation_at=NULL,final_confirmation_by=NULL,
-        submit_token_hash=NULL,submit_token_issued_at=NULL WHERE id=? AND state='claimed' AND claimed_by=?`).run(timestamp, evidenceId, String(authorization.id), worker);
+        submit_token_hash=NULL,submit_token_issued_at=NULL,lease_expires_at=?,heartbeat_at=? WHERE id=? AND state='claimed' AND claimed_by=?`).run(timestamp, evidenceId, deps.leaseExpiresAt(), timestamp, String(authorization.id), worker);
       if (!updated.changes) throw new Error("application.authorization.unavailable");
       db.prepare("UPDATE applications SET status='awaiting_final_confirmation',current_step='Aguardando sua confirmação final no painel',updated_at=? WHERE id=?").run(timestamp, applicationId);
       audit("application", applicationId, "final_confirmation_requested", { worker_id: worker, authorization_id: authorization.id, evidence_id: evidenceId, fields: fields.length, screenshot_bytes: screenshot.length });
@@ -206,8 +214,9 @@ export function createExecutor(deps: ExecutorDeps) {
         throw new Error("application.final_confirmation.not_pending");
       }
       assertAtsUrl(db, authorization.application_url, settings);
-      const updated = db.prepare("UPDATE application_authorizations SET final_confirmation_at=?,final_confirmation_by=? WHERE id=? AND state='claimed' AND final_confirmation_at IS NULL")
-        .run(timestamp, actor.slice(0, 120), String(authorization.id));
+      // O worker volta a trabalhar: lease novo (a espera do usuário não conta contra ele).
+      const updated = db.prepare("UPDATE application_authorizations SET final_confirmation_at=?,final_confirmation_by=?,lease_expires_at=? WHERE id=? AND state='claimed' AND final_confirmation_at IS NULL")
+        .run(timestamp, actor.slice(0, 120), deps.leaseExpiresAt(), String(authorization.id));
       if (!updated.changes) throw new Error("application.final_confirmation.not_pending");
       db.prepare("UPDATE applications SET status='in_progress',current_step='Envio confirmado por você; aguardando o executor concluir',updated_at=? WHERE id=? AND status='awaiting_final_confirmation'").run(timestamp, applicationId);
       audit("application", applicationId, "final_confirmation_given", { actor, authorization_id: authorization.id, evidence_id: authorization.final_evidence_id });
@@ -244,7 +253,10 @@ export function createExecutor(deps: ExecutorDeps) {
     const timestamp = now();
     return tx(() => {
       const { authorization, worker } = deps.claimedAuthorizationFor(applicationId, String(workerId ?? ""));
-      const base = { application_id: applicationId, application_status: String(authorization.application_status), requested_at: authorization.final_confirmation_requested_at ?? null, confirmed_at: authorization.final_confirmation_at ?? null };
+      // A consulta do worker vale como heartbeat (#18).
+      const lease = deps.leaseExpiresAt();
+      db.prepare("UPDATE application_authorizations SET lease_expires_at=?,heartbeat_at=? WHERE id=? AND state='claimed' AND claimed_by=?").run(lease, timestamp, String(authorization.id), worker);
+      const base = { application_id: applicationId, application_status: String(authorization.application_status), requested_at: authorization.final_confirmation_requested_at ?? null, confirmed_at: authorization.final_confirmation_at ?? null, lease_expires_at: lease };
       if (authorization.paused_at) return { ...base, status: "paused" as const };
       if (!authorization.final_confirmation_requested_at) return { ...base, status: "not_requested" as const };
       if (!authorization.final_confirmation_at) return { ...base, status: "pending" as const };
@@ -336,7 +348,7 @@ export function createExecutor(deps: ExecutorDeps) {
       FROM application_authorizations auth JOIN applications ON applications.authorization_id = auth.id WHERE auth.state='claimed' AND auth.paused_at IS NOT NULL`).all() as { authorization_id: string; application_id: string; status: string }[];
     let resumed = 0;
     for (const row of rows) {
-      db.prepare("UPDATE application_authorizations SET paused_at=NULL WHERE id=?").run(row.authorization_id);
+      db.prepare("UPDATE application_authorizations SET paused_at=NULL,lease_expires_at=? WHERE id=?").run(deps.leaseExpiresAt(), row.authorization_id);
       const waitingHuman = db.prepare("SELECT 1 FROM human_questions WHERE application_id=? AND status IN ('pending','delivered','delivery_failed') LIMIT 1").get(row.application_id);
       if (row.status === "needs_review" && !waitingHuman) {
         resumed += Number(db.prepare("UPDATE applications SET status='in_progress',current_step='Automação retomada; peça uma nova confirmação final antes do envio',updated_at=? WHERE id=? AND status='needs_review'").run(timestamp, row.application_id).changes);

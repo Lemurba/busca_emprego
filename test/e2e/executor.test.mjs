@@ -37,7 +37,8 @@ import { dashboardSession, sessionClient } from "../helpers/dashboard-session.mj
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const token = `executor-token-${randomUUID()}`;
-const dashboardToken = `executor-dash-${randomUUID()}`;
+const dashboardToken = `dash-${randomUUID()}`;
+const sessionCookies = new Map();
 const LINKED_IDENTITY = "executor-chat-7";
 const directory = mkdtempSync(join(tmpdir(), "radar-executor-"));
 const stateDir = join(directory, "state");
@@ -69,6 +70,9 @@ async function startServer({ automation }) {
     await sleep(100);
   }
   if (!ready) { child.kill("SIGTERM"); throw new Error(`servidor não ficou pronto: ${stderr.slice(0, 300)}`); }
+  // Portões humanos (interesse, APROVO, AUTORIZO) exigem a sessão do dashboard (#10).
+  const login = await fetch(`${baseUrl}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  sessionCookies.set(baseUrl, (login.headers.get("set-cookie") ?? "").split(";")[0]);
   return { baseUrl, stop: async () => { child.kill("SIGTERM"); await new Promise((r) => { child.once("exit", r); setTimeout(r, 1500); }); } };
 }
 
@@ -79,10 +83,21 @@ const screenshotPath = join(directory, "tela.png");
 writeFileSync(screenshotPath, Buffer.from(TINY_PNG_BASE64, "base64"));
 const fieldsPath = join(directory, "campos.json");
 writeFileSync(fieldsPath, JSON.stringify(FIELDS_SUMMARY));
-const api = async (method, path, body) => {
+/** Só o token de serviço (sem cookie): é o que o executor/Hermes tem. */
+const serviceOnly = async (method, path, body) => {
   const res = await fetch(`${base}${path}`, {
     method,
     headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await res.json(); } catch {}
+  return { status: res.status, data };
+};
+const api = async (method, path, body) => {
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, cookie: sessionCookies.get(base) ?? "" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;
@@ -146,9 +161,9 @@ try {
 
   await test("authorize-auto com token de serviço é recusado (sessão obrigatória) e LinkedIn não é ATS", async () => {
     const pending = await preparedApplication("servico", "https://boards.greenhouse.io/exemplo/jobs/servico", { authorize: false });
-    const viaService = await api("POST", `/api/applications/${pending.application.id}/authorize-auto`, { resume_id: pending.resume.id, confirmation: "AUTORIZO" });
+    const viaService = await serviceOnly("POST", `/api/applications/${pending.application.id}/authorize-auto`, { resume_id: pending.resume.id, confirmation: "AUTORIZO" });
     assert.equal(viaService.status, 403);
-    assert.equal(viaService.data?.error, "session_required");
+    assert.equal(viaService.data?.error, "human_session_required");
     const linkedin = await preparedApplication("linkedin", "https://www.linkedin.com/jobs/view/123/apply", { authorize: false });
     const refused = await human("POST", `/api/applications/${linkedin.application.id}/authorize-auto`, { resume_id: linkedin.resume.id, confirmation: "AUTORIZO" });
     assert.equal(refused.status, 422);
@@ -195,6 +210,17 @@ try {
     const ok = executor("verify", "--application", first.application.id, "--observed-url", "https://boards.greenhouse.io/alpha/jobs/1?utm_source=radar&utm_medium=email", "--json");
     assert.equal(ok.status, 0, `verify saiu com ${ok.status}: ${ok.stderr}${ok.stdout}`);
     assert.match(ok.stdout, /"matches": true/u);
+  });
+
+  await test("heartbeat renova o lease do claim pela rota interna e recusa outro worker", async () => {
+    const result = executor("heartbeat", "--application", first.application.id, "--json");
+    assert.equal(result.status, 0, `heartbeat saiu com ${result.status}: ${result.stderr}`);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.authorization_valid, true);
+    assert.ok(new Date(payload.lease_expires_at).getTime() > Date.now(), "lease já vencido");
+    const other = await api("POST", `/api/applications/${first.application.id}/heartbeat`, { worker_id: "outro-worker" });
+    assert.equal(other.status, 422);
+    assert.equal(other.data?.error, "application.claim.worker_mismatch");
   });
 
   await test("envio sem evidência é recusado", () => {
@@ -248,7 +274,7 @@ try {
     assert.equal(image.headers.get("content-type"), "image/png");
     assert.deepEqual([...new Uint8Array(await image.arrayBuffer()).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
 
-    const viaService = await api("POST", `/api/applications/${first.application.id}/confirm-final`, { confirmation: "ENVIAR" });
+    const viaService = await serviceOnly("POST", `/api/applications/${first.application.id}/confirm-final`, { confirmation: "ENVIAR" });
     assert.equal(viaService.status, 403, "o executor não confirma o próprio envio");
     assert.equal((await human("POST", `/api/applications/${first.application.id}/confirm-final`, { confirmation: "sim" })).status, 422);
     const confirmed = await human("POST", `/api/applications/${first.application.id}/confirm-final`, { confirmation: "ENVIAR" });
@@ -268,7 +294,7 @@ try {
   });
 
   await test("kill-switch: só a sessão muda; pausar bloqueia a fila; religar mantém a autorização emitida", async () => {
-    assert.equal((await api("PUT", "/api/settings/automation", { enabled: false })).status, 403);
+    assert.equal((await serviceOnly("PUT", "/api/settings/automation", { enabled: false })).status, 403);
     assert.equal((await human("PUT", "/api/settings/automation", { enabled: "não" })).status, 400);
     const paused = await human("PUT", "/api/settings/automation", { enabled: false });
     assert.equal(paused.status, 200);
