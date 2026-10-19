@@ -212,6 +212,8 @@ const FRIENDLY: Record<string, string> = {
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
   "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
   "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
+  "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: um parser não enxerga parte do currículo. Corrija o conteúdo; a justificativa de exceção não libera esse bloqueio.",
+  "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio em evidence.",
 };
 
 /** status por código: regras na ordem; a primeira que casar vence. */
@@ -222,6 +224,7 @@ const STATUS_RULES: Array<[RegExp, number]> = [
   [/\.forbidden$|\.internal_route_required$/u, 403],
   [/(?:^|\.)not_found$/u, 404],
   [/version_conflict|\.race$|\.already_active$/u, 409],
+  [/^resume\.pdf_parse_failed$/u, 409],
   [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
   [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict|decision)\./u, 422],
 ];

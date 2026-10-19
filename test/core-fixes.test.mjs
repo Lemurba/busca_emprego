@@ -346,8 +346,8 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
       const insert = seed.db.prepare("INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,score_final,criteria_json,created_at) VALUES (?,?,?,NULL,NULL,?,?,?,?,'[]',?)");
       insert.run("old-1", "busca-emprego", "legacy-score-job", 50, 100, "low_match", 50, "2026-01-01T00:00:00.000Z");
       insert.run("old-2", "busca-emprego", "legacy-score-job", 70, 100, "review", 70, "2026-02-01T00:00:00.000Z");
-      // Banco anterior ao versionamento: sem "0001_baseline" registrado, o baseline roda de novo na abertura.
-      seed.db.exec("DELETE FROM schema_migrations WHERE name='0001_baseline'");
+      // Banco anterior ao versionamento: nenhuma migração versionada registrada; todas rodam de novo na abertura.
+      seed.db.exec("DELETE FROM schema_migrations WHERE name GLOB '[0-9][0-9][0-9][0-9]_*'");
     } finally {
       seed.db.close();
     }

@@ -1,4 +1,5 @@
 import { baseline } from "./0001_baseline.js";
+import { migration0005 } from "./0005_score_cobertura_eliminatorios.js";
 import type { Migration } from "./types.js";
 
 /**
@@ -13,7 +14,8 @@ import type { Migration } from "./types.js";
  * Próximo id livre para outras mudanças: 0007.
  */
 export const MIGRATIONS: readonly Migration[] = [
-  baseline
+  baseline,
+  migration0005
 ];
 
 export type { Migration } from "./types.js";

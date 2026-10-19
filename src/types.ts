@@ -1,3 +1,6 @@
+import type { JobRequirements } from "./blockers.js";
+import type { ResumeCoverage } from "./coverage.js";
+
 export type JobStatus =
   | "found"
   | "validation"
@@ -56,6 +59,8 @@ export interface Job {
   role_family?: string | null;
   role_family_confidence?: number | null;
   suppressed?: boolean;
+  /** Exigências explícitas do anúncio (eliminatórios); null quando a vaga não declara nenhuma. */
+  requirements_json?: JobRequirements | null;
   status: JobStatus;
   version: number;
   posted_at: string | null;
@@ -131,6 +136,10 @@ export interface Resume {
   gaps?: string[];
   review_status?: "not_run" | "pass" | "fail" | "override";
   review_findings?: string[];
+  /** Cobertura de requisitos determinística (src/coverage.ts). */
+  coverage?: ResumeCoverage | null;
+  /** Resumo do último teste de leitura do PDF (sem o texto extraído). */
+  parse_check?: { ok: boolean; stale: boolean; missing: string[]; checked_at: string; token_ratio: number } | null;
   created_at: string;
   updated_at: string;
 }
