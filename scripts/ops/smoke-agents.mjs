@@ -16,7 +16,7 @@
  *  10. Rodada de busca: prontidão de fonte, ingestão idempotente, conclusão.
  *  11. Endurecimento: token interno obrigatório, automação desligada por padrão.
  *  12. Ponte Telegram: entrega de pergunta humana pela capability vinculada.
- *  13. Servidor MCP oficial via stdio (handshake, tools/list, tools/call).
+ *  13. Servidor MCP oficial via stdio, um processo por papel (handshake, tools/list, tools/call).
  *
  * Uso: node scripts/ops/smoke-agents.mjs [--keep-db]
  * Requer: npm run build executado (dist/ presente).
@@ -30,12 +30,14 @@ import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PRESETS } from "../../dist/src/agent-defaults.js";
-import { RADAR_MCP_TOOLS } from "../../dist/src/mcp-tools.js";
+import { RADAR_MCP_ROLES, RADAR_MCP_TOOLS } from "../../dist/src/mcp-tools.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const keepDb = process.argv.includes("--keep-db");
 const SMOKE_CHAT = "smoke-chat-42";
 const token = `smoke-token-${randomUUID()}`;
+const dashboardToken = `smoke-dashboard-${randomUUID()}`;
+const sessionCookies = new Map();
 const startedAt = new Date().toISOString();
 
 if (!existsSync(join(repoRoot, "dist/src/server.js"))) {
@@ -58,7 +60,7 @@ async function startServer({ dbPath, automation = "true", extraEnv = {} }) {
     env: {
       ...process.env, PORT: String(port), RADAR_DB_PATH: dbPath, RADAR_ENVIRONMENT: "production",
       RADAR_OPERATOR_ID: "smoke-operator", RADAR_TRUST_PROXY_TLS: "true",
-      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: automation,
+      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_DASHBOARD_TOKEN: dashboardToken, RADAR_AUTO_APPLICATION_ENABLED: automation,
       HERMES_LINKED_RECIPIENT_ID: SMOKE_CHAT, ...extraEnv,
     },
   });
@@ -71,6 +73,9 @@ async function startServer({ dbPath, automation = "true", extraEnv = {} }) {
     await sleep(100);
   }
   if (!ready) { child.kill("SIGTERM"); throw new Error(`servidor não ficou pronto: ${stderr.slice(0, 400)}`); }
+  // Interesse, APROVO, candidatura e AUTORIZO são portões humanos: exigem a sessão do dashboard.
+  const login = await fetch(`${baseUrl}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  sessionCookies.set(baseUrl, (login.headers.get("set-cookie") ?? "").split(";")[0]);
   return {
     baseUrl, child,
     stop: async () => { child.kill("SIGTERM"); await new Promise((r) => { child.once("exit", r); setTimeout(r, 2000); }); },
@@ -95,7 +100,7 @@ let base = "";
 const api = async (method, path, body, extraHeaders = {}) => {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, ...extraHeaders },
+    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, cookie: sessionCookies.get(base) ?? "", ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;
@@ -672,7 +677,7 @@ try {
   await t("MCP lista exatamente as ferramentas registradas e lê os 24 agentes do banco", async () => {
     const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
       cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, RADAR_DB_PATH: dbPath },
+      env: { ...process.env, RADAR_DB_PATH: dbPath, RADAR_MCP_ROLE: "leitura" },
     });
     try {
       const responses = await mcpCall(child, [
@@ -685,15 +690,40 @@ try {
       assert.ok(responses.get(1)?.result?.serverInfo?.name === "radar-vagas", "handshake MCP falhou");
       const tools = responses.get(2)?.result?.tools ?? [];
       const names = tools.map((tool) => tool.name);
-      assert.deepEqual([...names].sort(), [...RADAR_MCP_TOOLS].sort(), "ferramentas MCP divergem de RADAR_MCP_TOOLS");
-      assert.ok(!names.includes("radar_answer_question"), "respostas humanas não podem entrar pelo MCP");
+      assert.deepEqual([...names].sort(), [...RADAR_MCP_ROLES.leitura.tools].sort(), "ferramentas MCP divergem de RADAR_MCP_ROLES.leitura");
       const listed = responses.get(3)?.result?.structuredContent?.agents ?? [];
       assert.equal(listed.length, 24, `MCP listou ${listed.length} agentes`);
       const job = responses.get(4)?.result?.structuredContent?.job;
       assert.ok(job?.title?.includes("Smoke"), "MCP não leu a vaga criada");
+      assert.ok(job?.untrusted_content?.warning, "campos da web sem envelope untrusted_content");
     } finally {
       child.kill("SIGTERM");
     }
+  });
+
+  await t("MCP: cada papel registra só as próprias ferramentas; executor é o único com claim/submit/fail", async () => {
+    const union = new Set();
+    for (const [role, spec] of Object.entries(RADAR_MCP_ROLES)) {
+      const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
+        cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, RADAR_DB_PATH: dbPath, RADAR_MCP_ROLE: role },
+      });
+      try {
+        const responses = await mcpCall(child, [
+          { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "1.0.0" } } },
+          { jsonrpc: "2.0", method: "notifications/initialized" },
+          { jsonrpc: "2.0", id: 2, method: "tools/list" },
+        ]);
+        const names = (responses.get(2)?.result?.tools ?? []).map((tool) => tool.name);
+        assert.deepEqual([...names].sort(), [...spec.tools].sort(), `ferramentas do papel ${role}`);
+        assert.ok(!names.includes("radar_answer_question"), "respostas humanas não podem entrar pelo MCP");
+        if (role !== "executor") assert.ok(!names.includes("radar_claim_application"), `papel ${role} expõe ferramenta do executor`);
+        for (const name of names) union.add(name);
+      } finally {
+        child.kill("SIGTERM");
+      }
+    }
+    assert.deepEqual([...union].sort(), [...RADAR_MCP_TOOLS].sort(), "papéis não cobrem RADAR_MCP_TOOLS");
   });
 } catch (error) {
   results.push({ section: "execução", name: "erro fatal", ok: false, error: String(error?.message ?? error) });

@@ -2,13 +2,15 @@
 
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
+import { DomainError } from "./errors.js";
 
-export class DomainValidationError extends Error {
+/** Campo inválido: sempre 422, com `field` nos detalhes e mensagem pt-BR segura. */
+export class DomainValidationError extends DomainError {
   constructor(
     message: string,
     readonly field: string,
   ) {
-    super(message);
+    super(`validation.${field}`, 422, { field }, message);
     this.name = "DomainValidationError";
   }
 }
@@ -56,7 +58,8 @@ export function companyKey(company: string, legalSuffixes: readonly string[] = D
   return key;
 }
 
-const TRACKING_PARAMETERS = new Set(["gclid", "fbclid"]);
+// Parâmetros de rastreamento removidos de qualquer domínio (além de utm_*).
+const TRACKING_PARAMETERS = new Set(["gclid", "fbclid", "msclkid", "dclid", "yclid", "igshid", "mc_cid", "mc_eid", "_hsenc", "_hsmi"]);
 
 /** Blocks literal private/link-local destinations before any connector fetches them. */
 export function isPrivateDestination(hostname: string): boolean {
@@ -78,10 +81,15 @@ export function isPrivateDestination(hostname: string): boolean {
   return false;
 }
 
-export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly string[]): URL {
+/**
+ * URL pública http(s): credenciais, destino privado e allowlist valem para os dois esquemas.
+ * `http:` é aceito para descoberta/visualização (vaga marcada `insecure_url`); o executor
+ * exige HTTPS à parte (ver `isHttpsUrl`).
+ */
+export function assertPublicHttpUrl(input: string, allowedDomains?: readonly string[]): URL {
   let url: URL;
   try { url = new URL(normalizeUnicode(input)); } catch { throw new DomainValidationError("URL inválida", "url"); }
-  if (url.protocol !== "https:") throw new DomainValidationError("A URL deve usar HTTPS", "url");
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new DomainValidationError("A URL deve usar HTTP ou HTTPS", "url");
   if (url.username || url.password) throw new DomainValidationError("URL não pode conter credenciais", "url");
   const hostname = url.hostname.toLowerCase();
   if (isPrivateDestination(hostname)) throw new DomainValidationError("Destino privado não permitido", "url");
@@ -89,6 +97,17 @@ export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly st
     throw new DomainValidationError("Domínio não permitido", "url");
   }
   return url;
+}
+
+export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly string[]): URL {
+  const url = assertPublicHttpUrl(input, allowedDomains);
+  if (url.protocol !== "https:") throw new DomainValidationError("A URL deve usar HTTPS", "url");
+  return url;
+}
+
+/** true só para URL https: válida (o executor recusa qualquer outra). */
+export function isHttpsUrl(input: string | null | undefined): boolean {
+  try { return new URL(String(input ?? "").trim()).protocol === "https:"; } catch { return false; }
 }
 
 /** Resolves every address to avoid accepting a public hostname that points at LAN. */
@@ -101,20 +120,115 @@ export async function assertResolvablePublicHttpsUrl(input: string, allowedDomai
   return url;
 }
 
-/** Canonical form used for identity. The original URL should still be stored separately. */
-export function canonicalizeJobUrl(input: string): string {
-  const url = assertPublicHttpsUrl(input);
+/**
+ * Regra de identidade de um portal: `match` reconhece o host, `jobId` extrai o ID nativo da
+ * vaga e `keep` é a allowlist de parâmetros de identidade (todo o resto da query é descartado).
+ * `canonical` reescreve a URL para a forma estável do portal quando há ID.
+ */
+interface PortalRule {
+  portal: string;
+  match: (host: string) => boolean;
+  jobId: (url: URL) => string | null;
+  keep: readonly string[];
+  canonical?: (url: URL, jobId: string) => string;
+}
+
+const hostIs = (domain: string) => (host: string) => host === domain || host.endsWith(`.${domain}`);
+const numericParam = (url: URL, name: string) => {
+  const value = url.searchParams.get(name);
+  return value && /^\d+$/u.test(value) ? value : null;
+};
+const UUID_SEGMENT = /^\/[^/]+\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/iu;
+
+const PORTAL_RULES: readonly PortalRule[] = [
+  {
+    // /jobs/view/123, /jobs/view/cargo-na-empresa-123 ou listas com ?currentJobId=123.
+    portal: "linkedin",
+    match: hostIs("linkedin.com"),
+    jobId: (url) => url.pathname.match(/^\/jobs\/view\/(?:[^/]*-)?(\d{6,})(?:\/|$)/u)?.[1] ?? numericParam(url, "currentJobId"),
+    keep: [],
+    // Subdomínios de país (br.linkedin.com), slugs e listas apontam para a mesma vaga.
+    canonical: (_url, jobId) => `https://linkedin.com/jobs/view/${jobId}`,
+  },
+  {
+    // empresa.gupy.io/jobs/123?jobBoardSource=...
+    portal: "gupy",
+    match: hostIs("gupy.io"),
+    jobId: (url) => url.pathname.match(/\/jobs?\/(\d+)(?:\/|$)/u)?.[1] ?? null,
+    keep: [],
+  },
+  {
+    // boards.greenhouse.io/empresa/jobs/123, job-boards.greenhouse.io/... ou embed/job_app?for=empresa&token=123.
+    portal: "greenhouse",
+    match: hostIs("greenhouse.io"),
+    jobId: (url) => url.pathname.match(/\/jobs\/(\d+)(?:\/|$)/u)?.[1] ?? numericParam(url, "token") ?? numericParam(url, "gh_jid"),
+    keep: ["for", "token", "gh_jid"],
+  },
+  {
+    // jobs.lever.co/empresa/<uuid>[/apply]
+    portal: "lever",
+    match: hostIs("lever.co"),
+    jobId: (url) => url.pathname.match(UUID_SEGMENT)?.[1]?.toLowerCase() ?? null,
+    keep: [],
+  },
+  {
+    // jobs.ashbyhq.com/empresa/<uuid>[/application]
+    portal: "ashby",
+    match: hostIs("ashbyhq.com"),
+    jobId: (url) => url.pathname.match(UUID_SEGMENT)?.[1]?.toLowerCase() ?? null,
+    keep: [],
+  },
+  {
+    // br.indeed.com/viewjob?jk=..., /rc/clk?jk=..., /m/viewjob?jk=... ou busca com ?vjk=...
+    portal: "indeed",
+    match: hostIs("indeed.com"),
+    jobId: (url) => [url.searchParams.get("jk"), url.searchParams.get("vjk")].find((value) => value && /^[0-9a-f]{16}$/iu.test(value))?.toLowerCase() ?? null,
+    keep: ["jk"],
+    canonical: (url, jobId) => `https://${url.hostname}/viewjob?jk=${jobId}`,
+  },
+];
+
+export interface JobUrlIdentity {
+  canonicalUrl: string;
+  /** Portal reconhecido (linkedin, gupy, greenhouse, lever, ashby, indeed) quando a URL expõe o ID. */
+  portal: string | null;
+  /** ID nativo da vaga no portal. */
+  portalJobId: string | null;
+}
+
+/**
+ * Identidade derivada da URL. Remove `www.`, fragmento e barra final e ordena a query; nos
+ * portais conhecidos mantém só a allowlist de parâmetros de identidade. Nos demais domínios
+ * só o rastreamento conhecido sai, porque a query pode identificar a vaga.
+ */
+export function jobUrlIdentity(input: string): JobUrlIdentity {
+  const url = assertPublicHttpUrl(input);
 
   url.hash = "";
-  for (const key of [...url.searchParams.keys()]) {
-    const normalizedKey = key.toLocaleLowerCase("und");
-    if (normalizedKey.startsWith("utm_") || TRACKING_PARAMETERS.has(normalizedKey)) {
-      url.searchParams.delete(key);
-    }
-  }
+  url.hostname = url.hostname.replace(/^www\./u, "");
   // URL already lower-cases the hostname. Preserve path case and identifying query.
   if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/u, "");
-  return url.toString();
+  const rule = PORTAL_RULES.find((candidate) => candidate.match(url.hostname));
+  const portalJobId = rule ? rule.jobId(url) : null;
+  for (const key of [...url.searchParams.keys()]) {
+    const normalizedKey = key.toLocaleLowerCase("und");
+    const tracking = normalizedKey.startsWith("utm_") || TRACKING_PARAMETERS.has(normalizedKey);
+    if (tracking || (rule && !rule.keep.includes(key))) url.searchParams.delete(key);
+  }
+  url.searchParams.sort();
+  const canonicalUrl = rule?.canonical && portalJobId ? rule.canonical(url, portalJobId) : url.toString();
+  return { canonicalUrl, portal: rule && portalJobId ? rule.portal : null, portalJobId };
+}
+
+/** Canonical form used for identity. The original URL should still be stored separately. */
+export function canonicalizeJobUrl(input: string): string {
+  return jobUrlIdentity(input).canonicalUrl;
+}
+
+/** `source_job_id` derivado da URL ("portal:id") para itens que chegam sem o ID nativo. */
+export function extractSourceJobId(input: string): string | null {
+  const identity = jobUrlIdentity(input);
+  return identity.portal && identity.portalJobId ? `${identity.portal}:${identity.portalJobId}` : null;
 }
 
 export interface FieldValidationResult<T> {
@@ -243,14 +357,19 @@ export function locationsCompatible(left: FuzzyJobCandidate, right: FuzzyJobCand
   return normalizeComparableText(left.location) === normalizeComparableText(right.location);
 }
 
-function publicationWithinDays(left: string | null, right: string | null, days: number): boolean {
-  if (!left || !right) return false;
-  const leftTime = Date.parse(left);
-  const rightTime = Date.parse(right);
-  return Number.isFinite(leftTime) && Number.isFinite(rightTime) && Math.abs(leftTime - rightTime) <= days * 86_400_000;
+/** "within"/"apart" quando as duas datas são válidas; "unknown" (sinal neutro) quando falta alguma. */
+function publicationProximity(left: string | null, right: string | null, days: number): "within" | "apart" | "unknown" {
+  const leftTime = left ? Date.parse(left) : Number.NaN;
+  const rightTime = right ? Date.parse(right) : Number.NaN;
+  if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return "unknown";
+  return Math.abs(leftTime - rightTime) <= days * 86_400_000 ? "within" : "apart";
 }
 
-/** Fuzzy candidates are only flagged; this function can never return a merge/sighting action. */
+/**
+ * Fuzzy candidates are only flagged; this function can never return a merge/sighting action.
+ * Empresa, título e local são obrigatórios; `posted_at` ausente é neutro (muitas fontes não
+ * informam a data) e só datas conhecidas e distantes afastam a suspeita.
+ */
 export function compareFuzzyDuplicate(left: FuzzyJobCandidate, right: FuzzyJobCandidate): FuzzyDuplicateDecision {
   const similarity = titleSimilarity(left.title, right.title);
   const reasons: string[] = [];
@@ -258,7 +377,9 @@ export function compareFuzzyDuplicate(left: FuzzyJobCandidate, right: FuzzyJobCa
   if (leftCompanyKey !== "" && leftCompanyKey === companyKey(right.company)) reasons.push("same_company");
   if (similarity >= 0.92) reasons.push("title_similarity_gte_0_92");
   if (locationsCompatible(left, right)) reasons.push("compatible_location_or_work_model");
-  if (publicationWithinDays(left.postedAt, right.postedAt, 30)) reasons.push("posted_within_30_days");
+  const publication = publicationProximity(left.postedAt, right.postedAt, 30);
+  if (publication === "within") reasons.push("posted_within_30_days");
+  if (publication === "unknown") reasons.push("posted_at_unknown_neutral");
   return {
     action: reasons.length === 4 ? "possible_duplicate" : "distinct",
     similarity,

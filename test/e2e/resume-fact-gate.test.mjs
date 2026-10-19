@@ -32,7 +32,7 @@ for (let attempt = 0; attempt < 80; attempt++) {
 }
 
 let cookie = "";
-async function api(method, path, body, auth = "service") {
+async function api(method, path, body, auth = "session") {
   const headers = { "content-type": "application/json", ...(auth === "service" ? { "x-radar-service-token": serviceToken } : { cookie }) };
   const response = await fetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   let data = null;
@@ -49,10 +49,11 @@ try {
     const profile = await api("POST", "/api/profiles", { facts: [{ type: "experience", value: "Engenheiro de Software na Acme", origin: "user", state: "confirmed" }] });
     assert.equal(profile.status, 201);
     assert.equal((await api("POST", `/api/profiles/${profile.data.id}/confirm`, {})).status, 200);
-    const job = await api("POST", "/api/jobs", { id: "e2e-fact-job", title: "Backend", company: "Contratante", source: "fixture", source_url: "https://jobs.example/e2e-fact" });
-    assert.equal(job.status, 201);
-    assert.equal((await api("POST", "/api/jobs/e2e-fact-job/decision", { decision: "interested", confirmation: "TENHO INTERESSE" })).status, 200);
-    const created = await api("POST", "/api/resumes", { job_id: "e2e-fact-job", title: "CV", content: "Engenheiro de Software na Acme\nReduzi custos em 35% na Initech." });
+    const job = await api("POST", "/api/jobs", { title: "Backend", company: "Contratante", source: "fixture", source_url: "https://jobs.example/e2e-fact" });
+    assert.equal(job.status, 201, JSON.stringify(job.data));
+    const jobId = job.data.id;
+    assert.equal((await api("POST", `/api/jobs/${jobId}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" })).status, 200);
+    const created = await api("POST", "/api/resumes", { job_id: jobId, title: "CV", content: "Engenheiro de Software na Acme\nReduzi custos em 35% na Initech." });
     assert.equal(created.status, 201);
     const resumeId = created.data.id;
 
@@ -67,9 +68,9 @@ try {
     assert.equal(blocked.data.error, "resume.unverified_facts");
 
     const [percent, company] = facts.data.pending;
-    const byService = await api("POST", `/api/resumes/${resumeId}/facts/${percent.claim_id}`, { action: "remove" });
+    const byService = await api("POST", `/api/resumes/${resumeId}/facts/${percent.claim_id}`, { action: "remove" }, "service");
     assert.equal(byService.status, 403, "agente com token de serviço não resolve fato");
-    assert.equal(byService.data.error, "resume.facts.session_required");
+    assert.equal(byService.data.error, "human_session_required");
     assert.equal((await api("POST", `/api/resumes/${resumeId}/facts/${percent.claim_id}`, { action: "apagar" }, "session")).status, 400);
 
     const removed = await api("POST", `/api/resumes/${resumeId}/facts/${percent.claim_id}`, { action: "remove" }, "session");
