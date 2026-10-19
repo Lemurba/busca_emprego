@@ -49,6 +49,7 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 - Consulte `radar_list_agents` e use somente agentes ativos.
 - Invoque o coletor correspondente a cada portal com contexto novo e isolado. Não misture histórico de portais.
 - Registre achado com `radar_discover_job`; depois descarte o contexto de coleta.
+- `requirements_json` (opcional em `radar_discover_job`/lote da rodada) guarda só exigências **explícitas** do anúncio — `location`, `work_model` (`remote`/`hybrid`/`onsite`), `work_authorization` (`{countries, sponsorship}`), `min_years` — cada uma com o trecho literal em `evidence[campo]`. Sem trecho, omita: o Radar recusa (`job.requirements_json.invalid`) e a vaga fica "não verificado".
 - Use pesquisa salarial separada (`radar_enrich_job`), uma vaga por execução, sempre com URL, data e confiança.
 - Normalize e avalie somente dados persistidos. Dado ausente continua ausente.
 - Quando a otimização estiver ativa, use descrição curta, prompt atual e feedback confirmado para propor melhoria com `radar_propose_agent_prompt`. Explique o motivo. A ferramenta cria rascunho; o usuário revisa e publica no dashboard.
@@ -59,11 +60,13 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 - Ofereça duas a quatro alternativas mutuamente exclusivas e `Outro` para texto livre.
 - Aguarde e persista a resposta antes da próxima pergunta.
 - Não repita resposta confirmada. Termine quando houver informação suficiente.
+- Eliminatórios do perfil (`question_key` = tipo do fato): `accepted_locations` (lista de locais ou `["qualquer"]`), `work_models` (`remote`, `hybrid`, `onsite`), `work_authorization` (`{"countries": [...], "needs_sponsorship": false}`) e `years_experience` (número). Sem resposta, não invente: o Radar mostra "não verificado" e nunca bloqueia.
 
 ## Currículo e candidatura
 
 - Crie currículo ATS (`radar_create_resume`, com o `agent_id` do redator) somente para vaga marcada como interesse e usando fatos confirmados.
-- Registre a compatibilidade com `radar_record_score` (agente avaliador): nota 0–100 por critério e `null` quando não houver dado — falta de dado não é nota baixa.
+- Registre a compatibilidade com `radar_record_score` (agente avaliador): nota 0–100 por critério e `null` quando não houver dado — falta de dado não é nota baixa. Envie cada critério como `{value, basis, evidence}`: `basis: "explicit"` só quando a vaga declara o dado (cite o trecho em `evidence`, até 500 caracteres) e `"estimated"` para inferência; número puro conta como estimado. A nota é "Aderência" (estimativa), não nota de ATS; eliminatórios não entram nela.
+- Antes da aprovação o app roda o teste de leitura do PDF (`POST /api/resumes/{id}/parse-check`): se um parser não enxerga contato, títulos de seção ou ≥ 95% do texto, a revisão falha com `pdf.parse_failed` e a aprovação é recusada (`resume.pdf_parse_failed`, 409) mesmo com justificativa. Corrija o conteúdo.
 - PDF e DOCX são gerados pelo aplicativo e ficam no Kanban para revisão e download.
 - Aprovação do currículo (`APROVO`) não autoriza candidatura. Use apenas a fila de `radar_list_authorized_applications` (itens com `AUTORIZO` vigente: id, vaga, hash da URL e validade). Com `automation_disabled`, pare: a candidatura automática está desligada.
 - Protocolo do executor autorizado, sempre pelas ferramentas MCP e com o mesmo `worker_id` do começo ao fim:
