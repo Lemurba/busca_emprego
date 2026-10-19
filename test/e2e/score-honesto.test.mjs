@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const token = `score-token-${randomUUID()}`;
+const dashboardToken = `score-dash-${randomUUID()}`;
+let cookie = "";
 const directory = mkdtempSync(join(tmpdir(), "radar-score-e2e-"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res, rej) => {
@@ -33,7 +35,7 @@ before(async () => {
   const port = await freePort();
   const child = spawn(process.execPath, ["dist/src/server.js"], {
     cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "score.sqlite"), RADAR_ENVIRONMENT: "development", RADAR_INTERNAL_SERVICE_TOKEN: token },
+    env: { ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "score.sqlite"), RADAR_ENVIRONMENT: "development", RADAR_TRUST_PROXY_TLS: "true", RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_DASHBOARD_TOKEN: dashboardToken },
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk; });
@@ -43,6 +45,9 @@ before(async () => {
     await sleep(100);
   }
   server = { child, stderr: () => stderr };
+  // Portões humanos (interesse, APROVO) exigem a sessão do dashboard.
+  const login = await fetch(`${base}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
 });
 after(async () => {
   server?.child.kill("SIGTERM");
@@ -52,7 +57,7 @@ after(async () => {
 
 const api = async (method, path, body) => {
   const res = await fetch(`${base}${path}`, {
-    method, headers: { "content-type": "application/json", "x-radar-service-token": token },
+    method, headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, cookie },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;

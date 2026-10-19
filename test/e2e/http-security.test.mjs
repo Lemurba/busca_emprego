@@ -39,8 +39,13 @@ async function startServer(extraEnv = {}) {
   return { base, port, output: () => output, stop: async () => { child.kill("SIGTERM"); await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); }); } };
 }
 
-/** Requisição crua (permite Host arbitrário e corpo em pedaços). */
-function raw(port, { method = "GET", path = "/", headers = {}, chunks = [] }) {
+/**
+ * Requisição crua (permite Host arbitrário e corpo em pedaços). Com `awaitResponse`, o corpo
+ * nunca é finalizado: os pedaços são escritos (com `[]`, só os cabeçalhos), a resposta é lida
+ * e só então a conexão é encerrada — assim o cliente não está escrevendo quando o servidor
+ * fecha o socket depois de um 413 (o RST descartaria a resposta).
+ */
+function raw(port, { method = "GET", path = "/", headers = {}, chunks = [], awaitResponse = false }) {
   return new Promise((resolve, reject) => {
     const req = httpRequest({ host: "127.0.0.1", port, method, path, headers, agent: false }, (res) => {
       const parts = [];
@@ -50,12 +55,14 @@ function raw(port, { method = "GET", path = "/", headers = {}, chunks = [] }) {
         let json = null;
         try { json = JSON.parse(text); } catch {}
         resolve({ status: res.statusCode, headers: res.headers, text, json });
+        if (awaitResponse) req.destroy();
       });
     });
     req.on("error", reject);
     (async () => {
+      if (awaitResponse) req.flushHeaders();
       for (const chunk of chunks) { req.write(chunk); await sleep(5); }
-      req.end();
+      if (!awaitResponse) req.end();
     })().catch(reject);
   });
 }
@@ -158,34 +165,39 @@ try {
 
   await test("UTF-8 multibyte quebrado entre chunks chega íntegro", async () => {
     const title = "Programação ção ü 😀 — São Paulo";
-    const bytes = Buffer.from(JSON.stringify({ id: "utf8-job", title, company: "Empresa Ação", source: "manual", source_url: "https://example.com/vaga/utf8" }), "utf8");
+    const bytes = Buffer.from(JSON.stringify({ title, company: "Empresa Ação", source: "manual", source_url: "https://example.com/vaga/utf8" }), "utf8");
     const cut = bytes.indexOf(Buffer.from("ç", "utf8")) + 1; // corta no meio do "ç"
     const emoji = bytes.indexOf(Buffer.from("😀", "utf8")) + 2; // corta no meio do emoji
     const response = await raw(port, { method: "POST", path: "/api/jobs", headers: { ...json, ...svc }, chunks: [bytes.subarray(0, cut), bytes.subarray(cut, emoji), bytes.subarray(emoji)] });
     assert.equal(response.status, 201, response.text);
-    const job = await (await fetch(`${base}/api/jobs/utf8-job`, { headers: svc })).json();
+    const job = await (await fetch(`${base}/api/jobs/${encodeURIComponent(JSON.parse(response.text).id)}`, { headers: svc })).json();
     assert.equal(job.title, title);
     assert.equal(job.company, "Empresa Ação");
   });
 
   await test("413 conta bytes (não caracteres), com e sem Content-Length", async () => {
-    const body = JSON.stringify({ title: "é".repeat(600_000) }); // ~600 mil caracteres, ~1,2 MB
-    assert.ok(body.length < 1024 * 1024 && Buffer.byteLength(body) > 1024 * 1024);
-    const chunked = await raw(port, { method: "POST", path: "/api/jobs", headers: { ...json, ...svc, "transfer-encoding": "chunked" }, chunks: [body.slice(0, 300_000), body.slice(300_000)] }).catch((error) => ({ status: "reset", error }));
-    assert.equal(chunked.status, 413, `status ${chunked.status}`);
+    // Só alguns bytes acima do limite de 1 MiB, mas com metade dos caracteres: o limite é em bytes.
+    // O servidor consome tudo o que foi enviado antes de responder, então fechar o socket
+    // depois do 413 não gera RST (que poderia descartar a resposta no cliente).
+    const body = JSON.stringify({ title: "é".repeat(524_290) });
+    assert.ok(body.length < 1024 * 1024 && Buffer.byteLength(body) > 1024 * 1024 && Buffer.byteLength(body) < 1024 * 1024 + 64);
+    const chunked = await raw(port, { method: "POST", path: "/api/jobs", headers: { ...json, ...svc, "transfer-encoding": "chunked" }, chunks: [body], awaitResponse: true }).catch((error) => ({ status: "reset", error }));
+    assert.equal(chunked.status, 413, `status ${chunked.status} ${chunked.error ?? ""}`);
     assert.equal(chunked.json?.error, "payload_too_large");
-    const declared = await fetch(`${base}/api/jobs`, { method: "POST", headers: { ...json, ...svc }, body });
-    assert.equal(declared.status, 413);
+    // Content-Length acima do limite é recusado só pelos cabeçalhos, sem ler nem enviar o corpo.
+    const declared = await raw(port, { method: "POST", path: "/api/jobs", headers: { ...json, ...svc, "content-length": String(Buffer.byteLength(body)) }, awaitResponse: true }).catch((error) => ({ status: "reset", error }));
+    assert.equal(declared.status, 413, `status ${declared.status} ${declared.error ?? ""}`);
+    assert.equal(declared.json?.error, "payload_too_large");
     assert.equal((await fetch(`${base}/api/health`)).status, 200, "servidor segue de pé");
   });
 
   await test("corpo JSON que não é objeto → 400 invalid_body; JSON quebrado → 400 invalid_json", async () => {
     for (const payload of ["null", "[]", "5", "\"texto\""]) {
-      const response = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, ...svc }, body: payload });
+      const response = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, cookie }, body: payload });
       assert.equal(response.status, 400, payload);
       assert.equal((await response.json()).error, "invalid_body", payload);
     }
-    const broken = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, ...svc }, body: "{" });
+    const broken = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { ...json, cookie }, body: "{" });
     assert.equal((await broken.json()).error, "invalid_json");
   });
 
@@ -197,7 +209,7 @@ try {
     assert.match(body.message, /source_url/);
     const badPatch = await fetch(`${base}/api/jobs/utf8-job`, { method: "PATCH", headers: { ...json, ...svc }, body: JSON.stringify({ application_url: "data:text/html,oi" }) });
     assert.equal(badPatch.status, 400);
-    const badType = await fetch(`${base}/api/agents`, { method: "POST", headers: { ...json, ...svc }, body: JSON.stringify({ name: { $gt: "" }, allowed_domains: "a.com" }) });
+    const badType = await fetch(`${base}/api/agents`, { method: "POST", headers: { ...json, cookie }, body: JSON.stringify({ name: { $gt: "" }, allowed_domains: "a.com" }) });
     assert.equal(badType.status, 400);
   });
 

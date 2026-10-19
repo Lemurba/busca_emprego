@@ -8,9 +8,9 @@ import { idFor, insertAuditEvent, now } from "./util.js";
 // código sem import circular. Conteúdo movido de src/db.ts sem mudança de comportamento.
 
 const agentRoles = new Set(["coordinator", "source_scout", "job_enrichment", "normalizer_deduper", "match_evaluator", "preference_learner", "resume_writer", "ats_reviewer", "application_assistant", "custom"]);
-const safeAgentTools = new Set(["agent.invoke", "browser.read", "jobs.read", "jobs.write", "jobs.create", "jobs.enrich", "salary.lookup", "resume.read", "resume.write", "preferences.write", "application.prepare", "telegram.question"]);
+const safeAgentTools = new Set(["agent.invoke", "agents.propose", "browser.read", "jobs.read", "jobs.write", "jobs.create", "jobs.enrich", "salary.lookup", "resume.read", "resume.write", "preferences.write", "application.prepare", "telegram.question"]);
 const roleAgentTools: Record<string, Set<string>> = {
-  coordinator: new Set(["agent.invoke", "jobs.read"]),
+  coordinator: new Set(["agent.invoke", "agents.propose", "jobs.read"]),
   source_scout: new Set(["browser.read", "jobs.read", "jobs.create"]),
   job_enrichment: new Set(["browser.read", "jobs.read", "jobs.enrich", "salary.lookup"]),
   normalizer_deduper: new Set(["jobs.read", "jobs.write"]),

@@ -61,6 +61,8 @@ export interface Job {
   suppressed?: boolean;
   /** Exigências explícitas do anúncio (eliminatórios); null quando a vaga não declara nenhuma. */
   requirements_json?: JobRequirements | null;
+  /** Alguma URL da vaga usa http:// (sem TLS); o executor não atua nela. */
+  insecure_url?: boolean;
   status: JobStatus;
   version: number;
   posted_at: string | null;

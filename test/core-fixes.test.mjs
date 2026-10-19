@@ -217,14 +217,16 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
   test("9. expiração por prazo só depois do fim do dia", () => {
     // 9. Expiration: date-only deadline lasts the whole day; applying jobs are left alone.
     const today = new Date();
-    const pad = (value) => String(value).padStart(2, "0");
-    const dateOnly = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    // Datas no fuso do Radar (America/Sao_Paulo), não no TZ do container (#22).
+    const dateOnly = (date) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(date);
     const yesterday = new Date(today.getTime() - 86_400_000);
     const lastsToday = newJob({ deadline_at: dateOnly(today) });
     const pastDeadline = newJob({ deadline_at: dateOnly(yesterday) });
     const running = claimed("worker-deadline");
     store.db.prepare("UPDATE jobs SET deadline_at=? WHERE id=?").run(dateOnly(yesterday), running.job.id);
     assert.equal(store.getJob(running.job.id).status, "applying");
+    // A expiração roda no job periódico; o bootstrap é só leitura.
+    store.refreshExpiredJobs();
     const bootstrap = store.getBootstrap();
     assert.equal(store.getJob(lastsToday.id).status, "found", "a date-only deadline expires only after the end of that day");
     assert.equal(bootstrap.jobs.find((job) => job.id === lastsToday.id).lifecycle, "unknown");
