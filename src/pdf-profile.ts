@@ -5,6 +5,12 @@ import { isMainThread, MessageChannel, receiveMessageOnPort, Worker, workerData,
 export const MAX_PDF_BYTES = 5 * 1024 * 1024;
 /** Tempo máximo da extração via pdfjs antes de marcar o PDF para revisão. */
 export const PDF_EXTRACTION_TIMEOUT_MS = 20_000;
+/** Tamanho máximo de um stream descomprimido pelo extrator legado (proteção contra bomba de compressão). */
+export const MAX_INFLATED_STREAM_BYTES = 20_000_000;
+/** Soma máxima de bytes descomprimidos por arquivo no extrator legado. */
+export const MAX_INFLATED_TOTAL_BYTES = 50_000_000;
+/** Limites de memória do worker de extração: um PDF hostil derruba só o worker, não o servidor. */
+export const PDF_WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, codeRangeSizeMb: 64, stackSizeMb: 4 } as const;
 /** Proporção mínima de letras/dígitos entre os caracteres visíveis para aceitar o texto extraído. */
 export const MIN_TEXT_LETTER_RATIO = 0.6;
 /** Proporção máxima de caracteres de controle/privados/substituição tolerada no texto extraído. */
@@ -113,19 +119,33 @@ function textOperands(stream: string): string[] {
   return result;
 }
 
-function inflateStream(raw: Buffer, compressed: boolean): Buffer {
+/** Orçamento de descompressão compartilhado por todos os streams de um mesmo arquivo. */
+interface InflateBudget { remaining: number }
+
+function inflateStream(raw: Buffer, compressed: boolean, budget: InflateBudget): Buffer {
   if (!compressed) return raw;
-  try { return inflateSync(raw); } catch { return Buffer.alloc(0); }
+  const limit = Math.min(MAX_INFLATED_STREAM_BYTES, budget.remaining);
+  if (limit <= 0) return Buffer.alloc(0);
+  try {
+    // maxOutputLength aborta a descompressão (ERR_BUFFER_TOO_LARGE) antes de alocar além do limite.
+    const decoded = inflateSync(raw, { maxOutputLength: limit });
+    budget.remaining -= decoded.byteLength;
+    return decoded;
+  } catch {
+    // Stream corrompido ou acima do limite: descarta e esgota o orçamento do arquivo.
+    budget.remaining = 0;
+    return Buffer.alloc(0);
+  }
 }
 
-function streamText(bytes: Buffer): string {
+function streamText(bytes: Buffer, budget: InflateBudget): string {
   const source = bytes.toString("latin1");
   const chunks: string[] = [];
   const streamPattern = /<<(?<dictionary>[\s\S]*?)>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/gu;
   for (const match of source.matchAll(streamPattern)) {
     const dictionary = match.groups?.dictionary ?? "";
     const raw = Buffer.from(match[2] ?? "", "latin1");
-    const decoded = inflateStream(raw, /\/FlateDecode\b/u.test(dictionary));
+    const decoded = inflateStream(raw, /\/FlateDecode\b/u.test(dictionary), budget);
     const text = textOperands(decoded.toString("latin1"));
     if (text.length) chunks.push(text.join(" "));
   }
@@ -148,37 +168,40 @@ function pdfObjects(source: string): Map<string, PdfObject> {
   return objects;
 }
 
-function objectStreamText(object: PdfObject): string {
+function objectStreamText(object: PdfObject, budget: InflateBudget): string {
   const match = object.body.match(/(?<dictionary><<[\s\S]*?>>)\s*stream\r?\n([\s\S]*?)\r?\nendstream/gu)?.[0];
   if (!match) return "";
   const streamStart = match.search(/stream\r?\n/u);
   const streamEnd = match.lastIndexOf("endstream");
   const rawStart = streamStart + match.slice(streamStart).match(/^stream\r?\n/u)![0].length;
   const raw = Buffer.from(match.slice(rawStart, streamEnd).replace(/\r?\n$/u, ""), "latin1");
-  const decoded = inflateStream(raw, /\/FlateDecode\b/u.test(match.slice(0, streamStart)));
+  const decoded = inflateStream(raw, /\/FlateDecode\b/u.test(match.slice(0, streamStart)), budget);
   return textOperands(decoded.toString("latin1")).join(" ").trim();
 }
 
-function pageTexts(source: string): PdfPageText[] {
+function pageTexts(source: string, budget: InflateBudget): PdfPageText[] {
   const objects = pdfObjects(source);
   const pages = [...objects.values()].filter((object) => /\/Type\s*\/Page\b/u.test(object.body));
   return pages.map((page, index) => {
     const contents = page.body.match(/\/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)/u)?.[1] ?? "";
     const references = [...contents.matchAll(/(\d+)\s+\d+\s+R/gu)].map((match) => match[1]);
     const streams = references.map((reference) => objects.get(reference)).filter((object): object is PdfObject => Boolean(object));
-    const text = streams.map(objectStreamText).filter(Boolean).join("\n");
+    const text = streams.map((stream) => objectStreamText(stream, budget)).filter(Boolean).join("\n");
     return { page: index + 1, text, startOffset: streams[0]?.offset ?? page.offset };
   });
 }
 
-function legacyExtract(bytes: Uint8Array): { pages: PdfPageText[]; pageCount: number } {
+interface LegacyPages { pages: PdfPageText[]; pageCount: number }
+
+function legacyExtract(bytes: Uint8Array): LegacyPages {
   const buffer = Buffer.from(bytes);
   const source = buffer.toString("latin1");
-  const mappedPages = pageTexts(source);
+  const budget: InflateBudget = { remaining: MAX_INFLATED_TOTAL_BYTES };
+  const mappedPages = pageTexts(source, budget);
   const pageCount = Math.max(1, mappedPages.length || (source.match(/\/Type\s*\/Page\b/gu) ?? []).length);
   const pages = mappedPages.length
     ? mappedPages
-    : [{ page: 1, text: streamText(buffer), startOffset: Math.max(0, source.indexOf("stream")) }];
+    : [{ page: 1, text: streamText(buffer, budget), startOffset: Math.max(0, source.indexOf("stream")) }];
   return { pages, pageCount };
 }
 
@@ -267,14 +290,23 @@ interface WorkerInput {
   signal: Int32Array;
 }
 
-type WorkerReply = { ok: true; result: PdfjsPages } | { ok: false; error: string };
+/** Resultado do worker: pdfjs ou, se ele falhar, o extrator legado (também executado no worker). */
+type WorkerResult = { source: "pdfjs"; pdfjs: PdfjsPages } | { source: "legacy"; legacy: LegacyPages; failure: string };
+type WorkerReply = { ok: true; result: WorkerResult } | { ok: false; error: string };
+
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 async function runExtractionWorker(input: WorkerInput): Promise<void> {
   let reply: WorkerReply;
   try {
-    reply = { ok: true, result: await extractWithPdfjs(input.bytes) };
+    reply = { ok: true, result: { source: "pdfjs", pdfjs: await extractWithPdfjs(input.bytes) } };
   } catch (error) {
-    reply = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    const failure = errorMessage(error);
+    try {
+      reply = { ok: true, result: { source: "legacy", legacy: legacyExtract(input.bytes), failure } };
+    } catch (legacyError) {
+      reply = { ok: false, error: `${failure}; legado: ${errorMessage(legacyError)}` };
+    }
   }
   input.port.postMessage(reply);
   input.port.close();
@@ -286,18 +318,24 @@ if (!isMainThread && (workerData as Partial<WorkerInput> | null)?.kind === WORKE
   void runExtractionWorker(workerData as WorkerInput);
 }
 
+function startExtractionWorker(bytes: Uint8Array, signal: Int32Array, port: MessagePort): Worker {
+  return new Worker(new URL(import.meta.url), {
+    ...WORKER_EXEC_OPTIONS,
+    workerData: { kind: WORKER_KIND, bytes: new Uint8Array(bytes), port, signal },
+    transferList: [port],
+    resourceLimits: PDF_WORKER_RESOURCE_LIMITS,
+  });
+}
+
 /**
- * Executa o pdfjs (assíncrono) num worker thread e espera de forma síncrona,
- * preservando a API síncrona de `extractPdfText` usada pelo banco.
+ * Executa a extração (pdfjs e, se preciso, o legado) num worker thread com
+ * limites de memória e espera de forma síncrona, preservando a API síncrona
+ * de `extractPdfText` usada pelo banco. Nada do PDF é decodificado na thread principal.
  */
-function extractWithPdfjsSync(bytes: Uint8Array): PdfjsPages {
+function extractInWorkerSync(bytes: Uint8Array): WorkerResult {
   const signal = new Int32Array(new SharedArrayBuffer(4));
   const { port1, port2 } = new MessageChannel();
-  const worker = new Worker(new URL(import.meta.url), {
-    ...WORKER_EXEC_OPTIONS,
-    workerData: { kind: WORKER_KIND, bytes: new Uint8Array(bytes), port: port2, signal },
-    transferList: [port2],
-  });
+  const worker = startExtractionWorker(bytes, signal, port2);
   worker.unref();
   worker.on("error", () => { /* resultado tratado pelo timeout/porta */ });
   try {
@@ -313,16 +351,15 @@ function extractWithPdfjsSync(bytes: Uint8Array): PdfjsPages {
 }
 
 /** Mesmo worker, mas aguardado sem bloquear o event loop (para handlers HTTP assíncronos). */
-function extractWithPdfjsWorker(bytes: Uint8Array): Promise<PdfjsPages> {
+function extractInWorker(bytes: Uint8Array): Promise<WorkerResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     const signal = new Int32Array(new SharedArrayBuffer(4));
     const { port1, port2 } = new MessageChannel();
-    const worker = new Worker(new URL(import.meta.url), {
-      ...WORKER_EXEC_OPTIONS,
-      workerData: { kind: WORKER_KIND, bytes: new Uint8Array(bytes), port: port2, signal },
-      transferList: [port2],
-    });
-    const finish = (error: Error | null, result?: PdfjsPages) => {
+    const worker = startExtractionWorker(bytes, signal, port2);
+    let done = false;
+    const finish = (error: Error | null, result?: WorkerResult) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
       port1.close();
       void worker.terminate();
@@ -378,11 +415,11 @@ function finalizeExtraction(pages: PdfPageText[], pageCount: number, failure: st
   return { status: "extracted", pages, text, pageCount, error: null };
 }
 
-function extractionFrom(result: PdfjsPages | Error, bytes: Uint8Array): PdfExtraction {
-  if (!(result instanceof Error)) return finalizeExtraction(toPages(result.pages), Math.max(1, result.pageCount), null);
-  if (result.message === "PDF_EXTRACTION_TIMEOUT") return finalizeExtraction([], 1, result.message);
-  const legacy = legacyExtract(bytes);
-  return finalizeExtraction(legacy.pages, legacy.pageCount, result.message);
+function extractionFrom(result: WorkerResult | Error): PdfExtraction {
+  // Falha do worker (timeout, limite de memória, erro): vai para revisão, sem reprocessar na thread principal.
+  if (result instanceof Error) return finalizeExtraction([], 1, result.message);
+  if (result.source === "pdfjs") return finalizeExtraction(toPages(result.pdfjs.pages), Math.max(1, result.pdfjs.pageCount), null);
+  return finalizeExtraction(result.legacy.pages, result.legacy.pageCount, result.failure);
 }
 
 /**
@@ -392,17 +429,17 @@ function extractionFrom(result: PdfjsPages | Error, bytes: Uint8Array): PdfExtra
  */
 export function extractPdfText(bytes: Uint8Array): PdfExtraction {
   validatePdf(bytes);
-  let result: PdfjsPages | Error;
-  try { result = extractWithPdfjsSync(bytes); } catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
-  return extractionFrom(result, bytes);
+  let result: WorkerResult | Error;
+  try { result = extractInWorkerSync(bytes); } catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
+  return extractionFrom(result);
 }
 
 /** Variante assíncrona: extrai num worker thread com timeout, sem bloquear o event loop. */
 export async function extractPdfTextAsync(bytes: Uint8Array): Promise<PdfExtraction> {
   validatePdf(bytes);
-  let result: PdfjsPages | Error;
-  try { result = await extractWithPdfjsWorker(bytes); } catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
-  return extractionFrom(result, bytes);
+  let result: WorkerResult | Error;
+  try { result = await extractInWorker(bytes); } catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
+  return extractionFrom(result);
 }
 
 function excerpt(text: string, value: string): string {

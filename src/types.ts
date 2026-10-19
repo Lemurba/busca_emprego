@@ -56,6 +56,8 @@ export interface Job {
   role_family?: string | null;
   role_family_confidence?: number | null;
   suppressed?: boolean;
+  /** Alguma URL da vaga usa http:// (sem TLS); o executor não atua nela. */
+  insecure_url?: boolean;
   status: JobStatus;
   version: number;
   posted_at: string | null;

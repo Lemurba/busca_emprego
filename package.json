@@ -14,9 +14,10 @@
     "test:py": "python3 -m unittest discover -s hermes/native-plugin",
     "test:all": "npm test && npm run test:e2e",
     "lint": "biome lint .",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.public.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck:web",
     "start": "node dist/src/server.js",
-    "dev": "npm run build && node dist/src/server.js"
+    "dev": "npm run build && node dist/src/server.js",
+    "typecheck:web": "tsc -p tsconfig.web.json --noEmit"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",

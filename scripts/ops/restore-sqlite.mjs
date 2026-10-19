@@ -5,6 +5,7 @@ import {
   chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync,
   readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeSync
 } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -13,11 +14,14 @@ function usage(exitCode = 0) {
   console.log(`Uso: node scripts/ops/restore-sqlite.mjs --from BACKUP --confirm RESTORE [--db CAMINHO] [--health-url URL] [--force]\n\n` +
     `O processo do Radar deve estar parado. A restauração valida o backup, recusa serviço HTTP ativo\n` +
     `(health em 127.0.0.1:PORT, PORT do ambiente ou de .env.local, padrão 8787) e processo\n` +
-    `dist/src/server.js usando este banco, confere o manifesto adjacente, cria uma cópia pre-restore\n` +
+    `dist/src/server.js usando este banco, consulta o registro de processos abertos <db>.processes/\n` +
+    `(heartbeat do dashboard e do servidor MCP), confere o manifesto adjacente, cria uma cópia pre-restore\n` +
     `e troca o banco de forma atômica (sidecars -wal/-shm removidos antes do rename, com fsync).\n` +
     `Um lock exclusivo <db>.restore.lock impede restaurações concorrentes.\n\n` +
     `--force                     permite restaurar sobre um banco atual que falha no quick_check\n` +
     `                            (cenário de desastre); a cópia pre-restore vira cópia bruta, best effort.\n` +
+    `                            Também ignora, com aviso, um servidor MCP ativo: as gravações que ele\n` +
+    `                            fizer depois da troca se perdem. Pare o MCP (hermes) sempre que puder.\n` +
     `--allow-missing-manifest    somente para backup legado já validado por outro meio.`);
   process.exit(exitCode);
 }
@@ -67,6 +71,32 @@ async function serviceIsRunning() {
   }
 }
 
+// Heartbeat mais velho que isto = processo morto (src/process-registry.ts: 3 intervalos de 15 s).
+const HEARTBEAT_STALE_MS = 60_000;
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
+// Processos que se registraram em <db>.processes/ (dashboard e MCP). Vale também quando /proc
+// não mostra o processo (outro usuário, outro namespace): o heartbeat recente basta.
+function registeredProcesses() {
+  const dir = `${dbPath}.processes`;
+  let names = [];
+  try { names = readdirSync(dir).filter((name) => name.endsWith(".json")); } catch { return []; }
+  const active = [];
+  for (const name of names) {
+    let record;
+    try { record = JSON.parse(readFileSync(join(dir, name), "utf8")); } catch { continue; }
+    const age = Date.now() - Date.parse(record.heartbeat_at ?? "");
+    if (!Number.isFinite(age) || age > HEARTBEAT_STALE_MS) continue;
+    const pid = Number(record.pid);
+    if (record.hostname === hostname() && Number.isInteger(pid) && pid > 0 && pid !== process.pid && !pidAlive(pid)) continue;
+    active.push({ role: String(record.role ?? "desconhecido"), pid, heartbeat_age_ms: Math.max(0, age), file: join(dir, name) });
+  }
+  return active;
+}
+
 function samePath(candidate) {
   if (!candidate) return false;
   const targets = new Set([dbPath, `${dbPath}-wal`, `${dbPath}-shm`]);
@@ -77,10 +107,10 @@ function samePath(candidate) {
 // Procura, via /proc, um processo que segure o banco aberto ou um `dist/src/server.js`
 // configurado para este banco (RADAR_DB_PATH no ambiente ou caminho nos argumentos).
 // Sem /proc (macOS etc.) a verificação é pulada e só o health check vale.
-function processUsingDatabase() {
+function processUsingDatabase(ignoredPids = new Set()) {
   if (!existsSync("/proc/self")) return null;
   let entries = [];
-  try { entries = readdirSync("/proc").filter((name) => /^\d+$/u.test(name) && Number(name) !== process.pid); } catch { return null; }
+  try { entries = readdirSync("/proc").filter((name) => /^\d+$/u.test(name) && Number(name) !== process.pid && !ignoredPids.has(Number(name))); } catch { return null; }
   for (const pid of entries) {
     try {
       for (const fd of readdirSync(`/proc/${pid}/fd`)) {
@@ -185,7 +215,15 @@ try {
   lockAcquired = true;
 
   if (await serviceIsRunning()) throw new Error("service_still_running");
-  const holder = processUsingDatabase();
+  const registered = registeredProcesses();
+  const dashboards = registered.filter((item) => item.role !== "mcp");
+  if (dashboards.length) throw Object.assign(new Error("service_process_registered"), { detail: dashboards });
+  const mcps = registered.filter((item) => item.role === "mcp");
+  if (mcps.length && !force) throw Object.assign(new Error("mcp_process_active"), { detail: mcps });
+  if (mcps.length) {
+    console.error(JSON.stringify({ warning: "mcp_process_active_forced", detail: mcps, message: "restaurando com servidor MCP ativo (--force): o que ele gravar depois da troca vai para o arquivo antigo e se perde; reinicie o MCP logo em seguida" }));
+  }
+  const holder = processUsingDatabase(new Set(mcps.map((item) => item.pid)));
   if (holder) throw Object.assign(new Error("service_process_using_database"), { detail: holder });
 
   const manifestPath = `${sourcePath}.json`;
@@ -222,13 +260,16 @@ try {
   console.log(JSON.stringify({
     ok: true, restored_from: sourcePath, db_path: dbPath, manifest_verified: manifestVerified,
     pre_restore_path: preRestore?.path ?? null, pre_restore_mode: preRestore?.mode ?? null,
-    forced: force && preRestore?.current_integrity === "failed"
+    forced: force && preRestore?.current_integrity === "failed",
+    forced_with_mcp_active: mcps.length > 0
   }));
 } catch (error) {
   if (temporaryPath) { try { unlinkSync(temporaryPath); } catch {} }
   const payload = { ok: false, error: error instanceof Error ? error.message : "restore_failed" };
   if (error?.detail) payload.detail = error.detail;
   if (payload.error === "current_database_integrity_check_failed") payload.hint = "banco atual corrompido; use --force para restaurar mesmo assim (cópia bruta pre-restore best effort)";
+  if (payload.error === "mcp_process_active") payload.hint = "servidor MCP aberto sobre este banco: pare o MCP do Hermes (hermes mcp / reinicie o gateway sem o servidor radar-vagas) ou use --force aceitando perder as gravações dele";
+  if (payload.error === "service_process_registered") payload.hint = "dashboard registrado como ativo: pare o serviço (touch .radar-stopped e kill -TERM) antes de restaurar";
   if (payload.error === "restore_lock_present") payload.hint = `outra restauração em andamento ou lock órfão: ${lockPath}`;
   console.error(JSON.stringify(payload));
   process.exitCode = 1;
