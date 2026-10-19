@@ -1559,10 +1559,23 @@ async function authorizeAutomaticApplication(jobId: string) {
           fresh = check.status === "open";
           if (status) status.textContent = fresh ? "Vaga confirmada aberta agora." : `Não foi possível confirmar: ${check.status === "closed" ? "a vaga está encerrada" : livenessMethodLabel(check.method)}.`;
           if (fresh) button.hidden = true;
+          // Sem sinal determinístico: o usuário pode confirmar manualmente depois de abrir o portal.
+          if (manual) manual.hidden = check.status !== "unknown";
         }).catch((error) => { if (status) status.textContent = error instanceof Error ? error.message : "Falha ao verificar a vaga."; });
       });
+      const manual = form.querySelector<HTMLButtonElement>("[data-dialog-confirm-open]");
+      manual?.addEventListener("click", () => {
+        void runBusy(manual, async () => {
+          await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "PATCH", body: JSON.stringify({ opening_status: "open", opening_checked_at: new Date().toISOString() }) });
+          fresh = true;
+          manual.hidden = true;
+          if (button) button.hidden = true;
+          if (status) status.textContent = "Você confirmou que a vaga está aberta.";
+          await loadData();
+        }).catch((error) => { if (status) status.textContent = error instanceof Error ? error.message : "Falha ao registrar a confirmação."; });
+      });
     },
-    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button></div></div>`}<p>O executor configurado no Hermes vai preencher e enviar a candidatura por você.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url || job.job_url || "—")}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
+    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button> <button type="button" class="text-button" data-dialog-confirm-open hidden>Conferi no portal: está aberta</button></div></div>`}<p>O executor configurado no Hermes vai preencher e enviar a candidatura por você.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url || job.job_url || "—")}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
   });
   if (!result) return;
   const application = existing ?? await fetchJson<Application>("/api/applications", { method: "POST", body: JSON.stringify({ job_id: jobId, resume_id: resume.id, automation_mode: "assisted" }) });

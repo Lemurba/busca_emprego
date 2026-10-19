@@ -1556,7 +1556,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   if (application.resume_status !== "approved") throw new Error("Aprove o currículo antes de autorizar a candidatura.");
   if (application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) throw new Error("Registre interesse e conclua a revisão do currículo antes de autorizar.");
   if (!["queued", "needs_review", "failed"].includes(application.status)) throw new Error("A candidatura não está aguardando autorização.");
-  assertJobLivenessFresh(getJob(application.job_id));
+  assertJobLivenessFresh(db, getJob(application.job_id));
   const timestamp = now();
   const job = getJob(application.job_id);
   if (!job?.application_url?.trim()) throw new Error("application.url.required");

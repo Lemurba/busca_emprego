@@ -117,6 +117,17 @@ describe("gate do AUTORIZO", () => {
     store.authorizeAutoApplication(fresh.application.id, fresh.resume.id, "AUTORIZO");
     assert.ok(store.listAuthorizedApplications().some((item) => item.id === fresh.application.id));
   });
+
+  test("open gravado por ingestão/agente não vale como prova; confirmação manual do usuário vale", () => {
+    const prepared = approved();
+    // Ingestão (ou agente) escrevendo os campos direto: sem verificação nem confirmação humana.
+    store.upsertJob({ ...store.getJob(prepared.job.id), opening_status: "open", opening_checked_at: new Date().toISOString() });
+    assert.equal(store.getJob(prepared.job.id).opening_status, "open");
+    assert.throws(() => store.authorizeAutoApplication(prepared.application.id, prepared.resume.id, "AUTORIZO"), /job\.liveness\.stale/);
+    store.updateJob(prepared.job.id, { opening_status: "open", opening_checked_at: new Date().toISOString() });
+    store.authorizeAutoApplication(prepared.application.id, prepared.resume.id, "AUTORIZO");
+    assert.ok(store.listAuthorizedApplications().some((item) => item.id === prepared.application.id));
+  });
 });
 
 const DESCRIPTION = [

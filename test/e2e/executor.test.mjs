@@ -110,9 +110,9 @@ async function preparedApplication(label, applicationUrl) {
   const job = (await api("POST", "/api/jobs", {
     title: `Vaga executor ${label}`, company: "Portal Exemplo", source: "fixture",
     source_url: `https://portal.example.test/${label}/vaga`, application_url: applicationUrl,
-    // #33: AUTORIZO exige vaga confirmada aberta nas últimas 24 h (aqui, confirmação humana).
-    opening_status: "open", opening_checked_at: new Date().toISOString(),
   })).data;
+  // #33: AUTORIZO exige vaga confirmada aberta nas últimas 24 h (aqui, confirmação manual no dashboard).
+  await api("PATCH", `/api/jobs/${job.id}`, { opening_status: "open", opening_checked_at: new Date().toISOString() });
   await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: `CV ${label}`, content: "Experiência confirmada" })).data;
   // SDD-ATS-003: APROVO requires an ATS review of the current version for every resume.

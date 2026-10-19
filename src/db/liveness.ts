@@ -68,11 +68,25 @@ export function listJobsDueForLiveness(db: DatabaseSync, options: { nowMs?: numb
     .slice(0, limit);
 }
 
-/** AUTORIZO só com verificação recente (≤ 24 h) dizendo que a vaga está aberta. */
-export function assertJobLivenessFresh(job: { opening_status?: string | null; opening_checked_at?: string | null } | null | undefined, nowMs = Date.now()) {
-  const checkedAt = job?.opening_checked_at ? Date.parse(job.opening_checked_at) : Number.NaN;
-  const age = nowMs - checkedAt;
-  if (job?.opening_status !== "open" || Number.isNaN(checkedAt) || age > LIVENESS_FRESH_MS || age < -5 * 60_000) throw new Error("job.liveness.stale");
+/**
+ * AUTORIZO só com a vaga aberta confirmada nas últimas 24 h por uma prova que não vem de LLM:
+ * uma verificação determinística do Radar (`job_liveness_checks`) ou a confirmação manual do
+ * usuário no dashboard (valor humano de `opening_checked_at`). `opening_status`/`opening_checked_at`
+ * gravados por agente ou ingestão sozinhos não bastam.
+ */
+export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; opening_status?: string | null; opening_checked_at?: string | null; closed_at?: string | null } | null | undefined, nowMs = Date.now()) {
+  const fresh = (value: unknown) => {
+    const time = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    const age = nowMs - time;
+    return !Number.isNaN(time) && age <= LIVENESS_FRESH_MS && age >= -5 * 60_000;
+  };
+  if (!job || job.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
+  const check = db.prepare("SELECT checked_at FROM job_liveness_checks WHERE job_id=? AND status='open' ORDER BY checked_at DESC LIMIT 1").get(job.id) as { checked_at: string } | undefined;
+  if (check && fresh(check.checked_at)) return;
+  const manual = db.prepare(`SELECT e.origin FROM job_field_provenance p JOIN evidence_records e ON e.id = p.evidence_id
+    WHERE p.job_id=? AND p.field_path='opening_checked_at' AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id) as { origin: string } | undefined;
+  if (manual?.origin === "human" && fresh(job.opening_checked_at)) return;
+  throw new Error("job.liveness.stale");
 }
 
 /** Última verificação e repostagens por vaga, para enriquecer o bootstrap numa única leitura. */
