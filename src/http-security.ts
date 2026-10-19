@@ -212,6 +212,8 @@ const FRIENDLY: Record<string, string> = {
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
   "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
   "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
+  "profile.import.invalid": "O arquivo não é um JSON Resume válido.",
+  "profile.import.empty": "O JSON Resume não tem nenhuma informação que o Radar saiba importar.",
 };
 
 /** status por código: regras na ordem; a primeira que casar vence. */
