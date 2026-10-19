@@ -68,6 +68,8 @@ export interface RepostMatch {
   /** Vaga anterior repetida. */
   previousJobId: string;
   previousSeenAt: string | null;
+  /** Data da publicação nova. */
+  seenAt: string | null;
   similarity: number;
 }
 
@@ -92,8 +94,8 @@ export function findReposts(job: RepostCandidate, candidates: readonly RepostCan
     if (Number.isNaN(candidateTime) || candidateTime === jobTime) continue;
     const similarity = Math.round((1 - distance / 64) * 1000) / 1000;
     matches.push(jobTime > candidateTime
-      ? { jobId: job.id, previousJobId: candidate.id, previousSeenAt: candidate.seenAt, similarity }
-      : { jobId: candidate.id, previousJobId: job.id, previousSeenAt: job.seenAt, similarity });
+      ? { jobId: job.id, previousJobId: candidate.id, previousSeenAt: candidate.seenAt, seenAt: job.seenAt, similarity }
+      : { jobId: candidate.id, previousJobId: job.id, previousSeenAt: job.seenAt, seenAt: candidate.seenAt, similarity });
   }
   return matches;
 }

@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_AGENT_PRESETS, DEFAULT_AGENT_SOURCE_IDS, DEFAULT_JOB_PORTALS } from "../../agent-defaults.js";
+import { canonicalizeJobUrl, companyKey } from "../../domain.js";
 import { insertAgentConfig } from "../agent-configs.js";
-import { idFor, now, parseJsonArray } from "../util.js";
+import { jobDedupKey, jobDescriptionHash } from "../dedup-keys.js";
+import { idFor, insertAuditEvent, now, parseJsonArray } from "../util.js";
 import { ensureColumn, hasLegacyMarker, type Migration, recordLegacyMarker } from "./types.js";
 
 /**
  * 0001_baseline: o schema completo e as migrações de dados que, antes do versionamento,
- * rodavam como efeito colateral do import de src/db.ts.
+ * rodavam como efeito colateral do import de src/db.ts (e de src/connectors/store.ts).
  *
  * Idempotente de propósito: bancos existentes não têm "0001_baseline" registrado, então esta
  * migração também roda sobre eles. Tudo aqui é CREATE ... IF NOT EXISTS, ensureColumn ou
@@ -23,8 +25,11 @@ export const baseline: Migration = {
     migrateMatchScoresScope(db);
     migrateDefaultPreferenceProject(db);
     migrateExistingAgentVersions(db);
+    backfillDedupKeys(db);
+    migrateCanonicalUrls(db);
     installDefaultAgents(db);
     activateDefaultSources(db);
+    createConnectorTables(db);
   }
 };
 
@@ -76,7 +81,7 @@ function createSchema(db: DatabaseSync) {
     title TEXT NOT NULL,
     file_name TEXT NOT NULL,
     mime_type TEXT NOT NULL DEFAULT 'application/pdf',
-    file_data TEXT NOT NULL,
+    file_data TEXT NOT NULL DEFAULT '',
     is_base INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -531,6 +536,15 @@ function createSchema(db: DatabaseSync) {
   // Sightings may repeat in later rounds; round/hash uniqueness already makes retries idempotent.
   db.exec("DROP INDEX IF EXISTS idx_occurrence_source_identity");
 
+  // Sessões do dashboard: só o hash (sha256) do id do cookie é gravado, nunca o id em si.
+  // `token_fingerprint` amarra a sessão ao RADAR_DASHBOARD_TOKEN vigente: trocar o token e
+  // reiniciar continua encerrando todas as sessões.
+  db.exec(`CREATE TABLE IF NOT EXISTS dashboard_sessions (
+  token_hash TEXT PRIMARY KEY,
+  token_fingerprint TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+)`);
+
   // Colunas acrescentadas ao longo do tempo: bancos antigos as recebem aqui; em bancos novos
   // o CREATE acima já as inclui e ensureColumn não faz nada.
   ensureColumn(db, "jobs", "opening_status", "TEXT NOT NULL DEFAULT 'unknown'");
@@ -559,6 +573,15 @@ function createSchema(db: DatabaseSync) {
   ensureColumn(db, "jobs", "role_family", "TEXT");
   ensureColumn(db, "jobs", "role_family_confidence", "REAL");
   ensureColumn(db, "jobs", "suppressed", "INTEGER NOT NULL DEFAULT 0");
+  // Regras "Não tenho interesse" que ocultaram a vaga (motivo exibido em "Ocultadas") e a marca
+  // de quando o usuário a reexibiu: reexibida, a vaga não volta a ser ocultada pelas mesmas buscas.
+  ensureColumn(db, "jobs", "suppressed_rule_ids", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "jobs", "suppression_dismissed_at", "TEXT");
+  // Chaves de deduplicação entre portais: empresa + título normalizado + local, e hash da descrição.
+  ensureColumn(db, "jobs", "dedup_key", "TEXT");
+  ensureColumn(db, "jobs", "description_hash", "TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs(project_id, dedup_key)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_description_hash ON jobs(project_id, description_hash)");
   // Exclusão reversível: a vaga sai das listas, mas continua no banco para restauração e deduplicação.
   ensureColumn(db, "jobs", "archived_at", "TEXT");
   ensureColumn(db, "jobs", "archived_reason", "TEXT");
@@ -573,6 +596,9 @@ function createSchema(db: DatabaseSync) {
   ensureColumn(db, "base_resumes", "extraction_error", "TEXT");
   ensureColumn(db, "base_resumes", "page_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "base_resumes", "extracted_at", "TEXT");
+  // PDF em BLOB (#28): o base64 em TEXT legado (file_data) ocupava 33% a mais no banco e em todo backup.
+  ensureColumn(db, "base_resumes", "file_blob", "BLOB");
+  migrateBaseResumeBlobs(db);
   ensureColumn(db, "resumes", "profile_snapshot_id", "TEXT REFERENCES profile_snapshots(id) ON DELETE SET NULL");
   ensureColumn(db, "resumes", "generation_source", "TEXT NOT NULL DEFAULT 'manual'");
   ensureColumn(db, "resumes", "facts_used", "TEXT NOT NULL DEFAULT '[]'");
@@ -584,6 +610,10 @@ function createSchema(db: DatabaseSync) {
   ensureColumn(db, "applications", "claimed_by", "TEXT");
   ensureColumn(db, "applications", "claimed_at", "TEXT");
   ensureColumn(db, "applications", "expires_at", "TEXT");
+  // #10: assinatura HMAC da autorização; #18: lease renovável do claim (heartbeat do executor).
+  ensureColumn(db, "application_authorizations", "signature", "TEXT");
+  ensureColumn(db, "application_authorizations", "lease_expires_at", "TEXT");
+  ensureColumn(db, "application_authorizations", "heartbeat_at", "TEXT");
   ensureColumn(db, "agent_configs", "model_id", "TEXT");
   ensureColumn(db, "agent_configs", "reasoning_effort", "TEXT");
   ensureColumn(db, "agent_configs", "max_input_tokens", "INTEGER");
@@ -618,6 +648,15 @@ function createSchema(db: DatabaseSync) {
   ensureColumn(db, "workflow_events", "cycle", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "workflow_events", "data_json", "TEXT NOT NULL DEFAULT '{}'");
   db.exec("CREATE INDEX IF NOT EXISTS idx_workflow_events_job ON workflow_events(job_id, version)");
+}
+
+/** Converte as linhas legadas com base64 em file_data para file_blob. Idempotente. */
+function migrateBaseResumeBlobs(db: DatabaseSync) {
+  const legacy = db.prepare("SELECT id, file_data FROM base_resumes WHERE file_blob IS NULL AND file_data <> ''").all() as { id: string; file_data: string }[];
+  if (!legacy.length) return;
+  const update = db.prepare("UPDATE base_resumes SET file_blob = ?, file_data = '' WHERE id = ? AND file_blob IS NULL");
+  // Já dentro do BEGIN EXCLUSIVE de migrate().
+  for (const row of legacy) update.run(Buffer.from(row.file_data, "base64"), row.id);
 }
 
 /** match_scores used NULL snapshot/round, so UNIQUE never deduplicated those rows. */
@@ -696,6 +735,67 @@ function migrateExistingAgentVersions(db: DatabaseSync) {
   }
 }
 
+/** Preenche as chaves de deduplicação das vagas gravadas antes delas existirem. */
+function backfillDedupKeys(db: DatabaseSync) {
+  const rows = db.prepare("SELECT id,title,company,location,description FROM jobs WHERE dedup_key IS NULL AND description_hash IS NULL").all() as Record<string, unknown>[];
+  const update = db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?");
+  for (const row of rows) {
+    const dedupKey = jobDedupKey(row.title, row.company, row.location);
+    const descriptionHash = jobDescriptionHash(row.description, row.company);
+    if (dedupKey || descriptionHash) update.run(dedupKey, descriptionHash, String(row.id));
+  }
+}
+
+/** Canonicalização sem lançar: URLs antigas que a regra atual recusa ficam como estão. */
+function recanonicalizedUrl(value: unknown): string {
+  const text = String(value ?? "");
+  if (!text) return text;
+  try { return canonicalizeJobUrl(text); } catch { return text; }
+}
+
+/**
+ * Regras por portal (#23) mudaram a forma canônica: recalcula canonical_url/job_url das vagas
+ * e canonical_url das ocorrências, e aponta como possível duplicata (nunca mescla) as vagas que
+ * passaram a ter a mesma URL canônica e a mesma empresa normalizada.
+ */
+function migrateCanonicalUrls(db: DatabaseSync) {
+  const migration = "recanonicalize_job_urls_v1";
+  if (hasLegacyMarker(db, migration)) return;
+  const timestamp = now();
+  const rows = db.prepare("SELECT id,project_id,company,source_url,job_url,canonical_url,created_at FROM jobs ORDER BY created_at, id").all() as Record<string, unknown>[];
+  const updateJob = db.prepare("UPDATE jobs SET canonical_url=?,job_url=? WHERE id=?");
+  const groups = new Map<string, string[]>();
+  for (const row of rows) {
+    const canonicalUrl = recanonicalizedUrl(row.source_url) || recanonicalizedUrl(row.canonical_url);
+    const jobUrl = recanonicalizedUrl(row.job_url);
+    if (canonicalUrl !== row.canonical_url || jobUrl !== row.job_url) updateJob.run(canonicalUrl, jobUrl, String(row.id));
+    const key = companyKey(String(row.company ?? ""));
+    const identityUrl = jobUrl || canonicalUrl;
+    if (!key || !identityUrl) continue;
+    const groupKey = `${row.project_id}|${identityUrl}|${key}`;
+    groups.set(groupKey, [...(groups.get(groupKey) ?? []), String(row.id)]);
+  }
+  const occurrences = db.prepare("SELECT id,canonical_url FROM job_occurrences").all() as { id: string; canonical_url: string }[];
+  const updateOccurrence = db.prepare("UPDATE job_occurrences SET canonical_url=? WHERE id=?");
+  for (const occurrence of occurrences) {
+    const canonicalUrl = recanonicalizedUrl(occurrence.canonical_url);
+    if (canonicalUrl !== occurrence.canonical_url) updateOccurrence.run(canonicalUrl, occurrence.id);
+  }
+  const insertDuplicate = db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
+    VALUES (?,?,?,?,1,?,?)`);
+  let flagged = 0;
+  for (const [groupKey, ids] of groups) {
+    if (ids.length < 2) continue;
+    const projectId = groupKey.split("|", 1)[0];
+    // A vaga mais antiga é a candidata; as demais apontam para ela.
+    for (const jobId of ids.slice(1)) {
+      flagged += Number(insertDuplicate.run(idFor(`possible|${jobId}|${ids[0]}`), projectId, jobId, ids[0], JSON.stringify(["same_canonical_url_after_recanonicalization", "same_company"]), timestamp).changes);
+    }
+  }
+  recordLegacyMarker(db, migration, timestamp);
+  if (flagged) insertAuditEvent(db, "possible_duplicate", migration, "flagged_by_migration", { count: flagged });
+}
+
 function installDefaultAgents(db: DatabaseSync, projectId = "busca-emprego") {
   const migration = "install_default_agent_presets_v1";
   if (hasLegacyMarker(db, migration)) return;
@@ -731,4 +831,44 @@ function activateDefaultSources(db: DatabaseSync, projectId = "busca-emprego") {
   const enable = db.prepare("UPDATE source_configs SET enabled=1,updated_at=? WHERE project_id=? AND id=?");
   for (const sourceId of DEFAULT_AGENT_SOURCE_IDS) enable.run(timestamp, projectId, sourceId);
   recordLegacyMarker(db, migration, timestamp);
+}
+
+/** Tabelas dos conectores determinísticos (antes criadas no import de src/connectors/store.ts). */
+function createConnectorTables(db: DatabaseSync) {
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS connector_companies (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    connector TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    query TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    last_status TEXT,
+    last_error TEXT,
+    last_count INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, connector, slug)
+  );
+
+  CREATE TABLE IF NOT EXISTS connector_enrichment_queue (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_job_id TEXT,
+    job_url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    company TEXT NOT NULL,
+    round_id TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','dismissed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_connector_companies_project ON connector_companies(project_id, connector, enabled);
+  CREATE INDEX IF NOT EXISTS idx_connector_queue_status ON connector_enrichment_queue(project_id, status, created_at);
+  `);
 }

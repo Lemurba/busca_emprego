@@ -8,7 +8,8 @@
  *    é o servidor, com as travas de src/liveness/http.ts (HTTPS público, DNS sem IP privado,
  *    3 redirects, 10 s, 2 MB, User-Agent identificado, 1 req/s por host). Este script roda as
  *    verificações em sequência e espaça em 1 s as vagas do mesmo host.
- * 3. Termina com POST /api/liveness/refresh-expired (prazo vencido / fechada → expirada).
+ * Vaga fechada pela verificação já expira na hora (mesmo caminho de "fechada pela fonte"); a
+ * expiração por prazo continua no timer do servidor e em hermes/cron/radar-expire-jobs.sh.
  *
  * Uso:
  *   node scripts/ops/check-liveness.mjs --dry-run            # só lista o que seria verificado
@@ -141,8 +142,6 @@ for (const job of plan) {
     method: checked.data?.method ?? checked.data?.error ?? null,
   });
 }
-const refreshed = await api("POST", "/api/liveness/refresh-expired", {});
-const expired = refreshed.status === 200 && Array.isArray(refreshed.data?.expired) ? refreshed.data.expired : [];
 const summary = {
   ok: results.every((item) => item.status !== "error"),
   checked: results.length,
@@ -150,7 +149,6 @@ const summary = {
   closed: results.filter((item) => item.status === "closed").length,
   unknown: results.filter((item) => item.status === "unknown").length,
   errors: results.filter((item) => item.status === "error").length,
-  expired: expired.length,
   results,
 };
 

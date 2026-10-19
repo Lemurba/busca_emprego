@@ -83,9 +83,11 @@ export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; open
   if (!job || job.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
   const check = db.prepare("SELECT checked_at FROM job_liveness_checks WHERE job_id=? AND status='open' ORDER BY checked_at DESC LIMIT 1").get(job.id) as { checked_at: string } | undefined;
   if (check && fresh(check.checked_at)) return;
-  const manual = db.prepare(`SELECT e.origin FROM job_field_provenance p JOIN evidence_records e ON e.id = p.evidence_id
-    WHERE p.job_id=? AND p.field_path='opening_checked_at' AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id) as { origin: string } | undefined;
-  if (manual?.origin === "human" && fresh(job.opening_checked_at)) return;
+  const manual = db.prepare(`SELECT e.origin, p.selected_by FROM job_field_provenance p JOIN evidence_records e ON e.id = p.evidence_id
+    WHERE p.job_id=? AND p.field_path='opening_checked_at' AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id) as { origin: string; selected_by: string } | undefined;
+  // Só a sessão do dashboard conta: PATCH com token de serviço (`service:*`) ou agente (`agent:*`) não é prova humana.
+  const byPerson = manual?.origin === "human" && !/^(?:service|agent):/u.test(String(manual.selected_by ?? ""));
+  if (byPerson && fresh(job.opening_checked_at)) return;
   throw new Error("job.liveness.stale");
 }
 
@@ -148,7 +150,33 @@ export function storeFingerprintAndDetectReposts(db: DatabaseSync, jobId: string
   const candidates = (db.prepare("SELECT id,title,company,description_fingerprint,posted_at,created_at FROM jobs WHERE project_id=? AND id<>? AND description_fingerprint IS NOT NULL").all(String(row.project_id ?? "busca-emprego"), jobId) as Array<Record<string, unknown>>).map(candidateFrom);
   const matches = findReposts({ ...candidateFrom(row), fingerprint }, candidates);
   const timestamp = now();
-  const insert = db.prepare("INSERT OR IGNORE INTO job_reposts (id,job_id,previous_job_id,previous_posted_at,detected_at,similarity) VALUES (?,?,?,?,?,?)");
-  for (const match of matches) insert.run(idFor(`repost|${match.jobId}|${match.previousJobId}`), match.jobId, match.previousJobId, match.previousSeenAt, timestamp, match.similarity);
+  const insert = db.prepare("INSERT OR IGNORE INTO job_reposts (id,job_id,previous_job_id,previous_posted_at,reposted_at,detected_at,similarity) VALUES (?,?,?,?,?,?,?)");
+  for (const match of matches) insert.run(idFor(`repost|${match.jobId}|${match.previousJobId}`), match.jobId, match.previousJobId, match.previousSeenAt, match.seenAt, timestamp, match.similarity);
   return matches;
+}
+
+/** Diferença mínima entre publicações para a mesma vaga revista contar como repostagem (não só "atualizada"). */
+export const SAME_JOB_REPOST_MIN_GAP_MS = 7 * 86_400_000;
+
+/**
+ * Vaga revista pela dedup exata/multi-chave (mesmo id na fonte, mesma URL, mesma empresa +
+ * título + local ou mesmo hash de descrição) com data de publicação ao menos 7 dias mais nova
+ * que a última conhecida: a mesma vaga foi republicada. Dedup exata não é repostagem por si só —
+ * sem data nova nada é registrado. Idempotente pela data da publicação nova.
+ */
+export function recordSightingRepost(db: DatabaseSync, jobId: string, postedAt: string | null) {
+  const newTime = postedAt ? Date.parse(postedAt) : Number.NaN;
+  if (!postedAt || Number.isNaN(newTime)) return null;
+  const row = db.prepare("SELECT posted_at, created_at FROM jobs WHERE id=?").get(jobId) as { posted_at: string | null; created_at: string } | undefined;
+  if (!row) return null;
+  const known = [row.posted_at ?? row.created_at, ...(db.prepare("SELECT reposted_at FROM job_reposts WHERE job_id=? AND previous_job_id=? AND reposted_at IS NOT NULL").all(jobId, jobId) as Array<{ reposted_at: string }>).map((item) => item.reposted_at)]
+    .map((value) => ({ value, time: Date.parse(String(value)) }))
+    .filter((item) => !Number.isNaN(item.time))
+    .sort((left, right) => right.time - left.time);
+  const latest = known[0];
+  if (!latest || newTime - latest.time < SAME_JOB_REPOST_MIN_GAP_MS) return null;
+  const id = idFor(`repost-same|${jobId}|${new Date(newTime).toISOString()}`);
+  db.prepare("INSERT OR IGNORE INTO job_reposts (id,job_id,previous_job_id,previous_posted_at,reposted_at,detected_at,similarity) VALUES (?,?,?,?,?,?,1)")
+    .run(id, jobId, jobId, latest.value, postedAt, now());
+  return { id, job_id: jobId, previous_posted_at: latest.value, reposted_at: postedAt };
 }

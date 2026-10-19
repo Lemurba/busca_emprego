@@ -1,7 +1,7 @@
 /**
  * scripts/ops/check-liveness.mjs (#33) contra uma API falsa do Radar em processo:
- * --dry-run só lista; execução normal verifica em sequência, espaça o mesmo host e termina
- * com a atualização de expiradas; --report fica em silêncio quando nada foi encerrado.
+ * --dry-run só lista; execução normal verifica em sequência e espaça o mesmo host;
+ * --report fica em silêncio quando nada foi encerrado.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -34,7 +34,6 @@ before(async () => {
     if (req.method === "GET" && url.pathname === "/api/liveness/due") return send(200, due.slice(0, Number(url.searchParams.get("limit"))));
     const match = /^\/api\/jobs\/([^/]+)\/check-liveness$/u.exec(url.pathname);
     if (req.method === "POST" && match) return send(200, { job_id: match[1], status: closedIds.has(match[1]) ? "closed" : "unknown", method: "fixture" });
-    if (req.method === "POST" && url.pathname === "/api/liveness/refresh-expired") return send(200, { expired: [...closedIds] });
     return send(404, { error: "not_found" });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -64,18 +63,18 @@ test("--dry-run lista as vagas devidas sem verificar nada", async () => {
   assert.ok(requests.every((item) => item.token === TOKEN), "usa o token interno");
 });
 
-test("execução verifica em sequência, espaça o mesmo host e atualiza expiradas", async () => {
+test("execução verifica em sequência e espaça o mesmo host", async () => {
   requests.length = 0;
   closedIds = new Set(["job-b"]);
   const result = await run(["--limit", "3"]);
   assert.equal(result.status, 0, result.stderr);
   const summary = JSON.parse(result.stdout);
-  assert.deepEqual([summary.checked, summary.closed, summary.unknown, summary.expired], [3, 1, 2, 1]);
+  assert.deepEqual([summary.checked, summary.closed, summary.unknown], [3, 1, 2]);
   const checks = requests.filter((item) => item.path.endsWith("/check-liveness"));
   assert.deepEqual(checks.map((item) => item.path), ["/api/jobs/job-a/check-liveness", "/api/jobs/job-b/check-liveness", "/api/jobs/job-c/check-liveness"]);
   assert.ok(checks[1].at - checks[0].at >= 950, "mesmo host: ≥ 1 s entre verificações");
   assert.ok(checks[2].at - checks[1].at < 900, "host diferente não espera");
-  assert.equal(requests.at(-1).path, "/api/liveness/refresh-expired");
+  assert.equal(requests.length, 4, "lista + 3 verificações");
 });
 
 test("--report: silêncio sem vaga encerrada; uma linha quando há", async () => {

@@ -1,16 +1,20 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { AgentConfig, AgentRun, Application, BaseResume, CompanySummary, Job, JobStatus, Resume, SourceConfigRecord } from "./types.js";
 import { executeWorkflowCommand, WorkflowError, type TransitionInput, type TransitionResult, type WorkflowCommand } from "./workflow.js";
-import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
+import { DomainError } from "./errors.js";
+import { deadlinePassed as isDeadlinePassed, isIsoDeadline, resolveTimeZone } from "./deadline.js";
+import { DomainValidationError, isHttpsUrl, canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
+import { extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "./domain.js";
 import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
 import { tx as runTx } from "./db/connection.js";
 import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
+import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
-import { assertJobLivenessFresh, insertLivenessCheck, listJobsDueForLiveness, livenessAndRepostSummaries, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
+import { assertJobLivenessFresh, insertLivenessCheck, listJobsDueForLiveness, livenessAndRepostSummaries, recordSightingRepost, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
 import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./liveness/index.js";
 
-const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
+export const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 
 // Único ponto de inicialização: abre a conexão (pragmas em src/db/connection.ts) e aplica as
 // migrações versionadas pendentes (src/db/migrations/) uma vez, sob BEGIN EXCLUSIVE. Nenhuma
@@ -22,10 +26,30 @@ export function databaseReadiness() {
   return { ok: row?.quick_check === "ok", check: row?.quick_check ?? "unknown" };
 }
 
+// Schema e migrações de dados vivem em src/db/migrations/ e rodam uma única vez por
+// conexão em initDb() (acima), sob BEGIN EXCLUSIVE. Não crie tabelas/colunas aqui.
+
+/** Persistência das sessões do dashboard no SQLite (reiniciar o serviço não desloga ninguém). */
+export function dashboardSessionStore(tokenFingerprint: string) {
+  return {
+    load(now = Date.now()): Array<[string, number]> {
+      db.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= ? OR token_fingerprint <> ?").run(now, tokenFingerprint);
+      return (db.prepare("SELECT token_hash, expires_at FROM dashboard_sessions").all() as Array<{ token_hash: string; expires_at: number }>).map((row) => [row.token_hash, Number(row.expires_at)]);
+    },
+    save(tokenHash: string, expiresAt: number) {
+      db.prepare("INSERT INTO dashboard_sessions (token_hash, token_fingerprint, expires_at) VALUES (?, ?, ?) ON CONFLICT(token_hash) DO UPDATE SET expires_at = excluded.expires_at, token_fingerprint = excluded.token_fingerprint").run(tokenHash, tokenFingerprint, expiresAt);
+    },
+    remove(tokenHash: string) {
+      db.prepare("DELETE FROM dashboard_sessions WHERE token_hash = ?").run(tokenHash);
+    },
+  };
+}
+
 /** `tx` de src/db/connection.ts ligado à conexão do módulo (BEGIN IMMEDIATE ou SAVEPOINT aninhado). */
 function tx<T>(fn: () => T): T {
   return runTx(db, fn);
 }
+
 
 function anonymizeStoredVacanciesOnce() {
   const migration = "anonymize_public_vacancy_data_v1";
@@ -60,8 +84,14 @@ function anonymizeStoredVacanciesOnce() {
 // (Manutenção de dados opt-in, não altera schema; por isso fica fora das migrações.)
 if (process.env.RADAR_RUN_LEGACY_ANONYMIZATION === "true") anonymizeStoredVacanciesOnce();
 
+
+/** Vaga com alguma URL http:// (aceita para visualização; o executor exige HTTPS, #17). */
+function hasInsecureUrl(row: Record<string, unknown>): boolean {
+  return ["application_url", "job_url", "source_url"].some((field) => /^http:/iu.test(String(row[field] ?? "").trim()));
+}
+
 function mapJob(row: Record<string, unknown>): Job {
-  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1 } as Job;
+  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1, insecure_url: hasInsecureUrl(row) } as Job;
 }
 
 function mapResume(row: Record<string, unknown>): Resume {
@@ -84,10 +114,25 @@ function mapApplication(row: Record<string, unknown>): Application {
   return row as unknown as Application;
 }
 
-/** Vagas visíveis. Vagas excluídas (arquivadas) só entram com includeArchived, para deduplicação. */
-export function listJobs(options: { includeArchived?: boolean } = {}): Job[] {
-  const where = options.includeArchived ? "" : "WHERE archived_at IS NULL";
+/**
+ * Vagas visíveis: sem as excluídas (arquivadas) e sem as ocultadas por regra "Não tenho interesse".
+ * includeArchived (deduplicação) devolve todas as vagas, ocultadas inclusive; includeSuppressed
+ * inclui só as ocultadas.
+ */
+export function listJobs(options: { includeArchived?: boolean; includeSuppressed?: boolean } = {}): Job[] {
+  const where = options.includeArchived ? "" : (options.includeSuppressed ? "WHERE archived_at IS NULL" : "WHERE archived_at IS NULL AND suppressed=0");
   return (db.prepare(`SELECT * FROM jobs ${where} ORDER BY match_score DESC, updated_at DESC`).all() as Record<string, unknown>[]).map(mapJob);
+}
+
+/** Vagas ocultadas por regras ativas, com o motivo (regra) de cada uma: a visão "Ocultadas" do painel. */
+export function listSuppressedJobs(projectId = "busca-emprego") {
+  const rules = new Map((db.prepare("SELECT id,match_json,reason,state FROM preference_rules WHERE project_id=?").all(projectId) as Record<string, unknown>[])
+    .map((rule) => [String(rule.id), { id: String(rule.id), reason: String(rule.reason ?? ""), state: String(rule.state), match_json: parseObject(rule.match_json) }]));
+  return (db.prepare("SELECT id,title,company,location,source,suppressed_rule_ids,updated_at FROM jobs WHERE suppressed=1 AND archived_at IS NULL AND project_id=? ORDER BY updated_at DESC").all(projectId) as Record<string, unknown>[])
+    .map((row) => {
+      const ruleIds = parseJsonArray(row.suppressed_rule_ids);
+      return { id: String(row.id), title: String(row.title), company: String(row.company), location: String(row.location ?? ""), source: String(row.source ?? ""), updated_at: String(row.updated_at ?? ""), rule_ids: ruleIds, rules: ruleIds.flatMap((id) => rules.get(id) ?? []) };
+    });
 }
 
 /** Todas as vagas excluídas do projeto: a lista de Configurações é o único caminho para restaurá-las. */
@@ -207,8 +252,9 @@ export function listCompanies(): CompanySummary[] {
   })).sort((left, right) => right.jobs - left.jobs || left.name.localeCompare(right.name));
 }
 
+// Leitura pura: a expiração roda no job periódico (timer do servidor e scripts/ops/expire-jobs.mjs),
+// e `lifecycle` abaixo já mostra como perdida a vaga com prazo vencido antes do próximo tick.
 export function getBootstrap(projectId = "busca-emprego") {
-  refreshExpiredJobs();
   const applications = listApplications();
   const applicationByJob = new Map<string, Application>();
   for (const application of applications) {
@@ -229,6 +275,7 @@ export function getBootstrap(projectId = "busca-emprego") {
   const sources = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.source] = (acc[job.source] ?? 0) + 1; return acc; }, {});
   const locations = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {});
   const salaries = jobs.filter((job) => job.salary_min != null).map((job) => job.salary_min as number);
+  const suppressedJobs = listSuppressedJobs(projectId);
   return {
     jobs,
     resumes: listResumes(),
@@ -247,8 +294,11 @@ export function getBootstrap(projectId = "busca-emprego") {
     sourceConfigs: listSourceConfigs(projectId),
     enrichmentEvents: listJobEnrichmentEvents(),
     archivedJobs: listArchivedJobs(projectId),
+    suppressedJobs,
+    timezone: radarTimeZone(),
     stats: {
       total: jobs.length,
+      suppressed: suppressedJobs.length,
       strongMatches: jobs.filter((job) => job.status === "strong_match" || job.match_score >= 80).length,
       awaitingReview: jobs.filter((job) => ["found", "validation", "review"].includes(job.status)).length,
       selected: jobs.filter((job) => ["selected", "resume", "resume_approved", "ready_to_apply"].includes(job.status)).length,
@@ -439,13 +489,14 @@ function abortApplyingJob(jobId: string, reason: string, actor: string) {
   if (row?.status === "applying") applyWorkflowCommand(jobId, "abort_application", { actor, data: { reason } });
 }
 
-/** A date-only deadline (YYYY-MM-DD) stays valid through the whole local day. */
+/** Fuso do Radar para prazos (#22): `RADAR_TZ`, padrão America/Sao_Paulo; nunca o TZ do processo. */
+export function radarTimeZone(): string {
+  return resolveTimeZone(process.env.RADAR_TZ);
+}
+
+/** A date-only deadline (YYYY-MM-DD) stays valid through 23:59:59 of that day in RADAR_TZ. */
 function deadlinePassed(deadline: string | null | undefined, nowMs = Date.now()): boolean {
-  if (!deadline) return false;
-  const value = String(deadline).trim();
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
-  const limit = dateOnly ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 23, 59, 59, 999).getTime() : Date.parse(value);
-  return Number.isFinite(limit) && limit < nowMs;
+  return isDeadlinePassed(deadline, nowMs, radarTimeZone());
 }
 
 const JOB_URL_FIELDS = ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const;
@@ -485,11 +536,19 @@ function validateJobFields(changed: Record<string, unknown>, current: Record<str
   if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
   if ("latitude" in changed) normalized.latitude = latitude;
   if ("longitude" in changed) normalized.longitude = longitude;
+  if ("deadline_at" in changed && changed.deadline_at != null && String(changed.deadline_at).trim() !== "") {
+    if (!isIsoDeadline(String(changed.deadline_at))) throw new DomainValidationError("Prazo inválido: use AAAA-MM-DD ou data-hora ISO 8601 com fuso.", "deadline_at");
+    normalized.deadline_at = String(changed.deadline_at).trim();
+  }
   if ("opening_status" in changed && !OPENING_STATUSES.has(String(changed.opening_status ?? "unknown"))) throw new Error("job.opening_status.invalid");
   for (const field of ["title", "company"] as const) {
     if (field in changed && !String(changed[field] ?? "").trim()) throw new Error("job.required_fields.invalid");
   }
   return normalized;
+}
+
+function upsertJobId(source: string, identityUrl: string, title: string, company: string) {
+  return idFor(`${source}|${identityUrl}|${title}|${company}`);
 }
 
 export function upsertJob(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
@@ -502,7 +561,7 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
   const linkedinPostUrl = String(input.linkedin_post_url ?? "");
   const applicationUrl = String(input.application_url ?? "");
   const sourceUrl = String(input.source_url ?? "");
-  const id = input.id || idFor(`${input.source}|${jobUrl || linkedinPostUrl || applicationUrl || sourceUrl}|${input.title}|${input.company}`);
+  const id = input.id || upsertJobId(input.source, jobUrl || linkedinPostUrl || applicationUrl || sourceUrl, input.title, input.company);
   const timestamp = now();
   tx(() => {
     const current = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
@@ -522,9 +581,40 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
     const rawInput = input as unknown as Record<string, unknown>;
     db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
       .run(String(rawInput.project_id ?? currentJob?.project_id ?? "busca-emprego"), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
+    db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?").run(jobDedupKey(job.title, job.company, job.location), jobDescriptionHash(job.description, job.company), id);
     audit("job", id, currentJob ? "updated" : "discovered", { changed_fields: Object.keys(input) });
+    applySuppression(id);
   });
   return getJob(id);
+}
+
+/** Campos que o cadastro manual (POST /api/jobs) não aceita: identidade, nota e estado vêm do domínio. */
+const nonCreatableJobFields = new Set(["id", "match_score", "project_id", "status", "decision", "archived_at", "version"]);
+
+/**
+ * Cadastro manual de vaga (dashboard/API). Diferente de `upsertJob` (ingestão), nunca
+ * sobrescreve uma vaga existente nem uma arquivada, e grava proveniência humana dos campos.
+ */
+export function createJobFromHuman(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
+  const forbidden = Object.keys(input).filter((key) => nonCreatableJobFields.has(key));
+  if (forbidden.length) throw new Error(`job.field.not_editable:${forbidden.join(",")}`);
+  const job = input as Partial<Job> & { source: string; title: string; company: string; source_url: string };
+  const identityUrl = String(job.job_url || job.linkedin_post_url || job.application_url || job.source_url || "");
+  const id = upsertJobId(String(job.source ?? ""), identityUrl, String(job.title ?? ""), String(job.company ?? ""));
+  return tx(() => {
+    assertJobNotArchived(id);
+    if (getJob(id)) throw new Error("job.already_exists");
+    const created = upsertJob({ ...job, project_id: projectId } as typeof job);
+    if (created) {
+      for (const [field, value] of Object.entries(input)) {
+        if (!editableJobFields.has(field) || value == null || value === "") continue;
+        const evidence = addEvidence({ projectId, jobId: created.id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
+        selectEvidence(created.id, field, evidence.id, actor, evidence.timestamp);
+      }
+    }
+    audit("job", created?.id ?? id, "created_by_human", { actor });
+    return created;
+  });
 }
 
 export function getJob(id: string) {
@@ -546,7 +636,7 @@ const sourceItemFields = new Set([
   "posted_at", "deadline_at", "opening_status", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs"
 ]);
 
-function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
+export function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
   if (String(batch.source_id ?? sourceId) !== sourceId || !Array.isArray(batch.items) || batch.items.length > 25) throw new Error("SCHEMA_INVALID:source.items");
   const items = (batch.items as unknown[]).map((value, index) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`SCHEMA_INVALID:source.items.${index}`);
@@ -702,6 +792,64 @@ function activeSuppression(job: Job, projectId = "busca-emprego", rules: Suppres
 }
 
 /**
+ * Aplica as regras ativas "Não tenho interesse" à vaga (todo caminho de criação/atualização:
+ * upsertJob, ingestão em lote e descoberta por agente). Cada regra conta a vaga uma única vez;
+ * vaga com decisão humana ou reexibida pelo usuário não é ocultada. Devolve as regras aplicadas.
+ */
+function applySuppression(jobId: string): string[] {
+  const row = db.prepare("SELECT * FROM jobs WHERE id=?").get(jobId) as Record<string, unknown> | undefined;
+  if (!row) return [];
+  const job = mapJob(row);
+  const previous = job.suppressed ? parseJsonArray(row.suppressed_rule_ids) : [];
+  if (row.suppression_dismissed_at || (job.decision && job.decision !== "pending")) return previous;
+  const projectId = job.project_id ?? "busca-emprego";
+  const matched = activeSuppression(job, projectId);
+  const added = matched.filter((ruleId) => !previous.includes(ruleId));
+  if (!added.length) return previous;
+  const timestamp = now();
+  db.prepare("UPDATE jobs SET suppressed=1,suppressed_rule_ids=? WHERE id=?").run(JSON.stringify([...previous, ...added]), jobId);
+  for (const ruleId of added) db.prepare("UPDATE preference_rules SET suppressed_count=suppressed_count+1,updated_at=? WHERE id=?").run(timestamp, ruleId);
+  audit("job", jobId, "suppressed", { rule_ids: added });
+  return [...previous, ...added];
+}
+
+/** Ação "Reexibir" da visão Ocultadas: a vaga volta ao painel e as regras atuais não a ocultam de novo. */
+export function unsuppressJob(id: string, actor = "user") {
+  const job = getJob(id);
+  if (!job) throw new Error("job.not_found");
+  if (!job.suppressed) throw new Error("job.not_suppressed");
+  const timestamp = now();
+  tx(() => {
+    db.prepare("UPDATE jobs SET suppressed=0,suppressed_rule_ids='[]',suppression_dismissed_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, id);
+    audit("job", id, "unsuppressed", { actor });
+  });
+  return getJob(id);
+}
+
+
+/**
+ * Dedup multi-chave entre portais (depois da identidade exata por id/URL canônica): mesma
+ * empresa + título normalizado + local, ou mesma descrição. Duas vagas da mesma fonte com
+ * ids de origem diferentes continuam distintas (são publicações diferentes do portal).
+ */
+function findDedupKeyMatch(projectId: string, incoming: { sourceId: string; sourceJobId: string | null; title: string; company: string; location: string | null; description: string | null }): { job: Job; reason: string } | null {
+  const keys: Array<[string, string | null, string]> = [
+    ["dedup_key", jobDedupKey(incoming.title, incoming.company, incoming.location), "same_company_title_location"],
+    ["description_hash", jobDescriptionHash(incoming.description, incoming.company), "same_description_hash"],
+  ];
+  for (const [column, value, reason] of keys) {
+    if (!value) continue;
+    const rows = db.prepare(`SELECT * FROM jobs WHERE project_id=? AND ${column}=? ORDER BY created_at LIMIT 10`).all(projectId, value) as Record<string, unknown>[];
+    for (const candidate of rows.map(mapJob)) {
+      const sameSource = candidate.source === incoming.sourceId;
+      if (sameSource && incoming.sourceJobId && candidate.source_job_id && candidate.source_job_id !== incoming.sourceJobId) continue;
+      return { job: candidate, reason };
+    }
+  }
+  return null;
+}
+
+/**
  * A source reporting the vacancy as closed is authoritative for the opening fields: the job
  * is closed (opening_status/closed_at) and, while no application is under way, expired via the workflow.
  */
@@ -763,7 +911,182 @@ export function detectJobRepost(jobId: string) {
   return storeFingerprintAndDetectReposts(db, jobId);
 }
 
-export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego") {
+/** Vaga revista (dedup exata/multi-chave) com data de publicação bem mais nova: repostagem da mesma vaga. */
+export function detectSightingRepost(jobId: string, postedAt: string | null) {
+  return recordSightingRepost(db, jobId, postedAt);
+}
+
+type FuzzyIndex = Map<string, Array<{ id: string; candidate: FuzzyJobCandidate }>>;
+type FuzzyMatch = { id: string; decision: FuzzyDuplicateDecision };
+
+function fuzzyFromItem(item: Record<string, unknown>): FuzzyJobCandidate {
+  return { title: String(item.title), company: String(item.company), location: item.location_text == null ? null : String(item.location_text), workModel: item.work_model == null ? null : String(item.work_model), postedAt: item.posted_at == null ? null : String(item.posted_at) };
+}
+
+function addToFuzzyIndex(index: FuzzyIndex, id: string, candidate: FuzzyJobCandidate) {
+  const key = companyKey(candidate.company);
+  // Sem empresa normalizada não há sinal "same_company": a vaga nunca seria candidata.
+  if (!key) return;
+  const bucket = index.get(key);
+  if (bucket) bucket.push({ id, candidate }); else index.set(key, [{ id, candidate }]);
+}
+
+/**
+ * Índice em memória por company_key de todas as vagas do projeto (inclusive excluídas e de
+ * score baixo). Só a coluna leve é lida, e os trigramas só rodam dentro do balde da empresa.
+ */
+function buildFuzzyIndex(projectId: string): FuzzyIndex {
+  const index: FuzzyIndex = new Map();
+  const rows = db.prepare("SELECT id,title,company,location,work_model,posted_at FROM jobs WHERE project_id=? ORDER BY created_at, id").all(projectId) as Record<string, unknown>[];
+  for (const row of rows) {
+    addToFuzzyIndex(index, String(row.id), { title: String(row.title), company: String(row.company), location: row.location == null ? null : String(row.location), workModel: row.work_model == null ? null : String(row.work_model), postedAt: row.posted_at == null ? null : String(row.posted_at) });
+  }
+  return index;
+}
+
+/** Até `limit` vagas do balde da empresa que o fuzzy marca como possível duplicata. */
+function findFuzzyMatches(index: FuzzyIndex, incoming: FuzzyJobCandidate, limit = 2): FuzzyMatch[] {
+  const matches: FuzzyMatch[] = [];
+  for (const entry of index.get(companyKey(incoming.company)) ?? []) {
+    const decision = compareFuzzyDuplicate(incoming, entry.candidate);
+    if (decision.action === "possible_duplicate") matches.push({ id: entry.id, decision });
+    if (matches.length >= limit) break;
+  }
+  return matches;
+}
+
+type IngestContext = {
+  projectId: string; sourceId: string; roundId: string | null; agentId: string | null;
+  // Fuzzy (#24): índice por empresa montado antes do lock, mais as vagas novas do próprio lote.
+  fuzzyIndex: FuzzyIndex; batchFuzzyIndex: FuzzyIndex; precomputed?: FuzzyMatch[];
+};
+
+/**
+ * Um item de fonte (schema de validateSourceBatch) passa pela identidade exata, pela dedup
+ * multi-chave e pela fuzzy; vaga nova é criada, vaga revista vira ocorrência + evidência.
+ * Roda dentro da transação do chamador (ingestRoundBatch / ingestSourceItems).
+ */
+function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
+  const { projectId, sourceId, roundId, agentId } = ctx;
+  const sourceUrl = canonicalizeJobUrl(String(item.source_url ?? item.job_url));
+  const jobUrl = canonicalizeJobUrl(String(item.job_url));
+  // Sem ID nativo informado, usa o ID que a URL do portal expõe ("linkedin:123", "gupy:456"...).
+  const sourceJobId = item.source_job_id == null ? extractSourceJobId(jobUrl) : String(item.source_job_id);
+  // Exact identity (domain.compareExactIdentity): same source job id within the source, or the
+  // same canonical URL *and* the same normalized company. A URL alone never merges employers.
+  const incoming = { sourceId, sourceJobId, sourceUrl: jobUrl, company: String(item.company) };
+  let existingJob: Job | null = null;
+  let reason = "different_identity";
+  const occurrences = [
+    ...(sourceJobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND source_id=? AND source_job_id=? ORDER BY observed_at DESC LIMIT 5").all(projectId, sourceId, sourceJobId) as Record<string, unknown>[] : []),
+    ...(db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND canonical_url=? ORDER BY observed_at DESC LIMIT 20").all(projectId, jobUrl) as Record<string, unknown>[]),
+  ];
+  for (const occurrence of occurrences) {
+    const candidate = getJob(String(occurrence.job_id));
+    if (!candidate) continue;
+    const decision = compareExactIdentity(incoming, {
+      sourceId: String(occurrence.source_id), sourceJobId: occurrence.source_job_id == null ? null : String(occurrence.source_job_id),
+      sourceUrl: String(occurrence.canonical_url), company: candidate.company,
+    });
+    if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
+  }
+  if (!existingJob) {
+    for (const candidate of (db.prepare("SELECT * FROM jobs WHERE project_id=? AND (canonical_url=? OR job_url=?) ORDER BY created_at LIMIT 10").all(projectId, jobUrl, jobUrl) as Record<string, unknown>[]).map(mapJob)) {
+      const decision = compareExactIdentity(incoming, { sourceId: candidate.source, sourceJobId: candidate.source_job_id ?? null, sourceUrl: candidate.job_url || candidate.canonical_url || jobUrl, company: candidate.company });
+      if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
+    }
+  }
+  if (!existingJob) {
+    // A mesma vaga vista em outro portal (outra URL): empresa + título + local, ou descrição.
+    const keyed = findDedupKeyMatch(projectId, { sourceId, sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? null : String(item.location_text), description: item.description == null ? null : String(item.description) });
+    if (keyed) { existingJob = keyed.job; reason = keyed.reason; }
+  }
+  const multiKeyMatch = ["same_company_title_location", "same_description_hash"].includes(reason);
+  let action = existingJob ? "sighting" : "new";
+  const jobId = existingJob?.id ?? idFor(`canonical-job|${projectId}|${jobUrl}|${companyKey(String(item.company))}`);
+  let fuzzy: FuzzyMatch | null = null;
+  if (!existingJob) {
+    // Candidatos pré-calculados; dentro do lock só confirma que a candidata ainda existe.
+    fuzzy = [...(ctx.precomputed ?? findFuzzyMatches(ctx.fuzzyIndex, fuzzyFromItem(item))), ...findFuzzyMatches(ctx.batchFuzzyIndex, fuzzyFromItem(item))]
+      .find((match) => match.id !== jobId && db.prepare("SELECT 1 FROM jobs WHERE id=?").get(match.id)) ?? null;
+    if (fuzzy) action = "possible_duplicate";
+  }
+  const jobInput: any = {
+    id: jobId, project_id: projectId, source_job_id: sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? "Não informado" : String(item.location_text),
+    work_model: item.work_model == null || item.work_model === "unknown" ? "Não informado" : String(item.work_model), seniority: item.seniority == null ? "Não informado" : String(item.seniority),
+    description: item.description == null ? "" : String(item.description), benefits: Array.isArray(item.benefits) ? item.benefits.map(String).join("\n") : String(item.benefits ?? ""),
+    requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
+    additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
+    application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at)
+  };
+  // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
+  const job = existingJob ?? upsertJob(jobInput);
+  if (!job) throw new Error("job.persist.failed");
+  if (!existingJob) addToFuzzyIndex(ctx.batchFuzzyIndex, job.id, fuzzyFromItem(item));
+  // #33: vaga nova → impressão digital + repostagem contra anteriores; vaga revista com nova data de publicação → repostagem da mesma vaga.
+  if (!existingJob) detectJobRepost(job.id); else detectSightingRepost(job.id, item.posted_at == null ? null : String(item.posted_at));
+  // One occurrence per (round, source, item): the same item repeated across batches of a
+  // round is the same sighting, so the batch hash is not part of the identity. Fora de
+  // rodada (descoberta avulsa por agente), cada vez que a vaga é revista é uma nova ocorrência.
+  const occurrenceId = idFor(`occurrence|${projectId}|${roundId ?? `direct:${randomUUID()}`}|${sourceId}|${sourceJobId ?? jobUrl}`);
+  db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at,opening_status)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,opening_status=excluded.opening_status,payload_hash=excluded.payload_hash`)
+    .run(occurrenceId, projectId, job.id, roundId, sourceId, sourceJobId, String(item.source_url ?? item.job_url), jobUrl, jobPayloadHash(item), now(), String(item.opening_status ?? "unknown"));
+  // Uma sighting é reavaliada contra as regras atuais (a vaga nova já passou por upsertJob);
+  // applySuppression é idempotente: cada vaga conta uma única vez por regra.
+  const suppressed = applySuppression(job.id);
+  if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId ?? undefined);
+  for (const [field, value] of Object.entries(jobInput)) {
+    if (["id", "project_id", "source_job_id", "source"].includes(field) || value == null || value === "") continue;
+    // Vista em outro portal (dedup multi-chave), a URL diferente fica na ocorrência, não vira conflito.
+    if (existingJob && multiKeyMatch && ["source_url", "job_url", "linkedin_post_url", "application_url"].includes(field)) continue;
+    // A closure reported by the source is applied by closeJobFromSource, not parked as a conflict.
+    if (field === "opening_status" && value === "closed") continue;
+    const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl, confidence: 0.8, origin: "agent", runId: roundId ?? undefined, agentId: agentId ?? undefined, sourceId });
+    if (!existingJob) {
+      selectEvidence(job.id, field, evidence.id, agentId ?? sourceId, evidence.timestamp);
+      continue;
+    }
+    const currentValue = (existingJob as unknown as Record<string, unknown>)[field];
+    const sameValue = JSON.stringify(currentValue ?? null) === JSON.stringify(value ?? null);
+    if (sameValue) {
+      db.prepare(`INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at,superseded_at)
+        VALUES (?,?,?,?,?,?)`).run(job.id, field, evidence.id, sourceId, evidence.timestamp, evidence.timestamp);
+      continue;
+    }
+    let selected = db.prepare(`SELECT e.id,e.origin FROM job_field_provenance p JOIN evidence_records e ON e.id=p.evidence_id
+      WHERE p.job_id=? AND p.field_path=? AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id, field) as { id: string; origin: string } | undefined;
+    if (!selected) {
+      const legacy = addEvidence({ projectId, jobId: job.id, field, value: currentValue, sourceUrl: "legacy://job", confidence: 0.75, origin: "legacy" });
+      selectEvidence(job.id, field, legacy.id, "migration", legacy.timestamp);
+      selected = { id: legacy.id, origin: "legacy" };
+    }
+    db.prepare(`INSERT OR IGNORE INTO field_conflicts (id,job_id,field_path,current_evidence_id,candidate_evidence_id,status,reason,created_at)
+      VALUES (?,?,?,?,?,'pending',?,?)`).run(idFor(`conflict|${job.id}|${field}|${evidence.id}`), job.id, field, selected.id, evidence.id,
+        selected.origin === "human" ? "human_value_protected" : "source_disagreement", evidence.timestamp);
+  }
+  if (fuzzy && job.id !== fuzzy.id) {
+    db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(idFor(`possible|${job.id}|${fuzzy.id}`), projectId, job.id, fuzzy.id, fuzzy.decision.similarity, JSON.stringify(fuzzy.decision.reasons), now());
+  }
+  return { source_job_id: sourceJobId, job_id: job.id, action, reason, suppressed: suppressed.length > 0, occurrence_id: occurrenceId };
+}
+
+/**
+ * Caminho único de ingestão fora de rodada (conectores, descoberta por agente): mesma validação,
+ * identidade, dedup multi-chave e supressão de ingestRoundBatch, sem checkpoint de rodada.
+ * Cada item revisto vira nova ocorrência da vaga canônica.
+ */
+export function ingestSourceItems(sourceId: string, items: unknown[], options: { projectId?: string; agentId?: string | null } = {}) {
+  const projectId = options.projectId ?? "busca-emprego";
+  const { items: validated } = validateSourceBatch(sourceId, { source_id: sourceId, items });
+  const fuzzyIndex = buildFuzzyIndex(projectId);
+  const batchFuzzyIndex: FuzzyIndex = new Map();
+  return tx(() => validated.map((item) => ingestSourceItem(item, { projectId, sourceId, roundId: null, agentId: options.agentId ?? null, fuzzyIndex, batchFuzzyIndex })));
+}
+
+export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego", agentId: string | null = null) {
   const round = getRound(roundId, projectId);
   if (!round) throw new Error("round.not_found");
   const roundSource = (round.sources as Record<string, unknown>[]).find((source) => source.source_id === sourceId);
@@ -773,6 +1096,12 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   if (!["running", "planning"].includes(String(round.status))) throw new Error("round.not_running");
   if (!["ready", "running"].includes(String(roundSource.status))) throw new Error("round.source.not_runnable");
   const results: Array<Record<string, unknown>> = [];
+  // Fuzzy fora da transação de escrita: lê o índice e compara antes do BEGIN IMMEDIATE, para não
+  // segurar o lock do SQLite (MCP e dashboard esperam no busy_timeout) durante os trigramas.
+  const fuzzyIndex = buildFuzzyIndex(projectId);
+  const fuzzyMatches = new Map(items.map((item) => [item, findFuzzyMatches(fuzzyIndex, fuzzyFromItem(item))]));
+  // Vagas novas deste lote: um item pode ser possível duplicata de outro do mesmo lote.
+  const batchFuzzyIndex: FuzzyIndex = new Map();
   db.exec("BEGIN IMMEDIATE");
   try {
   const lockedRound = db.prepare("SELECT status FROM search_rounds WHERE id=? AND project_id=?").get(roundId, projectId) as { status: string } | undefined;
@@ -790,111 +1119,7 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   db.prepare("DELETE FROM round_checkpoints WHERE round_id=? AND source_id=? AND payload_hash=? AND status<>'completed'").run(roundId, sourceId, payloadHash);
   db.prepare(`INSERT INTO round_checkpoints (id,round_id,source_id,batch_number,cursor,payload_hash,status,created_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(checkpointId, roundId, sourceId, batchNumber, nextCursor, payloadHash, "started", now());
-  for (const item of items) {
-    const sourceUrl = canonicalizeJobUrl(String(item.source_url ?? item.job_url));
-    const jobUrl = canonicalizeJobUrl(String(item.job_url));
-    const sourceJobId = item.source_job_id == null ? null : String(item.source_job_id);
-    // Exact identity (domain.compareExactIdentity): same source job id within the source, or the
-    // same canonical URL *and* the same normalized company. A URL alone never merges employers.
-    const incoming = { sourceId, sourceJobId, sourceUrl: jobUrl, company: String(item.company) };
-    let existingJob: Job | null = null;
-    let reason = "different_identity";
-    const occurrences = [
-      ...(sourceJobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND source_id=? AND source_job_id=? ORDER BY observed_at DESC LIMIT 5").all(projectId, sourceId, sourceJobId) as Record<string, unknown>[] : []),
-      ...(db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND canonical_url=? ORDER BY observed_at DESC LIMIT 20").all(projectId, jobUrl) as Record<string, unknown>[]),
-    ];
-    for (const occurrence of occurrences) {
-      const candidate = getJob(String(occurrence.job_id));
-      if (!candidate) continue;
-      const decision = compareExactIdentity(incoming, {
-        sourceId: String(occurrence.source_id), sourceJobId: occurrence.source_job_id == null ? null : String(occurrence.source_job_id),
-        sourceUrl: String(occurrence.canonical_url), company: candidate.company,
-      });
-      if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
-    }
-    if (!existingJob) {
-      for (const candidate of (db.prepare("SELECT * FROM jobs WHERE project_id=? AND (canonical_url=? OR job_url=?) ORDER BY created_at LIMIT 10").all(projectId, jobUrl, jobUrl) as Record<string, unknown>[]).map(mapJob)) {
-        const decision = compareExactIdentity(incoming, { sourceId: candidate.source, sourceJobId: candidate.source_job_id ?? null, sourceUrl: candidate.job_url || candidate.canonical_url || jobUrl, company: candidate.company });
-        if (decision.action === "sighting") { existingJob = candidate; reason = decision.reason; break; }
-      }
-    }
-    let action = existingJob ? "sighting" : "new";
-    if (!existingJob) {
-      const candidates = listJobs({ includeArchived: true }).filter((candidate) => candidate.project_id === projectId).slice(0, 500);
-      const fuzzy = candidates.find((candidate) => compareFuzzyDuplicate(
-        { title: String(item.title), company: String(item.company), location: item.location_text == null ? null : String(item.location_text), workModel: item.work_model == null ? null : String(item.work_model), postedAt: item.posted_at == null ? null : String(item.posted_at) },
-        { title: candidate.title, company: candidate.company, location: candidate.location, workModel: candidate.work_model, postedAt: candidate.posted_at }
-      ).action === "possible_duplicate");
-      if (fuzzy) action = "possible_duplicate";
-    }
-    const jobId = existingJob?.id ?? idFor(`canonical-job|${projectId}|${jobUrl}|${companyKey(String(item.company))}`);
-    const jobInput: any = {
-      id: jobId, project_id: projectId, source_job_id: sourceJobId, title: String(item.title), company: String(item.company), location: item.location_text == null ? "Não informado" : String(item.location_text),
-      work_model: item.work_model == null || item.work_model === "unknown" ? "Não informado" : String(item.work_model), seniority: item.seniority == null ? "Não informado" : String(item.seniority),
-      description: item.description == null ? "" : String(item.description), benefits: Array.isArray(item.benefits) ? item.benefits.map(String).join("\n") : String(item.benefits ?? ""),
-      requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
-      additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
-      application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at)
-    };
-    // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
-    const job = existingJob ?? upsertJob(jobInput);
-    if (!job) throw new Error("job.persist.failed");
-    if (!existingJob) detectJobRepost(job.id);
-    // One occurrence per (round, source, item): the same item repeated across batches of a
-    // round is the same sighting, so the batch hash is not part of the identity.
-    const occurrenceId = idFor(`occurrence|${projectId}|${roundId}|${sourceId}|${sourceJobId ?? jobUrl}`);
-    db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at,opening_status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,opening_status=excluded.opening_status,payload_hash=excluded.payload_hash`)
-      .run(occurrenceId, projectId, job.id, roundId, sourceId, sourceJobId, String(item.source_url ?? item.job_url), jobUrl, jobPayloadHash(item), now(), String(item.opening_status ?? "unknown"));
-    const wasSuppressed = Boolean(existingJob?.suppressed);
-    const suppressed = activeSuppression(job, projectId);
-    if (suppressed.length && !wasSuppressed) {
-      // Count each suppressed vacancy once, not once per repeated sighting.
-      db.prepare("UPDATE jobs SET suppressed=1 WHERE id=?").run(job.id);
-      for (const ruleId of suppressed) db.prepare("UPDATE preference_rules SET suppressed_count=suppressed_count+1,updated_at=? WHERE id=?").run(now(), ruleId);
-    }
-    if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId);
-    for (const [field, value] of Object.entries(jobInput)) {
-      if (["id", "project_id", "source_job_id", "source"].includes(field) || value == null || value === "") continue;
-      // A closure reported by the source is applied by closeJobFromSource, not parked as a conflict.
-      if (field === "opening_status" && value === "closed") continue;
-      const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl, confidence: 0.8, origin: "agent", runId: roundId, sourceId });
-      if (!existingJob) {
-        selectEvidence(job.id, field, evidence.id, sourceId, evidence.timestamp);
-        continue;
-      }
-      const currentValue = (existingJob as unknown as Record<string, unknown>)[field];
-      const sameValue = JSON.stringify(currentValue ?? null) === JSON.stringify(value ?? null);
-      if (sameValue) {
-        db.prepare(`INSERT INTO job_field_provenance (job_id,field_path,evidence_id,selected_by,selected_at,superseded_at)
-          VALUES (?,?,?,?,?,?)`).run(job.id, field, evidence.id, sourceId, evidence.timestamp, evidence.timestamp);
-        continue;
-      }
-      let selected = db.prepare(`SELECT e.id,e.origin FROM job_field_provenance p JOIN evidence_records e ON e.id=p.evidence_id
-        WHERE p.job_id=? AND p.field_path=? AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id, field) as { id: string; origin: string } | undefined;
-      if (!selected) {
-        const legacy = addEvidence({ projectId, jobId: job.id, field, value: currentValue, sourceUrl: "legacy://job", confidence: 0.75, origin: "legacy" });
-        selectEvidence(job.id, field, legacy.id, "migration", legacy.timestamp);
-        selected = { id: legacy.id, origin: "legacy" };
-      }
-      db.prepare(`INSERT OR IGNORE INTO field_conflicts (id,job_id,field_path,current_evidence_id,candidate_evidence_id,status,reason,created_at)
-        VALUES (?,?,?,?,?,'pending',?,?)`).run(idFor(`conflict|${job.id}|${field}|${evidence.id}`), job.id, field, selected.id, evidence.id,
-          selected.origin === "human" ? "human_value_protected" : "source_disagreement", evidence.timestamp);
-    }
-    if (action === "possible_duplicate" && job.id !== existingJob?.id) {
-      const candidate = listJobs({ includeArchived: true }).find((candidateJob) => candidateJob.id !== job.id && compareFuzzyDuplicate(
-        { title: job.title, company: job.company, location: job.location, workModel: job.work_model, postedAt: job.posted_at },
-        { title: candidateJob.title, company: candidateJob.company, location: candidateJob.location, workModel: candidateJob.work_model, postedAt: candidateJob.posted_at }
-      ).action === "possible_duplicate");
-      if (candidate) {
-        const decision = compareFuzzyDuplicate({ title: job.title, company: job.company, location: job.location, workModel: job.work_model, postedAt: job.posted_at }, { title: candidate.title, company: candidate.company, location: candidate.location, workModel: candidate.work_model, postedAt: candidate.posted_at });
-        db.prepare(`INSERT OR IGNORE INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at)
-          VALUES (?,?,?,?,?,?,?)`).run(idFor(`possible|${job.id}|${candidate.id}`), projectId, job.id, candidate.id, decision.similarity, JSON.stringify(decision.reasons), now());
-      }
-    }
-    results.push({ source_job_id: sourceJobId, job_id: job.id, action, reason, suppressed: suppressed.length > 0 });
-  }
+  for (const item of items) results.push(ingestSourceItem(item, { projectId, sourceId, roundId, agentId, fuzzyIndex, batchFuzzyIndex, precomputed: fuzzyMatches.get(item) }));
   const timestamp = now();
   const sourceStatus = nextCursor ? "running" : "completed";
   db.prepare("UPDATE round_checkpoints SET status='completed' WHERE id=? AND status='started'").run(checkpointId);
@@ -1030,7 +1255,7 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
         WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')`).run(now(), id);
       abortApplyingJob(id, "job_url_changed", options.actor ?? "system");
     }
-    audit("job", id, "updated", { changed_fields: Object.keys(requested) });
+    audit("job", id, "updated", { changed_fields: Object.keys(requested), ...(options.actor ? { actor: options.actor } : {}) });
   });
   return getJob(id);
 }
@@ -1059,7 +1284,30 @@ export function listWorkflowEvents(jobId: string) {
     .map((row) => ({ ...row, version: Number(row.version), cycle: Number(row.cycle ?? 1), data: parseObject(row.data_json) }));
 }
 
-export function recordJobDecision(id: string, decision: string, confirmation: string) {
+/**
+ * Histórico da vaga para a UI (#19): transições do workflow e decisões auditadas da vaga, dos
+ * currículos e das candidaturas dela, cada uma com o ator que a credencial identificou.
+ */
+export function listJobHistory(jobId: string) {
+  const transitions = (listWorkflowEvents(jobId) as Record<string, unknown>[]).map((event) => ({
+    kind: "transition", at: String(event.created_at), actor: String(event.actor ?? ""), event: String(event.command ?? ""),
+    from_status: event.from_status ?? null, to_status: event.to_status ?? null,
+  }));
+  const audited = (db.prepare(`SELECT entity_type, event_type, payload, created_at FROM audit_events
+      WHERE (entity_type='job' AND entity_id=?)
+        OR (entity_type='resume' AND entity_id IN (SELECT id FROM resumes WHERE job_id=?))
+        OR (entity_type='application' AND entity_id IN (SELECT id FROM applications WHERE job_id=?))
+      ORDER BY created_at, id`).all(jobId, jobId, jobId) as Record<string, unknown>[])
+    .map((row) => {
+      const payload = parseObject(row.payload);
+      return { kind: "audit", at: String(row.created_at), actor: typeof payload.actor === "string" ? payload.actor : "", event: `${row.entity_type}.${row.event_type}`, from_status: null, to_status: null };
+    })
+    // Sem ator registrado (eventos antigos ou anonimizados) não há origem a mostrar.
+    .filter((item) => item.actor);
+  return [...transitions, ...audited].sort((a, b) => a.at.localeCompare(b.at));
+}
+
+export function recordJobDecision(id: string, decision: string, confirmation: string, actor = "user") {
   assertJobNotArchived(id);
   if (decision === "not_interested") throw new Error("Use o feedback total com categoria e justificativa para rejeitar uma vaga.");
   const phrases: Record<string, string> = { interested: "TENHO INTERESSE", no_time: "SEM TEMPO" };
@@ -1080,7 +1328,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
       const approved = db.prepare("SELECT id FROM resumes WHERE job_id = ? AND status = 'approved' LIMIT 1").get(id);
       const application = db.prepare("SELECT id FROM applications WHERE job_id = ? LIMIT 1").get(id);
       const target: JobStatus = approved ? (application ? "ready_to_apply" : "resume_approved") : resume ? "resume" : "selected";
-      advanceJobTo(id, target, { actor: "user", data: { reason: "interest_confirmed" } });
+      advanceJobTo(id, target, { actor, data: { reason: "interest_confirmed" } });
       // One positive signal per vacancy: toggling SEM TEMPO / TENHO INTERESSE must not inflate preferences.
       const facets = positiveSignalFacets(job);
       const firstSignal = db.prepare("INSERT OR IGNORE INTO preference_signal_events (project_id,job_id,polarity,created_at,facets_json) VALUES (?,?,'positive',?,?)").run(projectId, id, timestamp, JSON.stringify(facets));
@@ -1094,9 +1342,9 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
     } else {
       // SEM TEMPO withdraws the go-ahead: the current automatic authorization is revoked, not just hidden.
       withdrawPendingAuthorizations(id, "decision_no_time", timestamp);
-      abortApplyingJob(id, "decision_no_time", "user");
+      abortApplyingJob(id, "decision_no_time", actor);
     }
-    audit("job", id, "decision", { decision });
+    audit("job", id, "decision", { decision, actor });
   });
   return getJob(id);
 }
@@ -1117,14 +1365,14 @@ function prepareBaseResume(input: BaseResumeUpload) {
 }
 
 function insertBaseResume(prepared: ReturnType<typeof prepareBaseResume>, extraction: PdfExtraction) {
-  const { title, fileName, fileData, bytes, checksum } = prepared;
+  const { title, fileName, bytes, checksum } = prepared;
   if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
   const id = idFor(`base-resume|${checksum}`);
   const timestamp = now();
   const hasBase = Boolean(db.prepare("SELECT id FROM base_resumes WHERE is_base = 1 LIMIT 1").get());
   db.prepare(`INSERT INTO base_resumes
-    (id,title,file_name,mime_type,file_data,is_base,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at,created_at,updated_at)
-    VALUES (?,?,?,'application/pdf',?,?,?,?,?,?,?,?,?,?)`).run(id, title, fileName, fileData, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
+    (id,title,file_name,mime_type,file_data,file_blob,is_base,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at,created_at,updated_at)
+    VALUES (?,?,?,'application/pdf','',?,?,?,?,?,?,?,?,?,?)`).run(id, title, fileName, bytes, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
   audit("base_resume", id, "uploaded", { bytes: bytes.length, sha256: checksum, extraction_status: extraction.status, page_count: extraction.pageCount });
   return listBaseResumes().find((resume) => resume.id === id) ?? null;
 }
@@ -1156,8 +1404,11 @@ export function selectBaseResume(id: string) {
 }
 
 export function getBaseResumeFile(id: string) {
-  const row = db.prepare("SELECT id,title,file_name,mime_type,file_data FROM base_resumes WHERE id = ?").get(id) as { id: string; title: string; file_name: string; mime_type: string; file_data: string } | undefined;
-  return row ? { ...row, data: Buffer.from(row.file_data, "base64") } : null;
+  const row = db.prepare("SELECT id,title,file_name,mime_type,file_data,file_blob FROM base_resumes WHERE id = ?").get(id) as { id: string; title: string; file_name: string; mime_type: string; file_data: string; file_blob: Uint8Array | null } | undefined;
+  if (!row) return null;
+  const { file_blob: blob, ...rest } = row;
+  // file_data legado só sobra se a migração não rodou (banco aberto por versão antiga no meio).
+  return { ...rest, data: blob ? Buffer.from(blob) : Buffer.from(row.file_data, "base64") };
 }
 
 function mapProfileFact(row: Record<string, unknown>): any {
@@ -1223,10 +1474,11 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   return mapProfileFact(db.prepare("SELECT * FROM profile_facts WHERE id=?").get(id) as Record<string, unknown>);
 }
 
-export function reviewProfileFact(id: string, state: string, actor = "user") {
+/** Revisa um fato; com `profileId`, o fato precisa pertencer a esse perfil (senão, não encontrado). */
+export function reviewProfileFact(id: string, state: string, actor = "user", profileId?: string) {
   if (!["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
   const row = db.prepare("SELECT f.*,p.status AS profile_status FROM profile_facts f JOIN professional_profiles p ON p.id=f.profile_id WHERE f.id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row) throw new Error("profile.fact.not_found");
+  if (!row || (profileId !== undefined && row.profile_id !== profileId)) throw new Error("profile.fact.not_found");
   if (row.profile_status !== "draft") throw new Error("profile.draft_required");
   if (state === "confirmed" && row.origin !== "user" && row.evidence_page == null && !String(row.evidence_excerpt ?? "").trim()) throw new Error("profile.fact.evidence.required");
   db.prepare("UPDATE profile_facts SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
@@ -1341,7 +1593,7 @@ export function deleteBaseResume(id: string) {
   return true;
 }
 
-export function createResume(input: Partial<Resume> & { job_id: string; title: string }) {
+export function createResume(input: Partial<Resume> & { job_id: string; title: string }, actor?: string) {
   assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT decision FROM jobs WHERE id = ?").get(input.job_id) as { decision: string } | undefined;
   if (!job) throw new Error("Vaga não encontrada.");
@@ -1356,13 +1608,15 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
     // review_status is never accepted from the caller: only reviewResume can record a verdict.
     db.prepare(`UPDATE resumes SET profile_snapshot_id=?,generation_source=?,facts_used=?,gaps=?,review_status='not_run',review_findings='[]' WHERE id=?`)
       .run(metadata.profile_snapshot_id == null ? null : String(metadata.profile_snapshot_id), metadata.generation_source === "writer" ? "writer" : "manual", JSON.stringify(metadata.facts_used ?? []), JSON.stringify(metadata.gaps ?? []), id);
-    advanceJobTo(input.job_id, "resume", { actor: metadata.generation_source === "writer" ? "resume_writer" : "user", data: { reason: "resume_draft_created" } });
-    audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft" });
+    const eventActor = actor ?? (metadata.generation_source === "writer" ? "resume_writer" : "user");
+    advanceJobTo(input.job_id, "resume", { actor: eventActor, data: { reason: "resume_draft_created" } });
+    audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft", actor: eventActor });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
 }
 
 export function updateResume(id: string, patch: Partial<Resume>) {
+  if (!db.prepare("SELECT id FROM resumes WHERE id = ?").get(id)) throw new Error("resume.not_found");
   if (patch.status === "approved") throw new Error("A aprovação exige confirmação humana explícita.");
   const allowed = ["base_resume_id", "title", "status", "content", "keywords", "changes"] as const;
   if (patch.base_resume_id && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(patch.base_resume_id)) throw new Error("Currículo-base selecionado não encontrado.");
@@ -1467,7 +1721,7 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   const supported = normalizeComparableText(selectedFacts.map((fact) => printableFactValue(fact.value)).join(" "));
   if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new Error("ATS_KEYWORD_UNSUPPORTED");
   const gaps = Array.isArray(input.gaps) ? input.gaps.map(String) : [];
-  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never);
+  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never, actor === "writer" ? undefined : actor);
   audit("resume", resume?.id ?? "unknown", "generated_by_writer", { actor, profile_snapshot_id: snapshotId, base_resume_id: baseId, facts_count: factsUsed.length, gaps_count: gaps.length });
   return resume;
 }
@@ -1496,7 +1750,7 @@ export function approveResume(id: string, confirmation: string, options: { overr
   return listResumes().find((item) => item.id === id) ?? null;
 }
 
-export function createApplication(input: Partial<Application> & { job_id: string }) {
+export function createApplication(input: Partial<Application> & { job_id: string }, actor = "user") {
   assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT status, decision FROM jobs WHERE id = ?").get(input.job_id) as { status: string; decision: string } | undefined;
   const resumeId = input.resume_id ?? "";
@@ -1511,37 +1765,86 @@ export function createApplication(input: Partial<Application> & { job_id: string
     // Re-checked under the write lock: two concurrent requests cannot both create an application.
     if (db.prepare("SELECT id FROM applications WHERE job_id = ?").get(input.job_id)) throw new Error("Já existe uma candidatura para esta vaga.");
     db.prepare("INSERT INTO applications (id,job_id,resume_id,status,automation_mode,auto_authorized_at,authorized_resume_id,authorized_resume_version,current_step,submitted_at,notes,created_at,updated_at) VALUES (?,?,?,'queued',?,NULL,NULL,NULL,?,NULL,?,?,?)").run(id, input.job_id, resumeId, mode, input.current_step ?? "Aguardando decisão de candidatura", input.notes ?? "", timestamp, timestamp);
-    advanceJobTo(input.job_id, "ready_to_apply", { actor: "user", data: { reason: "application_created" } });
-    audit("application", id, "created", { job_id: input.job_id, resume_id: resumeId, automation_mode: mode });
+    advanceJobTo(input.job_id, "ready_to_apply", { actor, data: { reason: "application_created" } });
+    audit("application", id, "created", { job_id: input.job_id, resume_id: resumeId, automation_mode: mode, actor });
   });
   return listApplications().find((application) => application.id === id) ?? null;
 }
 
-export function selectManualApplication(id: string) {
-  const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status,
-      jobs.status AS job_status, jobs.decision AS job_decision
-    FROM applications
-    JOIN resumes ON resumes.id = applications.resume_id
-    JOIN jobs ON jobs.id = applications.job_id
-    WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; job_status: string; job_decision: string }) | undefined;
-  if (!application) throw new Error("Candidatura ou currículo não encontrado.");
-  assertJobNotArchived(application.job_id);
-  if (!["queued", "needs_review", "failed"].includes(application.status)) throw new Error("O modo só pode ser alterado antes do início do envio.");
-  if (application.resume_status !== "approved" || application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) {
-    throw new Error("Mantenha o interesse registrado e o currículo aprovado para escolher o modo manual.");
-  }
-  const timestamp = now();
-  revokeAuthorizationRows(id, "manual_selected");
-  db.prepare(`UPDATE applications SET automation_mode = 'manual', auto_authorized_at = NULL,
-      authorized_resume_id = NULL, authorized_resume_version = NULL,
-      authorization_id = NULL, expires_at = NULL,
-      status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
-      current_step = 'Fluxo manual selecionado', updated_at = ? WHERE id = ?`).run(timestamp, id);
-  audit("application", id, "manual_selected", { resume_id: application.resume_id });
+/** Estados em que o modo da candidatura ainda pode mudar (nenhum executor reservou o envio). */
+const MODE_CHANGE_STATUSES = ["queued", "needs_review", "failed"];
+
+/** #14 — a candidatura mudou de estado em outro processo (ex.: claim do executor): 409. */
+function applicationStateConflict(message: string, status: unknown) {
+  return new WorkflowError("VERSION_CONFLICT", 409, message, { application_status: String(status ?? "") });
+}
+
+export function selectManualApplication(id: string, actor = "user") {
+  // #14: leitura, guarda e escritas na mesma transação (BEGIN IMMEDIATE); um claim do executor
+  // em outro processo não entra entre a conferência do status e os UPDATEs.
+  tx(() => {
+    const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status,
+        jobs.status AS job_status, jobs.decision AS job_decision
+      FROM applications
+      JOIN resumes ON resumes.id = applications.resume_id
+      JOIN jobs ON jobs.id = applications.job_id
+      WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; job_status: string; job_decision: string }) | undefined;
+    if (!application) throw new Error("Candidatura ou currículo não encontrado.");
+    assertJobNotArchived(application.job_id);
+    if (!MODE_CHANGE_STATUSES.includes(application.status)) throw applicationStateConflict("O modo só pode ser alterado antes do início do envio.", application.status);
+    if (application.resume_status !== "approved" || application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) {
+      throw new Error("Mantenha o interesse registrado e o currículo aprovado para escolher o modo manual.");
+    }
+    const timestamp = now();
+    const updated = db.prepare(`UPDATE applications SET automation_mode = 'manual', auto_authorized_at = NULL,
+        authorized_resume_id = NULL, authorized_resume_version = NULL,
+        authorization_id = NULL, expires_at = NULL,
+        status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
+        current_step = 'Fluxo manual selecionado', updated_at = ? WHERE id = ? AND status IN ('queued','needs_review','failed')`).run(timestamp, id);
+    if (!updated.changes) throw applicationStateConflict("O modo só pode ser alterado antes do início do envio.", "changed");
+    revokeAuthorizationRows(id, "manual_selected");
+    audit("application", id, "manual_selected", { resume_id: application.resume_id, actor });
+  });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
-export function authorizeAutoApplication(id: string, resumeId: string, confirmation: string) {
+/**
+ * #10 — segredo das assinaturas HMAC de autorização. Deve ser conhecido só pelo processo do
+ * dashboard (RADAR_AUTHORIZATION_SECRET em .env.local, legível apenas pelo usuário do dashboard).
+ * Sem a variável vale um segredo fixo de desenvolvimento, com aviso em produção.
+ */
+const DEV_AUTHORIZATION_SECRET = "radar-dev-authorization-secret";
+let devAuthorizationSecretWarned = false;
+function authorizationSecret() {
+  const secret = String(process.env.RADAR_AUTHORIZATION_SECRET ?? "").trim();
+  if (secret) return secret;
+  if (process.env.RADAR_ENVIRONMENT === "production" && !devAuthorizationSecretWarned) {
+    devAuthorizationSecretWarned = true;
+    console.warn(JSON.stringify({ event: "authorization.dev_secret", message: "RADAR_AUTHORIZATION_SECRET ausente: autorizações assinadas com o segredo de desenvolvimento." }));
+  }
+  return DEV_AUTHORIZATION_SECRET;
+}
+
+/** Assina os campos imutáveis da autorização; o lease (renovável) fica fora da assinatura. */
+function authorizationSignature(value: Record<string, unknown>) {
+  const fields = ["id", "application_id", "job_id", "resume_id", "resume_version", "application_url", "application_url_hash", "issued_at", "expires_at", "nonce"]
+    .map((field) => String(value[field] ?? ""));
+  return createHmac("sha256", authorizationSecret()).update(JSON.stringify(fields)).digest("hex");
+}
+
+function hasValidAuthorizationSignature(value: Record<string, unknown>) {
+  const supplied = Buffer.from(String(value.signature ?? ""), "hex");
+  const expected = Buffer.from(authorizationSignature(value), "hex");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+/** #18 — fim do lease do claim; o executor renova com heartbeat antes de vencer. */
+function leaseExpiresAt(from = Date.now()) {
+  const seconds = Math.max(30, Number(process.env.RADAR_AUTHORIZATION_LEASE_SECONDS ?? 300) || 300);
+  return new Date(from + seconds * 1000).toISOString();
+}
+
+export function authorizeAutoApplication(id: string, resumeId: string, confirmation: string, actor = "user") {
   if (confirmation !== "AUTORIZO") throw new Error("Confirme digitando AUTORIZO para esta vaga.");
   const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status, resumes.version AS resume_version,
       jobs.status AS job_status, jobs.decision AS job_decision
@@ -1555,36 +1858,49 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   if (application.resume_id !== resumeId || application.authorized_resume_id && application.authorized_resume_id !== resumeId) throw new Error("A autorização precisa apontar para o currículo revisado desta vaga.");
   if (application.resume_status !== "approved") throw new Error("Aprove o currículo antes de autorizar a candidatura.");
   if (application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) throw new Error("Registre interesse e conclua a revisão do currículo antes de autorizar.");
-  if (!["queued", "needs_review", "failed"].includes(application.status)) throw new Error("A candidatura não está aguardando autorização.");
+  if (!MODE_CHANGE_STATUSES.includes(application.status)) throw new Error("A candidatura não está aguardando autorização.");
   assertJobLivenessFresh(db, getJob(application.job_id));
   const timestamp = now();
   const job = getJob(application.job_id);
   if (!job?.application_url?.trim()) throw new Error("application.url.required");
   const applicationUrl = canonicalizeJobUrl(job.application_url);
+  if (!isHttpsUrl(applicationUrl)) throw new DomainError("application.url.insecure", 422);
   const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
-  const authorizationId = idFor(`authorization|${id}|${application.resume_version}|${timestamp}|${Math.random()}`);
-  const nonce = idFor(`nonce|${authorizationId}|${Math.random()}`);
+  // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
+  const authorizationId = randomBytes(32).toString("hex");
+  const nonce = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + Math.max(60, Number(process.env.RADAR_AUTHORIZATION_TTL_SECONDS ?? 86_400)) * 1000).toISOString();
+  const signature = authorizationSignature({
+    id: authorizationId, application_id: id, job_id: application.job_id, resume_id: resumeId, resume_version: application.resume_version,
+    application_url: applicationUrl, application_url_hash: applicationUrlHash, issued_at: timestamp, expires_at: expiresAt, nonce,
+  });
   db.exec("BEGIN IMMEDIATE");
   try {
-    const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
+    const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL AND status IN ('queued','needs_review','failed')").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
     if (!update.changes) throw new Error("application.authorization.race");
     db.prepare(`INSERT INTO application_authorizations
-      (id,application_id,job_id,resume_id,resume_version,application_url,application_url_hash,redirect_chain_hash,actor,issued_at,expires_at,nonce,state)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued')`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, "user", timestamp, expiresAt, nonce);
+      (id,application_id,job_id,resume_id,resume_version,application_url,application_url_hash,redirect_chain_hash,actor,issued_at,expires_at,nonce,state,signature)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued',?)`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, actor, timestamp, expiresAt, nonce, signature);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("application", id, "auto_authorized", { authorization_id: authorizationId, resume_id: resumeId, resume_version: application.resume_version, application_url_hash: applicationUrlHash, expires_at: expiresAt, authorized_at: timestamp });
+  audit("application", id, "auto_authorized", { authorization_id: authorizationId, resume_id: resumeId, resume_version: application.resume_version, application_url_hash: applicationUrlHash, expires_at: expiresAt, authorized_at: timestamp, actor });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
-export function revokeAutoApplication(id: string) {
-  const application = listApplications().find((item) => item.id === id);
-  if (!application) return null;
-  if (application.status === "in_progress" || ["submitted", "accepted", "rejected"].includes(application.status)) throw new Error("A autorização não pode ser revogada após o início do envio.");
-  revokeAuthorizationRows(id, "user_revoked");
-  db.prepare("UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL, authorization_id=NULL,expires_at=NULL, current_step = 'Autorização automática revogada', updated_at = ? WHERE id = ?").run(now(), id);
-  audit("application", id, "auto_authorization_revoked", {});
+export function revokeAutoApplication(id: string, actor = "user") {
+  // #14: mesma disciplina do claim (BEGIN IMMEDIATE) e UPDATE guardado pelo status: ou a revogação
+  // vence e o claim encontra a autorização revogada, ou o claim vence e a revogação recebe 409.
+  tx(() => {
+    const application = db.prepare("SELECT id,status FROM applications WHERE id=?").get(id) as { id: string; status: string } | undefined;
+    if (!application) throw new Error("Candidatura não encontrada.");
+    if (!MODE_CHANGE_STATUSES.includes(application.status)) throw applicationStateConflict("A autorização não pode ser revogada após o início do envio.", application.status);
+    const updated = db.prepare(`UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL,
+      authorization_id=NULL,expires_at=NULL, current_step = 'Autorização automática revogada', updated_at = ?
+      WHERE id = ? AND status IN ('queued','needs_review','failed')`).run(now(), id);
+    if (!updated.changes) throw applicationStateConflict("A autorização não pode ser revogada após o início do envio.", "changed");
+    revokeAuthorizationRows(id, "user_revoked");
+    audit("application", id, "auto_authorization_revoked", { actor });
+  });
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
@@ -1609,17 +1925,77 @@ export function listAuthorizedApplications() {
     ORDER BY applications.auto_authorized_at ASC`).all(now());
 }
 
-function expireAuthorizations() {
+/** Etapa exibida quando o lease vence: o envio pode ou não ter acontecido no portal. */
+const LEASE_EXPIRED_STEP = "Resultado desconhecido — verificar no portal";
+/** Pergunta humana ativa pausa a execução: o lease não vence enquanto o executor espera a resposta. */
+const NO_ACTIVE_QUESTION = "NOT EXISTS (SELECT 1 FROM human_questions q WHERE q.application_id=auth.application_id AND q.status IN ('pending','delivered','delivery_failed'))";
+
+/**
+ * Expira autorizações vencidas:
+ * - `issued` (nada aberto no portal) pelo TTL da emissão;
+ * - `claimed` pelo lease do executor (#18), nunca pelo TTL da emissão. Lease vencido sem heartbeat
+ *   leva a candidatura para `needs_review` com evento de resultado desconhecido (sem aborto silencioso).
+ */
+export function expireAuthorizations() {
   const timestamp = now();
-  if (!db.prepare("SELECT 1 FROM application_authorizations WHERE state IN ('issued','claimed') AND expires_at <= ? LIMIT 1").get(timestamp)) return;
-  tx(() => {
-    db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired' WHERE state IN ('issued','claimed') AND expires_at <= ?").run(timestamp, timestamp);
-    const affected = db.prepare(`SELECT id,job_id FROM applications WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired')
-      AND status IN ('queued','needs_review','in_progress')`).all() as { id: string; job_id: string }[];
-    db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
-      claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada',updated_at=?
-      WHERE authorization_id IN (SELECT id FROM application_authorizations WHERE state='expired') AND status IN ('queued','needs_review','in_progress')`).run(timestamp);
-    for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
+  const pending = db.prepare(`SELECT 1 FROM application_authorizations auth WHERE (auth.state='issued' AND auth.expires_at <= ?)
+    OR (auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}) LIMIT 1`).get(timestamp, timestamp);
+  if (pending) tx(() => {
+    const issued = db.prepare("SELECT id FROM application_authorizations WHERE state='issued' AND expires_at <= ?").all(timestamp) as { id: string }[];
+    for (const authorization of issued) {
+      db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired' WHERE id=? AND state='issued'").run(timestamp, authorization.id);
+      const affected = db.prepare("SELECT id,job_id FROM applications WHERE authorization_id=? AND status IN ('queued','needs_review','in_progress')").all(authorization.id) as { id: string; job_id: string }[];
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+        claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada',updated_at=?
+        WHERE authorization_id=? AND status IN ('queued','needs_review','in_progress')`).run(timestamp, authorization.id);
+      for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
+    }
+    const leases = db.prepare(`SELECT auth.id,auth.application_id,auth.job_id,auth.claimed_by,COALESCE(auth.lease_expires_at, auth.expires_at) AS lease_expires_at
+      FROM application_authorizations auth WHERE auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}`).all(timestamp) as Record<string, string>[];
+    for (const lease of leases) {
+      db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='lease_expired' WHERE id=? AND state='claimed'").run(timestamp, lease.id);
+      const updated = db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+        claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=?
+        WHERE authorization_id=? AND status IN ('in_progress','needs_review')`).run(LEASE_EXPIRED_STEP, timestamp, lease.id);
+      if (!updated.changes) continue;
+      audit("application", String(lease.application_id), "lease_expired", {
+        authorization_id: lease.id, worker_id: lease.claimed_by, lease_expires_at: lease.lease_expires_at, message: "resultado desconhecido — verificar no portal",
+      });
+      abortApplyingJob(String(lease.job_id), "lease_expired_unknown_result", "system:authorization");
+    }
+  });
+  recoverStuckApplications();
+}
+
+/**
+ * #14 — rotina de recuperação: vaga presa em `applying` cuja candidatura foi reservada por um
+ * executor (claimed_by) mas não tem mais autorização `claimed` válida volta para revisão humana,
+ * com evento de auditoria. O fluxo manual (sem claim de executor) não é tocado.
+ */
+export function recoverStuckApplications(): number {
+  const find = () => db.prepare(`SELECT applications.id,applications.job_id,applications.claimed_by,applications.authorization_id,applications.automation_mode,auth.state AS authorization_state
+    FROM applications
+    JOIN jobs ON jobs.id=applications.job_id
+    LEFT JOIN application_authorizations auth ON auth.id=applications.authorization_id
+    WHERE jobs.status='applying' AND applications.status IN ('in_progress','needs_review') AND applications.claimed_by IS NOT NULL
+      AND (auth.id IS NULL OR auth.state<>'claimed' OR applications.automation_mode<>'authorized_auto')`).all() as Record<string, string | null>[];
+  if (!find().length) return 0;
+  return tx(() => {
+    const stuck = find();
+    const timestamp = now();
+    for (const application of stuck) {
+      const id = String(application.id);
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode=CASE WHEN automation_mode='authorized_auto' THEN 'assisted' ELSE automation_mode END,
+        auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=?`)
+        .run("Execução sem autorização válida — verificar no portal", timestamp, id);
+      revokeAuthorizationRows(id, "recovered_without_authorization");
+      audit("application", id, "applying_recovered", {
+        worker_id: application.claimed_by, authorization_id: application.authorization_id, authorization_state: application.authorization_state ?? null,
+        automation_mode: application.automation_mode, message: "execução sem autorização válida — verificar no portal",
+      });
+      abortApplyingJob(String(application.job_id), "authorization_missing", "system:recovery");
+    }
+    return stuck.length;
   });
 }
 
@@ -1640,8 +2016,13 @@ function currentAuthorization(applicationId: string) {
     WHERE applications.id=?`).get(applicationId) as Record<string, unknown> | undefined;
 }
 
+/** #18: `issued` vale pelo TTL da emissão; `claimed`, pelo lease renovado no heartbeat. */
+function authorizationValidUntil(value: Record<string, unknown>) {
+  return String(value.state === "claimed" ? (value.lease_expires_at ?? value.expires_at) : value.expires_at);
+}
+
 function assertCurrentAuthorization(value: Record<string, unknown> | undefined, expectedState: "issued" | "claimed", timestamp = now()) {
-  if (!value || value.state !== expectedState || String(value.expires_at) <= timestamp || value.automation_mode !== "authorized_auto" || !value.auto_authorized_at
+  if (!value || value.state !== expectedState || authorizationValidUntil(value) <= timestamp || value.automation_mode !== "authorized_auto" || !value.auto_authorized_at
     || value.application_resume_id !== value.resume_id || value.authorized_resume_id !== value.resume_id
     || Number(value.authorized_resume_version) !== Number(value.resume_version) || Number(value.current_resume_version) !== Number(value.resume_version)
     || value.current_resume_status !== "approved" || value.job_decision !== "interested" || !["resume_approved", "ready_to_apply", "applying"].includes(String(value.job_status))) {
@@ -1650,6 +2031,7 @@ function assertCurrentAuthorization(value: Record<string, unknown> | undefined, 
   const currentUrl = String(value.current_application_url ?? "").trim();
   if (!currentUrl) throw new Error("application.authorization.unavailable");
   const canonicalUrl = canonicalizeJobUrl(currentUrl);
+  if (!isHttpsUrl(canonicalUrl)) throw new DomainError("application.url.insecure", 422);
   const currentHash = createHash("sha256").update(canonicalUrl).digest("hex");
   if (value.application_url !== canonicalUrl || value.application_url_hash !== currentHash) throw new Error("application.authorization.unavailable");
   return value;
@@ -1660,15 +2042,18 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
   if (!nonce.trim()) throw new Error("application.authorization.nonce.required");
   expireAuthorizations();
   const timestamp = now();
+  const lease = leaseExpiresAt();
   db.exec("BEGIN IMMEDIATE");
   try {
     const authorization = assertCurrentAuthorization(currentAuthorization(applicationId), "issued", timestamp);
     if (authorization.nonce !== nonce) throw new Error("application.authorization.unavailable");
+    // #10: só vale autorização emitida pelo dashboard (assinatura HMAC com o segredo do processo).
+    if (!hasValidAuthorizationSignature(authorization)) throw new Error("application.authorization.unavailable");
     if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     // Vaga excluída nunca é enviada, mesmo que uma autorização tenha escapado da revogação.
     assertJobNotArchived(String(authorization.job_id));
-    const claimed = db.prepare(`UPDATE application_authorizations SET state='claimed',claimed_by=?,claimed_at=?
-      WHERE id=? AND nonce=? AND state='issued' AND expires_at>?`).run(workerId.trim(), timestamp, String(authorization.id), nonce, timestamp);
+    const claimed = db.prepare(`UPDATE application_authorizations SET state='claimed',claimed_by=?,claimed_at=?,lease_expires_at=?,heartbeat_at=?
+      WHERE id=? AND nonce=? AND state='issued' AND expires_at>?`).run(workerId.trim(), timestamp, lease, timestamp, String(authorization.id), nonce, timestamp);
     if (!claimed.changes) throw new Error("application.authorization.unavailable");
     const updated = db.prepare("UPDATE applications SET status='in_progress',claimed_by=?,claimed_at=?,current_step='Execução autorizada iniciada',updated_at=? WHERE id=? AND authorization_id=? AND status IN ('queued','needs_review')").run(workerId.trim(), timestamp, timestamp, applicationId, String(authorization.id));
     if (!updated.changes) throw new Error("application.authorization.unavailable");
@@ -1676,15 +2061,34 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
     advanceJobTo(String(authorization.job_id), "applying", { actor: `worker:${workerId.trim()}`, data: { reason: "authorized_execution_claimed" } });
     db.exec("COMMIT");
   } catch (error) { try { db.exec("ROLLBACK"); } catch { /* transaction already closed */ } throw error; }
-  audit("application", applicationId, "claimed", { worker_id: workerId });
-  return listApplications().find((item) => item.id === applicationId) ?? null;
+  audit("application", applicationId, "claimed", { worker_id: workerId, lease_expires_at: lease });
+  const application = listApplications().find((item) => item.id === applicationId);
+  return application ? { ...application, lease_expires_at: lease } : null;
 }
 
-export function updateApplication(id: string, patch: Partial<Application>) {
+/**
+ * #18 — heartbeat do executor: renova o lease do claim. Só o worker dono e só com lease ainda
+ * vigente; é também a conferência de validade antes do clique final de envio no portal.
+ */
+export function heartbeatAuthorizedApplication(id: string, workerId: string) {
+  expireAuthorizations();
+  return tx(() => {
+    const timestamp = now();
+    const { authorization, worker } = claimedAuthorizationFor(id, workerId);
+    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    const lease = leaseExpiresAt();
+    const renewed = db.prepare(`UPDATE application_authorizations SET lease_expires_at=?,heartbeat_at=?
+      WHERE id=? AND state='claimed' AND claimed_by=? AND COALESCE(lease_expires_at, expires_at) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
+    if (!renewed.changes) throw new Error("application.authorization.unavailable");
+    return { application_id: id, authorization_valid: true, lease_expires_at: lease, heartbeat_at: timestamp };
+  });
+}
+
+export function updateApplication(id: string, patch: Partial<Application>, actor = "user") {
   const allowed = ["resume_id", "status", "current_step", "submitted_at", "notes", "evidence_ref"] as const;
   const normalized = { ...patch } as Partial<Application>;
   const current = listApplications().find((application) => application.id === id);
-  if (!current) return null;
+  if (!current) throw new Error("application.not_found");
   // Re-sending the current status (e.g. a form that only edits notes) is not a transition.
   if (normalized.status !== undefined && normalized.status === current.status) delete normalized.status;
   const validStatuses = ["queued", "in_progress", "needs_review", "submitted", "accepted", "rejected", "failed"];
@@ -1718,9 +2122,9 @@ export function updateApplication(id: string, patch: Partial<Application>) {
     db.prepare(`UPDATE applications SET ${set}, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), now(), id);
     if (["submitted", "accepted", "rejected"].includes(String(normalized.status))) {
       const application = listApplications().find((item) => item.id === id);
-      if (application) markJobApplied(application.job_id, application.submitted_at ?? now(), "user", application.evidence_ref ?? null);
+      if (application) markJobApplied(application.job_id, application.submitted_at ?? now(), actor, application.evidence_ref ?? null);
     }
-    audit("application", id, "updated", { changed_fields: Object.keys(patch) });
+    audit("application", id, "updated", { changed_fields: Object.keys(patch), actor });
   });
   return listApplications().find((application) => application.id === id) ?? null;
 }
@@ -1906,6 +2310,10 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
 export function listPreferenceState(projectId = "busca-emprego") {
   const rules = (db.prepare("SELECT * FROM preference_rules WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[])
     .map((row) => ({ ...row, source_feedback_ids: parseJsonArray(row.source_feedback_ids), match_json: JSON.parse(String(row.match_json)) }));
+  // Contagem viva (o que de fato está oculto agora); suppressed_count guarda o total histórico.
+  const hidden = new Map<string, number>();
+  for (const job of listSuppressedJobs(projectId)) for (const ruleId of job.rule_ids) hidden.set(ruleId, (hidden.get(ruleId) ?? 0) + 1);
+  for (const rule of rules as Record<string, unknown>[]) rule.hidden_count = hidden.get(String(rule.id)) ?? 0;
   const values = db.prepare("SELECT * FROM preference_values WHERE project_id=? ORDER BY facet_key,normalized_value").all(projectId);
   const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString();
   const suggestions = db.prepare(`SELECT detail_key, COUNT(DISTINCT job_id) AS evidence_count
@@ -1984,9 +2392,12 @@ export function restoreJob(id: string, actor = "user") {
 function refreshSuppression(projectId: string) {
   const rules = activeSuppressionRules(projectId);
   const suppressed = (db.prepare("SELECT * FROM jobs WHERE project_id=? AND suppressed=1").all(projectId) as Record<string, unknown>[]).map(mapJob);
-  const clear = db.prepare("UPDATE jobs SET suppressed=0 WHERE id=?");
+  const clear = db.prepare("UPDATE jobs SET suppressed=0,suppressed_rule_ids='[]' WHERE id=?");
+  const keep = db.prepare("UPDATE jobs SET suppressed_rule_ids=? WHERE id=?");
   for (const job of suppressed) {
-    if (!activeSuppression(job, projectId, rules).length) clear.run(job.id);
+    const matched = activeSuppression(job, projectId, rules);
+    if (!matched.length) clear.run(job.id);
+    else keep.run(JSON.stringify(matched), job.id);
   }
 }
 
@@ -2182,6 +2593,8 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
       db.prepare("UPDATE applications SET status='failed',automation_mode='assisted',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Execução interrompida por ${id}`, timestamp, applicationId);
       abortApplyingJob(String(row.job_id), "human_stop", identity);
     } else {
+      // #18: a pausa pela pergunta não conta contra o lease; a retomada recomeça o prazo do heartbeat.
+      db.prepare("UPDATE application_authorizations SET lease_expires_at=? WHERE application_id=? AND state='claimed'").run(leaseExpiresAt(), applicationId);
       assertCurrentAuthorization(currentAuthorization(applicationId), "claimed", timestamp);
       db.prepare("UPDATE applications SET status='in_progress',current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Resposta recebida para ${id}; execução retomada`, timestamp, applicationId);
     }
@@ -2226,13 +2639,26 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
   };
 }
 
+/** Snapshots publicados de todos os agentes do projeto (o que listagem e execuções enxergam). */
+export function listPublishedAgentConfigs(projectId = "busca-emprego"): AgentConfig[] {
+  return listAgentConfigs(projectId).flatMap((agent) => {
+    const published = publishedAgentConfig(agent.id, projectId);
+    // Pausa imediata (linha viva desativada) também vale para o snapshot.
+    return published ? [{ ...published, enabled: published.enabled && agent.enabled }] : [];
+  });
+}
+
 export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const id = insertAgentConfig(db, input, actor, projectId);
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
 
 
-
+/**
+ * Salva a alteração como rascunho em `agent_config_versions`. A linha viva de `agent_configs`
+ * só muda em publicação/rollback (issue #11): rascunho nunca governa listagem nem execução.
+ * Única exceção: pausar (`enabled: false`) vale na hora, porque só reduz permissões.
+ */
 export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
   const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
   if (!current) throw new Error("agent.not_found");
@@ -2240,8 +2666,8 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   const values = validateAgentConfigInput(merged);
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
   const versionId = insertAgentVersion(db, id, nextVersion, "draft", values, actor);
-  db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,model_id=?,reasoning_effort=?,max_input_tokens=?,max_output_tokens=?,max_cost_per_run=?,fallback_policy=?,structured_output_required=?,version=?,draft_version_id=?,updated_at=? WHERE id=? AND project_id=?`)
-    .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, values.modelId, values.reasoningEffort, values.maxInputTokens, values.maxOutputTokens, values.maxCostPerRun, values.fallbackPolicy, values.structuredOutputRequired ? 1 : 0, nextVersion, versionId, now(), id, projectId);
+  db.prepare("UPDATE agent_configs SET draft_version_id=?,updated_at=? WHERE id=? AND project_id=?").run(versionId, now(), id, projectId);
+  if (input.enabled === false) db.prepare("UPDATE agent_configs SET enabled=0 WHERE id=? AND project_id=?").run(id, projectId);
   audit("agent_config", id, "draft_created", { actor, version: nextVersion, version_id: versionId, changed_fields: Object.keys(input) });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
@@ -2346,29 +2772,42 @@ export function deleteSourceConfig(id: string, actor: string, projectId = "busca
   return { deleted: true };
 }
 
-export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+/** Converte a vaga descrita por um agente no item de fonte de validateSourceBatch (campos desconhecidos são ignorados). */
+function agentJobItem(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
+  const raw = input as unknown as Record<string, unknown>;
+  const item: Record<string, unknown> = {
+    source_id: input.source, title: input.title, company: input.company, source_url: input.source_url,
+    job_url: input.job_url || input.linkedin_post_url || input.application_url || input.source_url,
+  };
+  if (raw.location != null) item.location_text = raw.location;
+  for (const field of ["source_job_id", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period", "posted_at", "deadline_at", "opening_status", "linkedin_post_url", "application_url"]) {
+    if (raw[field] != null && raw[field] !== "") item[field] = raw[field];
+  }
+  return item;
+}
+
+/**
+ * Descoberta por agente (radar_discover_job / webhook job.discovered) pelo mesmo caminho da
+ * ingestão em lote: identidade canônica, dedup multi-chave, ocorrência e supressão. Rever uma
+ * vaga existente registra nova ocorrência e devolve a vaga canônica (sem sobrescrevê-la).
+ */
+export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
   const agent = publishedAgentConfig(agentId, projectId);
   if (!agent || !agent.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
   if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
+  if (!String(input.source ?? "").trim() || !String(input.title ?? "").trim() || !String(input.company ?? "").trim()) throw new Error("job.required_fields.invalid");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
-  const identityUrl = input.job_url || input.linkedin_post_url || input.application_url || input.source_url;
-  const canonicalIdentityUrl = identityUrl ? canonicalizeJobUrl(identityUrl) : "";
-  const candidateId = input.id || idFor(`${input.source}|${canonicalIdentityUrl}|${input.title}|${input.company}`);
-  // Job, evidence and provenance are created together or not at all.
+  // Job, evidence, occurrence and provenance are created together or not at all.
   return tx(() => {
-    if (getJob(candidateId)) throw new Error("agent.jobs.create_existing.forbidden");
-    const job = upsertJob(input);
-    if (job) {
-      detectJobRepost(job.id);
-      for (const [field, value] of Object.entries(input)) {
-        if (field === "id" || value == null || value === "") continue;
-        const evidence = addEvidence({ projectId, jobId: job.id, field, value, sourceUrl: job.source_url, confidence: 0.8, origin: "agent", agentId, sourceId: input.source });
-        selectEvidence(job.id, field, evidence.id, agentId, evidence.timestamp);
-      }
-    }
-    audit("job", job?.id ?? "unknown", "created_by_agent", { agent_id: agentId });
-    return job;
+    const [result] = ingestSourceItems(input.source, [agentJobItem(input)], { projectId, agentId });
+    if (!result) throw new Error("job.persist.failed");
+    audit("job", result.job_id, result.action === "sighting" ? "sighted_by_agent" : "created_by_agent", { agent_id: agentId, actor: `agent:${agentId}`, action: result.action, reason: result.reason });
+    return { ...result, job: getJob(result.job_id) };
   });
+}
+
+export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+  return ingestJobFromAgent(agentId, input, projectId).job;
 }
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
@@ -2432,14 +2871,14 @@ export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record
         conflicts.push(conflictId);
       }
     }
-    if (Object.keys(acceptedPatch).length) updateJob(jobId, acceptedPatch, { origin: "system" });
+    if (Object.keys(acceptedPatch).length) updateJob(jobId, acceptedPatch, { origin: "system", actor: `agent:${agentId}` });
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   const job = getJob(jobId);
   const eventId = idFor(`enrichment|${agentId}|${jobId}|${Date.now()}|${Math.random()}`);
   db.prepare("INSERT INTO job_enrichment_events (id,job_id,agent_id,source_url,fields_changed,evidence_excerpt,created_at) VALUES (?,?,?,?,?,?,?)")
     .run(eventId, jobId, agentId, sourceUrl, JSON.stringify(entries.map(([key]) => key)), evidenceExcerpt.slice(0, 500), now());
-  audit("job", jobId, "enriched_by_agent", { agent_id: agentId, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });
+  audit("job", jobId, "enriched_by_agent", { agent_id: agentId, actor: `agent:${agentId}`, fields_changed: entries.map(([key]) => key), evidence_source_url: sourceUrl });
   return { job, enrichment_event_id: eventId, selected_evidence_ids: selectedEvidenceIds, conflict_ids: conflicts };
 }
 

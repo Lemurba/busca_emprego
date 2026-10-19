@@ -210,6 +210,33 @@ describe("repostagem", () => {
     assert.equal(job.first_seen_at, "2026-05-01T00:00:00Z");
   });
 
+  test("vaga revista pela dedup (sighting) com publicação ≥ 7 dias mais nova é repostagem; mesma data não", () => {
+    const agent = store.listAgentConfigs().find((item) => item.role_type === "source_scout" && item.enabled);
+    const base = {
+      source: "fixture", title: "Cientista de Dados", company: "Gama Ltda", location: "São Paulo, SP", description: DESCRIPTION,
+      source_url: "https://jobs.example.test/gama/1", job_url: "https://jobs.example.test/gama/1", posted_at: "2026-06-01T00:00:00Z",
+    };
+    const first = store.ingestJobFromAgent(agent.id, base);
+    assert.equal(first.action, "new");
+    // Mesma vaga em outra URL (dedup multi-chave empresa + título + local), mesma data: só ocorrência.
+    const same = store.ingestJobFromAgent(agent.id, { ...base, source_url: "https://jobs.example.test/gama/outra", job_url: "https://jobs.example.test/gama/outra" });
+    assert.equal(same.action, "sighting");
+    assert.equal(same.job_id, first.job_id);
+    const repostCount = () => store.getBootstrap().jobs.find((item) => item.id === first.job_id).repost_count;
+    assert.equal(repostCount(), 0, "dedup exata sem data nova não é repostagem");
+    const bumped = store.ingestJobFromAgent(agent.id, { ...base, posted_at: "2026-06-03T00:00:00Z" });
+    assert.equal(bumped.action, "sighting");
+    assert.equal(repostCount(), 0, "data só 2 dias mais nova é atualização, não repostagem");
+    store.ingestJobFromAgent(agent.id, { ...base, posted_at: "2026-07-15T00:00:00Z" });
+    store.ingestJobFromAgent(agent.id, { ...base, posted_at: "2026-07-15T00:00:00Z" });
+    assert.equal(repostCount(), 1, "republicação registrada uma vez");
+    store.ingestJobFromAgent(agent.id, { ...base, posted_at: "2026-09-01T00:00:00Z" });
+    const job = store.getBootstrap().jobs.find((item) => item.id === first.job_id);
+    assert.equal(job.repost_count, 2);
+    assert.equal(job.first_seen_at, "2026-06-01T00:00:00Z");
+    assert.deepEqual(job.repost_dates, ["2026-06-01T00:00:00Z", "2026-07-15T00:00:00Z"]);
+  });
+
   test("faceta repost_bucket: rejeitar por repostagem só pesa contra vagas repostadas", () => {
     const reposted = store.getBootstrap().jobs.find((job) => job.source_job_id === "r-2");
     const plain = store.getBootstrap().jobs.find((job) => job.source_job_id === "r-4");

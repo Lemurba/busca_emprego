@@ -32,6 +32,8 @@ import { startFakeRadarApi } from "../fixtures/fake-radar-api.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const token = `executor-token-${randomUUID()}`;
+const dashboardToken = `dash-${randomUUID()}`;
+const sessionCookies = new Map();
 const LINKED_IDENTITY = "executor-chat-7";
 const directory = mkdtempSync(join(tmpdir(), "radar-executor-"));
 const stateDir = join(directory, "state");
@@ -50,7 +52,7 @@ async function startServer({ automation }) {
     env: {
       ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, `db-${port}.sqlite`),
       RADAR_ENVIRONMENT: "production", RADAR_OPERATOR_ID: "executor-operator", RADAR_TRUST_PROXY_TLS: "true",
-      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: automation,
+      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: automation, RADAR_DASHBOARD_TOKEN: dashboardToken,
       HERMES_LINKED_RECIPIENT_ID: LINKED_IDENTITY, TELEGRAM_ALLOWED_USERS: LINKED_IDENTITY, TELEGRAM_HOME_CHANNEL: "",
     },
   });
@@ -63,6 +65,9 @@ async function startServer({ automation }) {
     await sleep(100);
   }
   if (!ready) { child.kill("SIGTERM"); throw new Error(`servidor não ficou pronto: ${stderr.slice(0, 300)}`); }
+  // Portões humanos (interesse, APROVO, AUTORIZO) exigem a sessão do dashboard (#10).
+  const login = await fetch(`${baseUrl}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  sessionCookies.set(baseUrl, (login.headers.get("set-cookie") ?? "").split(";")[0]);
   return { baseUrl, stop: async () => { child.kill("SIGTERM"); await new Promise((r) => { child.once("exit", r); setTimeout(r, 1500); }); } };
 }
 
@@ -70,7 +75,7 @@ let base = "";
 const api = async (method, path, body) => {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token },
+    headers: { "content-type": "application/json", "x-forwarded-proto": "https", "x-radar-service-token": token, cookie: sessionCookies.get(base) ?? "" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;
@@ -168,6 +173,17 @@ try {
     const ok = executor("verify", "--application", first.application.id, "--observed-url", "https://portal.example.test/alpha/aplicar?utm_source=radar&utm_medium=email", "--json");
     assert.equal(ok.status, 0, `verify saiu com ${ok.status}: ${ok.stderr}${ok.stdout}`);
     assert.match(ok.stdout, /"matches": true/u);
+  });
+
+  await test("heartbeat renova o lease do claim pela rota interna e recusa outro worker", async () => {
+    const result = executor("heartbeat", "--application", first.application.id, "--json");
+    assert.equal(result.status, 0, `heartbeat saiu com ${result.status}: ${result.stderr}`);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.authorization_valid, true);
+    assert.ok(new Date(payload.lease_expires_at).getTime() > Date.now(), "lease já vencido");
+    const other = await api("POST", `/api/applications/${first.application.id}/heartbeat`, { worker_id: "outro-worker" });
+    assert.equal(other.status, 422);
+    assert.equal(other.data?.error, "application.claim.worker_mismatch");
   });
 
   await test("envio sem evidência é recusado", () => {

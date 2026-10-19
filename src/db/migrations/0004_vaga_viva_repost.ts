@@ -4,7 +4,9 @@ import { ensureColumn, type Migration } from "./types.js";
  * #33 — vaga ainda aberta e repostagem.
  * - `job_liveness_checks`: histórico das verificações determinísticas (API de ATS / HTTP / JSON-LD).
  * - `jobs.description_fingerprint`: SimHash de 64 bits (hex) da descrição normalizada.
- * - `job_reposts`: vaga nova que repete uma anterior (mesma empresa, título e descrição quase iguais).
+ * - `job_reposts`: vaga nova que repete uma anterior (mesma empresa, título e descrição quase iguais),
+ *   ou a mesma vaga revista com data de publicação nova (previous_job_id = job_id). Idempotência
+ *   pelo id determinístico; `reposted_at` é a data da publicação nova.
  * Depende só do baseline.
  */
 export const migration0004: Migration = {
@@ -26,9 +28,9 @@ export const migration0004: Migration = {
         job_id TEXT NOT NULL,
         previous_job_id TEXT NOT NULL,
         previous_posted_at TEXT,
+        reposted_at TEXT,
         detected_at TEXT NOT NULL,
-        similarity REAL NOT NULL,
-        UNIQUE (job_id, previous_job_id)
+        similarity REAL NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_job_reposts_job ON job_reposts(job_id);
     `);
