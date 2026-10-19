@@ -49,6 +49,7 @@ jobs:
           node scripts/ops/backup-sqlite.mjs --help
           node scripts/ops/restore-sqlite.mjs --help
           node scripts/ops/health-check.mjs --help
+          node scripts/ops/automation.mjs --help
       - name: Conferir pacote Hermes (skill em sincronia, JSON e shell válidos)
         run: |
           node scripts/ops/build-hermes-plugin.mjs --check
