@@ -32,9 +32,11 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startFakeRadarApi } from "../fixtures/fake-radar-api.mjs";
+import { dashboardSession, sessionClient } from "../helpers/dashboard-session.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const token = `inbound-token-${randomUUID()}`;
+const dashboardToken = `inbound-dash-${randomUUID()}`;
 const LINKED = "1650486356";
 const INTRUDER = "999000111";
 const directory = mkdtempSync(join(tmpdir(), "radar-inbound-"));
@@ -67,7 +69,7 @@ async function startServer() {
     env: {
       ...process.env, PORT: String(port), RADAR_DB_PATH: join(directory, "inbound.sqlite"),
       RADAR_ENVIRONMENT: "production", RADAR_OPERATOR_ID: "inbound-operator", RADAR_TRUST_PROXY_TLS: "true",
-      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: "true",
+      RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_AUTO_APPLICATION_ENABLED: "true", RADAR_DASHBOARD_TOKEN: dashboardToken,
       HERMES_LINKED_RECIPIENT_ID: LINKED, TELEGRAM_ALLOWED_USERS: LINKED,
     },
   });
@@ -116,7 +118,7 @@ const appState = async (id) => (await api("GET", "/api/bootstrap")).data?.applic
 async function preparedApplication(label) {
   const job = (await api("POST", "/api/jobs", {
     title: `Vaga inbound ${label}`, company: "Portal Exemplo", source: "fixture",
-    source_url: `https://portal.example.test/${label}/vaga`, application_url: `https://portal.example.test/${label}/aplicar`,
+    source_url: `https://portal.example.test/${label}/vaga`, application_url: `https://boards.greenhouse.io/exemplo/jobs/${label}`,
   })).data;
   await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: `CV ${label}`, content: "Experiência confirmada" })).data;
@@ -124,7 +126,10 @@ async function preparedApplication(label) {
   await api("POST", `/api/resumes/${resume.id}/review`, { verdict: "pass" });
   await api("POST", `/api/resumes/${resume.id}/approve`, { confirmation: "APROVO" });
   const application = (await api("POST", "/api/applications", { job_id: job.id, resume_id: resume.id })).data;
-  await api("POST", `/api/applications/${application.id}/authorize-auto`, { resume_id: resume.id, confirmation: "AUTORIZO" });
+  // #32: AUTORIZO é decisão humana — só pela sessão do dashboard.
+  const human = sessionClient(base, await dashboardSession(base, dashboardToken, { "x-forwarded-proto": "https" }), { "x-forwarded-proto": "https" });
+  const authorized = await human("POST", `/api/applications/${application.id}/authorize-auto`, { resume_id: resume.id, confirmation: "AUTORIZO" });
+  assert.equal(authorized.status, 200, `authorize-auto: ${JSON.stringify(authorized.data)}`);
   const claimed = await run(["scripts/ops/apply-authorized.mjs", "claim", "--application", application.id], {
     env: { ...scriptEnv(), RADAR_EXECUTOR_WORKER_ID: "inbound-test", RADAR_EXECUTOR_STATE_DIR: stateDir },
   });

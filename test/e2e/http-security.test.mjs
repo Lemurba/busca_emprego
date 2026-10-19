@@ -119,6 +119,36 @@ try {
     assert.ok([404, 422, 409, 501].includes(missing.status), `status ${missing.status}`);
   });
 
+  await test("#32: decisões humanas só pela sessão; rotas do dry-run só pelo token de serviço", async () => {
+    const humanOnly = [
+      ["POST", "/api/applications/x/authorize-auto", { resume_id: "r", confirmation: "AUTORIZO" }],
+      ["POST", "/api/applications/x/confirm-final", { confirmation: "ENVIAR" }],
+      ["POST", "/api/applications/x/cancel-final", {}],
+      ["PUT", "/api/settings/automation", { enabled: false }],
+      ["GET", "/api/applications/x/evidence/y"],
+    ];
+    for (const [method, path, body] of humanOnly) {
+      const viaService = await fetch(`${base}${path}`, { method, headers: { ...json, ...svc }, body: body ? JSON.stringify(body) : undefined });
+      assert.equal(viaService.status, 403, `${method} ${path} com token de serviço`);
+      assert.equal((await viaService.json()).error, "session_required");
+      const anonymous = await fetch(`${base}${path}`, { method, headers: json, body: body ? JSON.stringify(body) : undefined });
+      assert.equal(anonymous.status, 401, `${method} ${path} sem credencial`);
+      const viaSession = await fetch(`${base}${path}`, { method, headers: { ...json, cookie }, body: body ? JSON.stringify(body) : undefined });
+      assert.notEqual(viaSession.status, 401, `${method} ${path} com sessão chega na rota`);
+      assert.notEqual(viaSession.status, 403, `${method} ${path} com sessão chega na rota`);
+    }
+    for (const path of ["/api/applications/x/final-confirmation", "/api/applications/x/final-confirmation/poll"]) {
+      assert.equal((await fetch(`${base}${path}`, { method: "POST", headers: { ...json, cookie }, body: "{}" })).status, 401, `${path} recusa sessão`);
+      assert.equal((await fetch(`${base}${path}`, { method: "POST", headers: { ...json, ...svc }, body: "{}" })).status, 400, `${path} valida o corpo`);
+    }
+    const settings = await fetch(`${base}/api/settings/automation`, { headers: svc });
+    assert.equal(settings.status, 200);
+    const overview = await settings.json();
+    assert.equal(overview.daily_limit, 5);
+    assert.ok(overview.ats_allowlist.includes("greenhouse.io"));
+    assert.equal((await fetch(`${base}/api/settings/automation`, { method: "PUT", headers: { ...json, cookie }, body: JSON.stringify({ daily_limit: 5, extra: 1 }) })).status, 400, "campos desconhecidos são recusados");
+  });
+
   await test("CSRF: text/plain → 415, Origin estrangeiro → 403, Origin do próprio host passa", async () => {
     const plain = await fetch(`${base}/api/jobs/x/decision`, { method: "POST", headers: { "content-type": "text/plain", cookie }, body: "{}" });
     assert.equal(plain.status, 415);
