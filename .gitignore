@@ -12,3 +12,6 @@ npm-debug.log*
 __pycache__/
 *.pyc
 *.sqlite.processes/
+# Smoke de UI (Playwright)
+playwright-report/
+test-results/
