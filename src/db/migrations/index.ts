@@ -1,4 +1,5 @@
 import { baseline } from "./0001_baseline.js";
+import { migration0004 } from "./0004_vaga_viva_repost.js";
 import type { Migration } from "./types.js";
 
 /**
@@ -13,7 +14,8 @@ import type { Migration } from "./types.js";
  * Próximo id livre para outras mudanças: 0007.
  */
 export const MIGRATIONS: readonly Migration[] = [
-  baseline
+  baseline,
+  migration0004
 ];
 
 export type { Migration } from "./types.js";
