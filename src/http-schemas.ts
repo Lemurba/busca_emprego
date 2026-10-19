@@ -144,6 +144,7 @@ export const schemas = {
   resumeCreate: z.looseObject(resumeFields),
   resumePatch: z.looseObject(resumeFields),
   resumeApprove: z.looseObject({ confirmation: shortText.optional(), override_reason: optShort }),
+  resumeFactAction: z.object({ action: z.enum(["confirm", "correct", "remove"]), replacement: z.string().max(500).nullable().optional() }),
   baseResumeUpload: z.looseObject({ title: optShort, file_name: z.string().max(500).optional(), file_data: z.string().max(UPLOAD_BASE64_MAX).optional() }),
   empty: z.looseObject({}),
   fieldConflictResolve: z.looseObject({ choice: shortText.optional() }),

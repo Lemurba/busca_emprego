@@ -212,7 +212,12 @@ const FRIENDLY: Record<string, string> = {
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
   "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
   "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
-};
+  "resume.unverified_facts": "O currículo tem fatos novos sem confirmação. Confirme, corrija ou remova cada um antes de aprovar.",
+  "resume.fact.not_found": "Esse fato não existe na versão atual do currículo.",
+  "resume.fact.stale": "O currículo mudou desde a checagem. Atualize e tente de novo.",
+  "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
+  "resume.fact.already_resolved": "Esse fato já foi resolvido.",
+  "resume.fact.approved_locked": "Retorne o currículo aprovado para revisão antes de alterá-lo.",};
 
 /** status por código: regras na ordem; a primeira que casar vence. */
 const STATUS_RULES: Array<[RegExp, number]> = [
@@ -222,6 +227,7 @@ const STATUS_RULES: Array<[RegExp, number]> = [
   [/\.forbidden$|\.internal_route_required$/u, 403],
   [/(?:^|\.)not_found$/u, 404],
   [/version_conflict|\.race$|\.already_active$/u, 409],
+  [/^resume\.unverified_facts$/u, 409],
   [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
   [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict|decision)\./u, 422],
 ];

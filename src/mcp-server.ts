@@ -11,6 +11,7 @@ import {
   createJobFromAgent,
   createResume,
   db,
+  getResumeFactChecks,
   enrichJobFromAgent,
   failAuthorizedApplication,
   getJob,
@@ -306,7 +307,7 @@ export function createRadarMcpServer() {
   }));
 
   server.registerTool("radar_create_resume", {
-    description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia.",
+    description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia. A resposta traz fact_check.pending: números, datas, empresas, cargos, títulos e certificações sem fato confirmado no perfil, que bloqueiam a aprovação.",
     inputSchema: {
       agent_id: agentId,
       job_id: z.string().min(1),
@@ -318,7 +319,15 @@ export function createRadarMcpServer() {
     },
   }, async ({ agent_id, ...input }) => execute(() => {
     requireAgent(agent_id, "resume.write");
-    return { resume: createResume(input) };
+    const resume = createResume(input);
+    // #31: afirmações sem fato confirmado bloqueiam o APROVO; o agente deve corrigi-las ou removê-las.
+    const facts = resume ? getResumeFactChecks(resume.id) : null;
+    const brief = (rows: NonNullable<typeof facts>["pending"]) => rows.map((row) => ({ claim_id: row.claim_id, kind: row.claim_kind, text: row.claim_text }));
+    return {
+      resume,
+      fact_check: facts ? { pending: brief(facts.pending), warnings: brief(facts.warnings) } : null,
+      ...(facts?.pending.length ? { next_step: "Há afirmações sem fato confirmado no perfil (fact_check.pending). Reescreva sem elas ou peça à pessoa para confirmá-las no painel; a aprovação fica bloqueada até lá." } : {}),
+    };
   }));
 
   server.registerTool("radar_propose_agent_prompt", {
