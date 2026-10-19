@@ -1190,10 +1190,11 @@ export function reviewProfileFact(id: string, state: string, actor = "user") {
   return mapProfileFact(db.prepare("SELECT * FROM profile_facts WHERE id=?").get(id) as Record<string, unknown>);
 }
 
-export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): any {
+/** `options.source` não vem do corpo da requisição: só o import de JSON Resume cria perfis `json_resume`. */
+export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego", options: { source?: string } = {}): any {
   const baseResumeId = input.base_resume_id == null || input.base_resume_id === "" ? null : String(input.base_resume_id);
   if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new Error("base_resume.not_found");
-  const source = input.source == null || input.source === "" ? "pdf" : String(input.source);
+  const source = options.source ?? "pdf";
   if (!["pdf", "json_resume"].includes(source)) throw new Error("profile.source.invalid");
   const context = parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
@@ -1228,7 +1229,7 @@ export function createProfileFromBaseResume(baseResumeId: string, actor = "user"
  */
 export function importJsonResumeProfile(doc: unknown, actor = "user", projectId = "busca-emprego"): any {
   const facts = jsonResumeImportFacts(doc);
-  const profile = createProfessionalProfile({ source: "json_resume", facts }, actor, projectId);
+  const profile = createProfessionalProfile({ facts }, actor, projectId, { source: "json_resume" });
   audit("profile", profile.id, "json_resume_imported", { actor, version: profile.version, fact_count: facts.length, types: [...new Set(facts.map((fact) => String(fact.type)))] });
   return profile;
 }

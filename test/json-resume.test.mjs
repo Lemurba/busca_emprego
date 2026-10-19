@@ -89,10 +89,12 @@ describe("import, confirmação e exportação", async () => {
   });
 
   test("fato importado só é confirmável com JSON Pointer como evidência", () => {
-    const draft = store.createProfessionalProfile({ source: "json_resume" }, "tester");
+    const draft = store.createProfessionalProfile({}, "tester", "busca-emprego", { source: "json_resume" });
     assert.throws(() => store.addProfileFact(draft.id, { type: "skills", value: "SQL", origin: "import", evidence_excerpt: "trecho solto", state: "confirmed" }), /profile\.fact\.evidence\.required/u);
     assert.equal(store.addProfileFact(draft.id, { type: "skills", value: "SQL", origin: "import", evidence_excerpt: "/skills/0", state: "confirmed" }).state, "confirmed");
-    assert.throws(() => store.createProfessionalProfile({ source: "docx" }), /profile\.source\.invalid/u);
+    assert.throws(() => store.createProfessionalProfile({}, "tester", "busca-emprego", { source: "docx" }), /profile\.source\.invalid/u);
+    // O corpo da requisição não escolhe a fonte: só o import cria perfis json_resume.
+    assert.equal(store.createProfessionalProfile({ source: "json_resume" }, "tester").source, "pdf");
   });
 
   test("confirmar → snapshot com experiência estruturada; currículo ATS sem PDF-base; export fiel", () => {
