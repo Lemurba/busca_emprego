@@ -309,9 +309,15 @@ Resposta `200` com `Application` atualizado ou `null` se não existir.
 | Método e rota | Comportamento |
 | --- | --- |
 | `POST /api/applications/{id}/select-manual` | Escolhe o modo manual em uma candidatura aguardando início; remove uma autorização automática pendente |
-| `POST /api/applications/{id}/authorize-auto` | Registra autorização automática para uma vaga e versão de currículo |
+| `POST /api/applications/{id}/authorize-auto` | Registra autorização automática para uma vaga e versão de currículo. **Só sessão do dashboard** (token de serviço → `403 session_required`); link fora de ATS permitido → `422 application.domain.not_ats` |
 | `POST /api/applications/{id}/revoke-auto` | Revoga a autorização antes do início do envio |
 | `GET /api/authorized-applications` | Lista somente candidaturas em fila com autorização ainda válida |
+| `POST /api/applications/{id}/final-confirmation` | (token interno) dry-run: `{worker_id, observed_url, fields_summary: [{label, value}] (≤100; valor ≤500), screenshot_base64 (PNG ≤2 MB)}` → `awaiting_final_confirmation` |
+| `POST /api/applications/{id}/final-confirmation/poll` | (token interno) `{worker_id}` → `not_requested`, `pending`, `paused` ou `confirmed`; a primeira consulta após o ENVIAR devolve o `submit_token` (uma vez) |
+| `POST /api/applications/{id}/confirm-final` | (só sessão) `{confirmation: "ENVIAR"}`: segunda confirmação humana desta execução |
+| `POST /api/applications/{id}/cancel-final` | (só sessão) revoga a autorização e devolve a candidatura para revisão |
+| `GET /api/applications/{id}/evidence/{evidenceId}` | (só sessão) captura PNG enviada no dry-run |
+| `GET /api/settings/automation` / `PUT` | estado do kill-switch, limite diário, limite por ATS, allowlist e uso de hoje; `PUT` (só sessão) aceita `{enabled, daily_limit, per_ats_limit, ats_allowlist}` |
 
 Para autorizar, envie `resume_id` e a confirmação exata `AUTORIZO`:
 
@@ -328,7 +334,9 @@ A vaga deve estar marcada como de interesse, o currículo associado deve estar a
 | `list` | `GET /api/authorized-applications` | exige `RADAR_AUTO_APPLICATION_ENABLED=true` e o token interno; mostra `nonce`, hash da URL e TTL |
 | `claim --application <id>` | `POST /api/applications/{id}/claim` | usa o `nonce` da fila, grava o estado local em `.radar/executor/<id>.json` |
 | `verify --observed-url <url>` | — (mesma `canonicalizeJobUrl` de `dist/src/domain.js`) | aborta se a URL aberta difere da autorizada |
-| `submit --evidence-ref <ref>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id` e sem evidência observada no portal |
+| `request-confirmation --observed-url <url> --screenshot <png> [--fields <json>]` | `POST /api/applications/{id}/final-confirmation` | dry-run antes do clique final |
+| `confirmation-status` | `POST /api/applications/{id}/final-confirmation/poll` | mostra o `submit_token` uma única vez |
+| `submit --evidence-ref <ref> --observed-url <url> --submit-token <t>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id`, sem evidência, sem URL observada e sem token (`422 application.final_confirmation_required`); limite diário → `429 application.daily_limit_reached` |
 | `fail --reason <código>` | `POST /api/applications/{id}/fail` | grava só o código do motivo; a vaga volta para revisão |
 | `ask --field-ref <campo> --question <texto>` | `POST /api/applications/{id}/questions` | pausa a candidatura; a ponte Telegram entrega |
 | `status` | `GET /api/bootstrap` | estado local + estado no app |

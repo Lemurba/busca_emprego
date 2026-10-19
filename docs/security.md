@@ -11,6 +11,7 @@ O Radar guarda currículos, vagas e decisões do usuário e aciona um executor d
 
 - Exceções sem credencial: apenas `GET /api/health` e `GET /api/ready`.
 - O token interno é obrigatório em todos os ambientes; sem ele configurado, as rotas internas respondem `503 internal_token_not_configured`.
+- Decisões humanas aceitam **só a sessão do dashboard** (o token de serviço recebe `403 session_required`): `authorize-auto` (AUTORIZO), `confirm-final` (ENVIAR), `cancel-final`, `PUT /api/settings/automation` (kill-switch, limites, allowlist de ATS) e a captura `GET /api/applications/{id}/evidence/{evidenceId}`. Um agente com o token interno não consegue autorizar nem confirmar o próprio envio.
 - O link de sessão é gerado por `node scripts/ops/dashboard-link.mjs` e pode ser enviado ao operador pelo Telegram do Hermes com `--send` (`hermes send`). Trate o link como senha: para revogá-lo, gere outro `RADAR_DASHBOARD_TOKEN` e reinicie o serviço.
 - Nunca imprima tokens em log, relatório, issue ou conversa. `ops/hermes/radar.env.example` traz os nomes, nunca valores.
 
@@ -41,6 +42,9 @@ O Radar guarda currículos, vagas e decisões do usuário e aciona um executor d
 ## Controles funcionais
 
 - candidatura automática exige `AUTORIZO` para vaga, currículo, versão e URL exatos; `APROVO` não equivale a `AUTORIZO`;
+- envio automático só em ATS de empresa (allowlist em `settings`, host igual ou subdomínio), conferido ao autorizar, reservar, pedir a confirmação final e enviar — também nas rotas HTTP, não só no MCP;
+- dry-run sempre: o executor para antes do clique final e envia captura PNG (até 2 MB, assinatura conferida) + resumo dos campos; o envio exige um `submit_token` aleatório de uso único, gerado após o ENVIAR humano e entregue uma vez ao worker dono do claim; o banco guarda só o SHA-256;
+- limite diário de envios automáticos (padrão 5, America/Sao_Paulo; opcional por ATS) e kill-switch no banco, relido a cada verificação pelos dois processos; `RADAR_AUTO_APPLICATION_ENABLED` continua sendo o teto;
 - o servidor MCP é registrado como `trust: untrusted`: toda ferramenta que grava pede aprovação humana no Hermes;
 - agentes continuam limitados por papel, `tool_scopes`, `allowed_domains` e campos editáveis;
 - Browser Harness de leitura continua separado do executor de candidatura;

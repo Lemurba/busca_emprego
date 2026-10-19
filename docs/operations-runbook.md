@@ -75,25 +75,35 @@ Cadastre fontes em `/api/sources`. `auth_strategy` aceita `none`, `bearer`, `bas
 
 ### Executor autorizado de candidatura
 
-A candidatura automática só existe com autorização explícita do usuário (`AUTORIZO`) para a vaga e para a versão exata do currículo aprovado. O navegador é o Browser Harness do Hermes; o protocolo é guardado por `scripts/ops/apply-authorized.mjs`:
+A candidatura automática só existe com autorização explícita do usuário (`AUTORIZO`, dado na sessão do dashboard — o token de serviço não autoriza) para a vaga e para a versão exata do currículo aprovado, e só para link de candidatura de **ATS de empresa** (allowlist editável no painel: Gupy, Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Recruitee, Workable…). LinkedIn e portais amplos servem só para descoberta: a autorização é recusada com `application.domain.not_ats` e o painel oferece "Enviar manualmente". O navegador é o Browser Harness do Hermes; o protocolo é guardado por `scripts/ops/apply-authorized.mjs`:
 
 ```bash
 node scripts/ops/apply-authorized.mjs list                      # fila autorizada: nonce, hash da URL, TTL
 node scripts/ops/apply-authorized.mjs claim --application <id>  # reserva com o nonce (status in_progress)
-#  ... Browser Harness abre a URL autorizada, preenche com o currículo aprovado e envia ...
+#  ... Browser Harness abre a URL autorizada e preenche com o currículo aprovado, SEM clicar em enviar ...
 node scripts/ops/apply-authorized.mjs verify --application <id> --observed-url <url aberta>
-node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <referência do portal>
+node scripts/ops/apply-authorized.mjs request-confirmation --application <id> --observed-url <url> --screenshot tela.png --fields campos.json
+#  ... o usuário confere captura e campos no painel (Saúde das buscas → Aguardando confirmação final) e digita ENVIAR ...
+node scripts/ops/apply-authorized.mjs confirmation-status --application <id>   # entrega o submit_token UMA vez
+#  ... Browser Harness clica em enviar e captura a confirmação do portal ...
+node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <referência do portal> --observed-url <url> --submit-token <token>
 node scripts/ops/apply-authorized.mjs fail   --application <id> --reason captcha_manual
 node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref cnh --question "Possui CNH?"
 ```
+
+**Dry-run sempre:** toda execução para antes do clique final. O envio só é registrado com o `submit_token` de uso único gerado depois do ENVIAR do usuário para aquela execução (o banco guarda só o SHA-256); sem ele a rota responde 422 `application.final_confirmation_required`. "Cancelar envio" no painel revoga a autorização e devolve a candidatura para revisão.
+
+**Limite diário:** padrão de 5 envios automáticos por dia (America/Sao_Paulo), contados no envio final; opcionalmente também por ATS. Atingido o limite (no pedido de confirmação ou no envio), a rota responde 429 `application.daily_limit_reached`, a autorização é revogada e a candidatura volta para revisão. Ajuste no painel ou com `node scripts/ops/automation.mjs limit <n>` / `ats-limit <n|none>`.
+
+**Kill-switch ("pausar e manter"):** no painel (Automação de candidaturas → Pausar) ou `node scripts/ops/automation.mjs off`. Vale na hora para o dashboard e para o servidor MCP (ambos releem o SQLite a cada verificação): autorizar, reservar, pedir/confirmar a confirmação final e enviar respondem 403 `AUTOMATION_DISABLED`. Autorizações emitidas continuam (com o TTL) e voltam a poder ser reservadas ao religar (`automation.mjs on`). Execuções já reservadas mantêm a reserva, vão para `needs_review` com a etapa "Automação pausada (kill-switch)" e perdem qualquer confirmação final; ao religar voltam ao mesmo executor, que precisa pedir nova confirmação. `fail` continua permitido durante a pausa. `RADAR_AUTO_APPLICATION_ENABLED` segue como teto: diferente de `true`, tudo fica desligado independentemente do painel.
 
 Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `--evidence-ref` observado no portal o envio não é confirmado; URL observada diferente da autorizada (mesma canonicalização do app) aborta a execução — nesse caso use `ask` para revisão humana; `fail` grava apenas o código do motivo (nada de conteúdo de página, token ou URL com credencial). Pergunta humana criada com `ask` pausa a candidatura e é entregue por `notify-human-questions.mjs`.
 
 **Navegador:** o executor conduz o navegador configurado no Hermes por `browser.cdp_url: http://127.0.0.1:9222` (`hermes/config.example.yaml`), que tem precedência sobre o motor padrão; com o CDP fora do ar o Hermes não deve abrir outro navegador para candidatura — pare e corrija o serviço do Chrome. Se houver visualizador remoto da sessão, sua URL fica em `RADAR_BROWSER_VIEWER_URL` no `.env.local`. Logins de portais vêm do cofre de credenciais do Hermes (`hermes vault add`); nenhuma candidatura roda em outro perfil ou endpoint CDP.
 
-Verificação obrigatória antes de ligar o gate: `node test/e2e/executor.test.mjs` (após `npm run build`) (claim, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada — 10 checagens).
+Verificação obrigatória antes de ligar o gate: `node test/e2e/executor.test.mjs` (após `npm run build`) (sessão obrigatória no AUTORIZO/ENVIAR, link fora de ATS, claim, URL divergente, evidência ausente, pausa por pergunta, dry-run com token único, kill-switch, envio, falha, gate desligado).
 
-Para provar o harness **no ambiente real**, use um formulário HTTPS **público** (ex.: `https://httpbin.org/forms/post`) no navegador da instância única: preencha os campos, envie e use a página de confirmação/eco do portal como `--evidence-ref`. O Hermes bloqueia URL privada/interna no navegador (`allow_private_urls: false`), então o fixture local `node test/fixtures/portal-fixture.mjs 8791` serve para checar o **formato** de portal (upload de PDF, consentimento, redirect com protocolo) fora do fluxo autorizado — nunca como URL de candidatura. Isso é coerente com o app: o Radar só autoriza `application_url` pública HTTPS.
+Para provar o harness **no ambiente real**, use um formulário HTTPS **público** (ex.: `https://httpbin.org/forms/post`) no navegador da instância única: inclua o domínio temporariamente na allowlist de ATS do painel (e remova depois), preencha os campos, peça a confirmação final, confirme com ENVIAR, envie e use a página de confirmação/eco do portal como `--evidence-ref`. O Hermes bloqueia URL privada/interna no navegador (`allow_private_urls: false`), então o fixture local `node test/fixtures/portal-fixture.mjs 8791` serve para checar o **formato** de portal (upload de PDF, consentimento, redirect com protocolo) fora do fluxo autorizado — nunca como URL de candidatura. Isso é coerente com o app: o Radar só autoriza `application_url` pública HTTPS.
 
 ## 4. Ativação
 

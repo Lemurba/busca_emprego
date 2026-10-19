@@ -1,7 +1,7 @@
 ---
 name: radar-vagas
 description: Opera busca de vagas, entrevista de preferências, enriquecimento salarial, currículos ATS e fila de candidaturas autorizadas no Radar de Vagas via MCP radar-vagas.
-version: 0.4.0
+version: 0.5.0
 platforms: [linux]
 metadata:
   hermes:
@@ -39,10 +39,10 @@ Ferramentas (lista exata do `tools.include` em `hermes/config.example.yaml`):
 | `radar_create_resume` | escrita | `resume.write` |
 | `radar_record_score` | escrita | `jobs.write` (avaliador de compatibilidade) |
 | `radar_propose_agent_prompt` | escrita | agente alvo publicado e ativo |
-| `radar_claim_application`, `radar_submit_application`, `radar_fail_application` | escrita | `application.prepare` + domínio da URL autorizada |
+| `radar_claim_application`, `radar_request_final_confirmation`, `radar_get_final_confirmation`, `radar_submit_application`, `radar_fail_application` | escrita | `application.prepare` + domínio da URL autorizada + dono do claim |
 | `radar_ask_human` | escrita | `telegram.question` + dono do claim |
 
-Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e ativo cujo papel permita o escopo. Erros voltam como `isError` com `error.code` estável (ex.: `agent.disabled`, `agent.domain.forbidden`, `automation_disabled`, `application.url_mismatch`) e mensagem em pt-BR; trate o código, não tente de novo com outro agente para driblar escopo.
+Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e ativo cujo papel permita o escopo. Erros voltam como `isError` com `error.code` estável (ex.: `agent.disabled`, `agent.domain.forbidden`, `automation_disabled`, `application.url_mismatch`, `application.domain.not_ats`, `application.final_confirmation_required`, `application.daily_limit_reached`) e mensagem em pt-BR; trate o código, não tente de novo com outro agente para driblar escopo.
 
 ## Orquestração
 
@@ -65,13 +65,17 @@ Toda ferramenta de escrita exige `agent_id` de um agente existente, publicado e 
 - Crie currículo ATS (`radar_create_resume`, com o `agent_id` do redator) somente para vaga marcada como interesse e usando fatos confirmados.
 - Registre a compatibilidade com `radar_record_score` (agente avaliador): nota 0–100 por critério e `null` quando não houver dado — falta de dado não é nota baixa.
 - PDF e DOCX são gerados pelo aplicativo e ficam no Kanban para revisão e download.
-- Aprovação do currículo (`APROVO`) não autoriza candidatura. Use apenas a fila de `radar_list_authorized_applications` (itens com `AUTORIZO` vigente: id, vaga, hash da URL e validade). Com `automation_disabled`, pare: a candidatura automática está desligada.
+- Aprovação do currículo (`APROVO`) não autoriza candidatura. Use apenas a fila de `radar_list_authorized_applications` (itens com `AUTORIZO` vigente: id, vaga, hash da URL e validade). Com `automation_disabled`, pare: a candidatura automática está desligada no servidor ou pausada pelo kill-switch do painel.
+- Envio automático só em ATS de empresa (Gupy, Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Recruitee, Workable — allowlist do painel). LinkedIn e portais amplos são só descoberta/link: `application.domain.not_ats` significa envio manual pelo usuário; não tente outro caminho.
 - Protocolo do executor autorizado, sempre pelas ferramentas MCP e com o mesmo `worker_id` do começo ao fim:
   1. `radar_claim_application` reserva a candidatura (o servidor usa a autorização internamente; você nunca vê nem precisa de nonce).
   2. Abra a URL autorizada e confira cada URL observada com `radar_verify_application`. `match: false` aborta: use `radar_ask_human` ou `radar_fail_application`.
   3. Pergunta obrigatória sem resposta confirmada → `radar_ask_human` (uma por vez; a execução pausa até a resposta).
-  4. Só depois da confirmação observável do portal chame `radar_submit_application` com `evidence_ref` (referência vista no portal) e `observed_url`. Sem evidência o envio não é registrado.
-  5. Qualquer bloqueio (login, MFA, CAPTCHA, erro do portal) → `radar_fail_application` com motivo curto.
+  4. **Dry-run sempre**: preencha o formulário e **pare antes do clique final**. Capture a tela (PNG, até 2 MB) e chame `radar_request_final_confirmation` com `observed_url`, `screenshot_base64` e `fields_summary` (`[{label, value}]`, até 100 itens, valores curtos, sem senha nem token). A candidatura fica aguardando a confirmação do usuário no painel.
+  5. Consulte `radar_get_final_confirmation` em intervalos (ex.: a cada 30–60 s, sem pressa): `pending` → espere; `paused` → pare (kill-switch); `confirmed` traz o `submit_token` **uma única vez** — guarde-o só nesta execução. Se o usuário cancelar, a consulta passa a falhar com `application.authorization.unavailable`: pare sem enviar.
+  6. Só com o token: clique em enviar no portal e, depois da confirmação observável, chame `radar_submit_application` com `evidence_ref` (referência vista no portal), `observed_url` e `submit_token`. Sem token (`application.final_confirmation_required`) ou sem evidência o envio não é registrado. Se mudar algo no formulário depois da confirmação, peça uma nova (`radar_request_final_confirmation` invalida a anterior).
+  7. `application.daily_limit_reached`: o limite diário foi atingido e a candidatura voltou para revisão; pare.
+  8. Qualquer bloqueio (login, MFA, CAPTCHA, erro do portal) → `radar_fail_application` com motivo curto.
 - O agente de candidatura precisa ter os domínios dos portais em `allowed_domains` (dashboard); fora deles claim/verify/submit são recusados com `agent.domain.forbidden`.
 - Nunca declare envio sem confirmação observável do portal.
 - `node scripts/ops/apply-authorized.mjs` continua existindo como ferramenta do operador (diagnóstico manual pelo terminal); não o use no lugar das ferramentas MCP.
