@@ -1,4 +1,5 @@
 import { baseline } from "./0001_baseline.js";
+import { migration0006 } from "./0006_json_resume.js";
 import type { Migration } from "./types.js";
 
 /**
@@ -13,7 +14,8 @@ import type { Migration } from "./types.js";
  * Próximo id livre para outras mudanças: 0007.
  */
 export const MIGRATIONS: readonly Migration[] = [
-  baseline
+  baseline,
+  migration0006
 ];
 
 export type { Migration } from "./types.js";
