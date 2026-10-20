@@ -1,5 +1,6 @@
 // Portões humanos (#10), ator derivado da credencial (#19) e limite de /auth por IP (#20).
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,7 @@ import { createServer } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-const { AuthFailureLimiter, clientAddress } = await import("../dist/src/http-security.js");
+const { AuthFailureLimiter, clientAddress } = await import("../../dist/src/http-security.js");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-auth-gates-"));
 const serviceToken = "svc-" + "c".repeat(40);
@@ -32,12 +33,6 @@ const child = spawn(process.execPath, ["dist/src/server.js"], {
 let output = "";
 child.stdout.on("data", (chunk) => output += chunk);
 child.stderr.on("data", (chunk) => output += chunk);
-
-const results = [];
-async function t(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  ok   ${name}`); }
-  catch (error) { results.push({ name, ok: false, error }); console.log(`  FAIL ${name}\n       ${error?.stack ?? error}`); }
-}
 
 const tls = { "x-forwarded-proto": "https" };
 const json = { ...tls, "content-type": "application/json" };
@@ -64,7 +59,7 @@ try {
     await sleep(50);
   }
 
-  await t("login do dashboard emite sessão", async () => {
+  await test("login do dashboard emite sessão", async () => {
     const response = await auth(dashboardToken);
     assert.equal(response.status, 303);
     cookie = (response.headers.get("set-cookie") ?? "").split(";")[0];
@@ -75,7 +70,7 @@ try {
   let jobId = "";
   let resumeId = "";
   let applicationId = "";
-  await t("#10: interesse → APROVO → candidatura → AUTORIZO exigem sessão; token de serviço recebe 403", async () => {
+  await test("#10: interesse → APROVO → candidatura → AUTORIZO exigem sessão; token de serviço recebe 403", async () => {
     const job = await svc("POST", "/api/jobs", { title: "Vaga portão humano", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/gate", application_url: "https://jobs.example.test/gate/apply" });
     assert.equal(job.status, 201, JSON.stringify(job.data));
     jobId = job.data.id;
@@ -106,7 +101,7 @@ try {
     await refusedToService("PATCH", `/api/applications/${applicationId}`, { status: "submitted" });
   });
 
-  await t("#10: demais portões humanos também recusam o token de serviço", async () => {
+  await test("#10: demais portões humanos também recusam o token de serviço", async () => {
     await refusedToService("POST", `/api/jobs/${jobId}/decision/undo`, {});
     await refusedToService("POST", `/api/jobs/${jobId}/feedback`, { mode: "total", reason_code: "other", explanation: "x", confirmation: "SEM INTERESSE" });
     await refusedToService("DELETE", `/api/jobs/${jobId}`, { confirmation: "EXCLUIR" });
@@ -121,7 +116,7 @@ try {
     assert.notEqual((await human("POST", "/api/sources/qualquer/terms", {})).status, 403);
   });
 
-  await t("#19: histórico grava human:dashboard para a sessão e service:<nome> para o token", async () => {
+  await test("#19: histórico grava human:dashboard para a sessão e service:<nome> para o token", async () => {
     const history = await human("GET", `/api/jobs/${jobId}/history`);
     assert.equal(history.status, 200);
     const actorOf = (predicate) => history.data.find(predicate)?.actor;
@@ -143,7 +138,7 @@ try {
     assert.equal(otherHistory.find((item) => item.event === "job.decision")?.actor, "human:dashboard");
   });
 
-  await t("#20: 20 falhas de um IP não trancam outro IP nem o token válido", async () => {
+  await test("#20: 20 falhas de um IP não trancam outro IP nem o token válido", async () => {
     const attacker = "203.0.113.5";
     for (let attempt = 0; attempt < 20; attempt++) assert.equal((await auth("errado", attacker)).status, 401);
     assert.equal((await auth("errado", attacker)).status, 429, "o IP que errou fica limitado");
@@ -154,7 +149,7 @@ try {
     assert.equal((await auth(dashboardToken)).status, 303, "o próprio host (sem X-Forwarded-For) continua entrando");
   });
 
-  await t("#20: X-Forwarded-For só vale de proxy confiável; limitador por origem", () => {
+  await test("#20: X-Forwarded-For só vale de proxy confiável; limitador por origem", () => {
     const fake = (remoteAddress, forwarded) => ({ headers: forwarded ? { "x-forwarded-for": forwarded } : {}, socket: { remoteAddress } });
     assert.equal(clientAddress(fake("192.168.0.50", "10.0.0.1"), true), "192.168.0.50", "header vindo da LAN é ignorado");
     assert.equal(clientAddress(fake("127.0.0.1", "10.0.0.1"), false), "127.0.0.1", "sem RADAR_TRUST_PROXY_TLS o header é ignorado");
@@ -178,13 +173,13 @@ try {
 
 // #19: escrita pelo MCP grava agent:<agent_id> (processo separado do servidor HTTP acima).
 process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
-const [{ createRadarMcpServer }, store] = await Promise.all([import("../dist/src/mcp-server.js"), import("../dist/src/db.js")]);
+const [{ createRadarMcpServer }, store] = await Promise.all([import("../../dist/src/mcp-server.js"), import("../../dist/src/db.js")]);
 const mcp = createRadarMcpServer({ role: "curriculo" });
 const client = new Client({ name: "radar-auth-gates-test", version: "1.0.0" });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 await Promise.all([client.connect(clientTransport), mcp.connect(serverTransport)]);
 try {
-  await t("#19: radar_create_resume registra o agente redator como ator", async () => {
+  await test("#19: radar_create_resume registra o agente redator como ator", async () => {
     const writer = store.listAgentConfigs().find((agent) => agent.role_type === "resume_writer" && agent.enabled);
     assert.ok(writer);
     const job = store.upsertJob({ id: "job-mcp-actor", title: "Vaga MCP", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/mcp" });
@@ -201,6 +196,3 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
-const failed = results.filter((item) => !item.ok);
-console.log(`\nportões humanos e auditoria: ${results.length - failed.length} ok, ${failed.length} falha(s)`);
-if (failed.length) { console.log(output.slice(-2000)); process.exit(1); }

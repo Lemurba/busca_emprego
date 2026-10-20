@@ -1,14 +1,15 @@
 // Issue #30: 404 para ids inexistentes, fato de outro perfil, schemas estritos e cadastro
 // manual de vaga sem sobrescrita, request_id, sessões persistentes e RADAR_PROJECT_ID.
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
-const { SessionStore } = await import("../dist/src/http-security.js");
-const { DEFAULT_PROJECT_ID, projectIdFrom } = await import("../dist/src/config.js");
+const { SessionStore } = await import("../../dist/src/http-security.js");
+const { DEFAULT_PROJECT_ID, projectIdFrom } = await import("../../dist/src/config.js");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-hardening-30-"));
 const dbPath = join(directory, "radar.sqlite");
@@ -37,12 +38,6 @@ async function startServer(extraEnv = {}) {
   return { base, output: () => output, stop: async () => { child.kill("SIGTERM"); await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); }); } };
 }
 
-const results = [];
-async function t(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  ok   ${name}`); }
-  catch (error) { results.push({ name, ok: false, error }); console.log(`  FAIL ${name}\n       ${error?.stack ?? error}`); }
-}
-
 const svc = { "x-radar-service-token": serviceToken, "content-type": "application/json" };
 let server = await startServer();
 const api = async (method, path, body, headers = {}) => {
@@ -57,7 +52,7 @@ const human = async (method, path, body) => {
 };
 
 try {
-  await t("PATCH de candidatura/currículo inexistente → 404", async () => {
+  await test("PATCH de candidatura/currículo inexistente → 404", async () => {
     const application = await human("PATCH", "/api/applications/nao-existe", { notes: "x" });
     assert.equal(application.status, 404, JSON.stringify(application.json));
     assert.equal(application.json.error, "application.not_found");
@@ -66,7 +61,7 @@ try {
     assert.equal(resume.json.error, "resume.not_found");
   });
 
-  await t("revisão de fato valida o perfil da rota", async () => {
+  await test("revisão de fato valida o perfil da rota", async () => {
     const first = await api("POST", "/api/profiles", { facts: [] });
     const second = await api("POST", "/api/profiles", { facts: [] });
     assert.equal(first.status, 201, JSON.stringify(first.json));
@@ -82,7 +77,7 @@ try {
 
   const jobBody = { title: "Analista", company: "Empresa Estrita", source: "manual", source_url: "https://example.com/vagas/estrita", description: "original" };
   let jobId = "";
-  await t("POST /api/jobs: corpo estrito recusa id, match_score, project_id e campos desconhecidos", async () => {
+  await test("POST /api/jobs: corpo estrito recusa id, match_score, project_id e campos desconhecidos", async () => {
     for (const extra of [{ id: "forjado" }, { match_score: 99 }, { project_id: "outro" }, { status: "applied" }, { campo_inventado: 1 }]) {
       const response = await api("POST", "/api/jobs", { ...jobBody, ...extra });
       assert.equal(response.status, 400, `${JSON.stringify(extra)} → ${JSON.stringify(response.json)}`);
@@ -94,7 +89,7 @@ try {
     assert.equal((await human("POST", "/api/jobs/qualquer/decision", { decision: "interested", extra: true })).status, 400);
   });
 
-  await t("POST /api/jobs cria com proveniência humana e nunca sobrescreve", async () => {
+  await test("POST /api/jobs cria com proveniência humana e nunca sobrescreve", async () => {
     const created = await api("POST", "/api/jobs", jobBody);
     assert.equal(created.status, 201, JSON.stringify(created.json));
     jobId = created.json.id;
@@ -107,7 +102,7 @@ try {
     assert.equal((await api("GET", `/api/jobs/${encodeURIComponent(jobId)}`)).json.description, "original");
   });
 
-  await t("POST /api/jobs não ressuscita vaga arquivada", async () => {
+  await test("POST /api/jobs não ressuscita vaga arquivada", async () => {
     const archived = await human("DELETE", `/api/jobs/${encodeURIComponent(jobId)}`, { confirmation: "EXCLUIR" });
     assert.equal(archived.status, 200, JSON.stringify(archived.json));
     const recreated = await api("POST", "/api/jobs", { ...jobBody, description: "sobrescrita" });
@@ -115,7 +110,7 @@ try {
     assert.equal(recreated.json.error, "job.archived");
   });
 
-  await t("request_id: honra X-Request-Id válido, gera um caso contrário e registra no log", async () => {
+  await test("request_id: honra X-Request-Id válido, gera um caso contrário e registra no log", async () => {
     const echoed = await api("GET", "/api/bootstrap", undefined, { "x-request-id": "req-abc.123" });
     assert.equal(echoed.headers.get("x-request-id"), "req-abc.123");
     const generated = await api("GET", "/api/bootstrap");
@@ -135,7 +130,7 @@ try {
     assert.doesNotMatch(server.output(), /segredo-errado/u, "query string (token) não pode ir para o log");
   });
 
-  await t("sessões sobrevivem a reinício; logout e troca de token as encerram", async () => {
+  await test("sessões sobrevivem a reinício; logout e troca de token as encerram", async () => {
     const login = async () => {
       const response = await fetch(`${server.base}/auth?token=${dashboardToken}`, { redirect: "manual" });
       assert.equal(response.status, 303);
@@ -155,7 +150,7 @@ try {
     assert.equal(await bootstrap(kept), 401, "trocar o token do dashboard encerra as sessões");
   });
 
-  await t("SessionStore persiste só o hash do id", () => {
+  await test("SessionStore persiste só o hash do id", () => {
     const saved = new Map();
     const persistence = { load: () => saved.entries(), save: (hash, expiresAt) => saved.set(hash, expiresAt), remove: (hash) => saved.delete(hash) };
     const store = new SessionStore(1000, 10, persistence);
@@ -169,7 +164,7 @@ try {
     assert.equal(saved.size, 0);
   });
 
-  await t("RADAR_PROJECT_ID centralizado com padrão busca-emprego", async () => {
+  await test("RADAR_PROJECT_ID centralizado com padrão busca-emprego", async () => {
     assert.equal(DEFAULT_PROJECT_ID, "busca-emprego");
     assert.equal(projectIdFrom({}), "busca-emprego");
     assert.equal(projectIdFrom({ RADAR_PROJECT_ID: " outro-projeto " }), "outro-projeto");
@@ -185,6 +180,3 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
-const failed = results.filter((item) => !item.ok);
-console.log(`\nissue #30: ${results.length - failed.length} ok, ${failed.length} falha(s)`);
-if (failed.length) process.exit(1);

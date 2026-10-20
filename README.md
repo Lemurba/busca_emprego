@@ -4,11 +4,12 @@ Dashboard local para descoberta e acompanhamento de vagas, preparação de curr�
 
 ## Executar no ambiente Hermes
 
-O processo roda no container existente do Hermes Agent como serviço s6 e não cria outro container. Existe uma única instalação com configuração de produção. Requer Node.js 22.16 ou superior (`node:sqlite`; a CI usa Node 24) e npm.
+O processo roda no container existente do Hermes Agent como serviço s6 e não cria outro container. Existe uma única instalação com configuração de produção. Requer Node.js 22.16 ou superior (`node:sqlite`; a CI roda em Node 22.16 e 24) e npm.
 
 ```bash
 npm ci
-npm test
+npm run build                                                        # gera dist/ (o serviço roda dist/src/server.js)
+npm test && npm run test:e2e
 cp ops/hermes/radar.env.example .env.local && chmod 600 .env.local   # preencha os valores
 sh ops/hermes/radar-s6-run.sh                                        # ou pelo serviço s6
 ```
@@ -35,7 +36,7 @@ node scripts/ops/live-prod-check.mjs             # verificação da instalação
 node scripts/ops/notify-human-questions.mjs      # simulação da entrega Telegram das perguntas humanas
 node scripts/ops/telegram-diagnose.mjs           # gateway Telegram do Hermes (sem expor segredo)
 node scripts/ops/apply-authorized.mjs list       # fila de candidaturas autorizadas (executor do Hermes)
-node test/executor.test.mjs                      # guarda do protocolo do executor (claim, URL, evidência, falha)
+node test/e2e/executor.test.mjs                  # guarda do protocolo do executor (claim, URL, evidência, falha; requer build)
 ```
 
 O gate `RADAR_AUTO_APPLICATION_ENABLED` vem desligado; ligue-o somente com o executor testado. Com ele ligado, a fila autorizada exige o token interno.
@@ -118,4 +119,19 @@ Com `trust: untrusted`, toda ferramenta MCP que grava pede aprovação humana an
 
 ## Operação
 
-O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` executa também E2E HTTP, segurança, carga de 10 fontes/500 resultados/20 workers e restore. Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A ativação continua bloqueada até configurar skill, MCP, navegador, cofre e Telegram do Hermes conforme o onboarding e executar os testes no mesmo artefato de produção.
+O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` cobre domínio, migrações e restore; `npm run test:e2e` sobe o servidor real para E2E HTTP, segurança e carga de 10 fontes/500 resultados/20 workers (veja [Desenvolvimento e testes](#desenvolvimento-e-testes)). Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A ativação continua bloqueada até configurar skill, MCP, navegador, cofre e Telegram do Hermes conforme o onboarding e executar os testes no mesmo artefato de produção.
+
+## Desenvolvimento e testes
+
+| comando | o que faz |
+| --- | --- |
+| `npm run build` | compila `src/` para `dist/` e empacota `public/app.ts` |
+| `npm test` | testes de unidade (`test/*.test.mjs`) com `node:test` direto sobre o TypeScript (`node --import tsx`), com relatório de cobertura, e os testes Python do plugin Hermes; não precisa de `dist/` |
+| `npm run test:unit` | só os testes de unidade, sem cobertura (mais rápido) |
+| `npm run test:e2e` | faz o build e roda `test/e2e/*.test.mjs`, que sobem `dist/src/server.js` de verdade |
+| `npm run lint` | Biome (regras recomendadas, sem formatador) |
+| `npm run typecheck` | `tsc --noEmit` em `src/` e em `public/` (`tsconfig.web.json`) |
+
+Cada arquivo de teste usa o próprio SQLite temporário: `openTempStore()` de `test/helpers/temp-db.mjs` define `RADAR_DB_PATH`, importa uma instância nova de `src/db.ts` e devolve `cleanup` para `after()`. Um teste novo em `test/*.test.mjs` entra automaticamente em `npm test`; não é preciso editar o `package.json`.
+
+O schema do banco é versionado em `src/db/migrations/` e aplicado por `migrate()` ao abrir a conexão; como adicionar uma migração (e os ids reservados para as features em andamento) está em [`src/db/migrations/README.md`](src/db/migrations/README.md).

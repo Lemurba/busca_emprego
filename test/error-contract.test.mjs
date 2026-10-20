@@ -1,9 +1,9 @@
 /**
  * Contrato dos códigos de erro (#29) e validação de domínio → 422 (#17).
  * As bordas HTTP e MCP decidem status e mensagem só pelo `code` do erro.
- * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,20 +11,16 @@ import { join } from "node:path";
 const directory = mkdtempSync(join(tmpdir(), "radar-error-contract-"));
 process.env.RADAR_DB_PATH = join(directory, "errors.sqlite");
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
-const { DomainError, ERROR_MESSAGES, statusForCode, toDomainError } = await import("../dist/src/errors.js");
-const { DomainValidationError } = await import("../dist/src/domain.js");
-const { WorkflowError } = await import("../dist/src/workflow.js");
-const { errorResponse } = await import("../dist/src/http-security.js");
-const { toolError } = await import("../dist/src/mcp-server.js");
+const { DomainError, ERROR_MESSAGES, statusForCode, toDomainError } = await import("../src/errors.ts");
+const { DomainValidationError } = await import("../src/domain.ts");
+const { WorkflowError } = await import("../src/workflow.ts");
+const { errorResponse } = await import("../src/http-security.ts");
+const { toolError } = await import("../src/mcp-server.ts");
 
-const results = [];
-function check(name, fn) {
-  try { fn(); results.push(`  ok   ${name}`); } catch (error) { results.push(`  FAIL ${name}`); console.error(error); process.exitCode = 1; }
-}
 const mcp = (error) => JSON.parse(toolError(error).content[0].text).error;
 
 try {
-  check("tabela de status por código (contrato estável)", () => {
+  await test("tabela de status por código (contrato estável)", () => {
     const contract = {
       "job.not_found": 404, not_found: 404, "agent.domain.forbidden": 403, AUTOMATION_DISABLED: 403,
       "application.internal_route_required": 403, PDF_DUPLICATE: 409, PDF_TOO_LARGE: 413,
@@ -35,7 +31,7 @@ try {
     for (const [code, status] of Object.entries(contract)) assert.equal(statusForCode(code), status, code);
   });
 
-  check("DomainError: status explícito vence; sem status usa a tabela", () => {
+  await test("DomainError: status explícito vence; sem status usa a tabela", () => {
     assert.equal(new DomainError("job.not_found").status, 404);
     assert.equal(new DomainError("job.not_found", 410).status, 410);
     const response = errorResponse(new DomainError("application.url.insecure"));
@@ -45,7 +41,7 @@ try {
     assert.equal(response.internal, false);
   });
 
-  check("subclasses (DomainValidationError, WorkflowError) são DomainError", () => {
+  await test("subclasses (DomainValidationError, WorkflowError) são DomainError", () => {
     const validation = new DomainValidationError("A URL deve usar HTTPS", "url");
     assert.ok(validation instanceof DomainError);
     assert.equal(validation.code, "validation.url");
@@ -56,7 +52,7 @@ try {
     assert.equal(toDomainError(workflow), workflow);
   });
 
-  check("HTTP: DomainValidationError → 422 com campo e mensagem (#17)", () => {
+  await test("HTTP: DomainValidationError → 422 com campo e mensagem (#17)", () => {
     const response = errorResponse(new DomainValidationError("Destino privado não permitido", "url"));
     assert.equal(response.status, 422);
     assert.equal(response.body.error, "validation.url");
@@ -65,7 +61,7 @@ try {
     assert.equal(response.internal, false);
   });
 
-  check("MCP: DomainValidationError → 422 com campo e mensagem (#17)", () => {
+  await test("MCP: DomainValidationError → 422 com campo e mensagem (#17)", () => {
     const error = mcp(new DomainValidationError("URL não pode conter credenciais", "url"));
     assert.equal(error.code, "validation.url");
     assert.equal(error.status, 422);
@@ -73,7 +69,7 @@ try {
     assert.deepEqual(error.details, { field: "url" });
   });
 
-  check("mensagem vem do dicionário: mudar o texto não muda o status", () => {
+  await test("mensagem vem do dicionário: mudar o texto não muda o status", () => {
     const a = errorResponse(new DomainError("job.archived", undefined, undefined, "texto qualquer"));
     const b = errorResponse(new Error("job.archived"));
     assert.equal(a.status, b.status);
@@ -81,7 +77,7 @@ try {
     assert.equal(b.body.message, ERROR_MESSAGES["job.archived"]);
   });
 
-  check("legado: Error com código estável continua mapeado (com sufixo nos detalhes)", () => {
+  await test("legado: Error com código estável continua mapeado (com sufixo nos detalhes)", () => {
     const response = errorResponse(new Error("job.salary.invalid:min,max"));
     assert.equal(response.status, 422);
     assert.equal(response.body.error, "job.salary.invalid:min,max");
@@ -91,7 +87,7 @@ try {
     assert.equal(tool.status, 403);
   });
 
-  check("WorkflowError mantém status e detalhes nas duas bordas", () => {
+  await test("WorkflowError mantém status e detalhes nas duas bordas", () => {
     const error = new WorkflowError("ILLEGAL_TRANSITION", 409, "Comando reservado ao fluxo interno.", { command: "x" });
     const response = errorResponse(error);
     assert.equal(response.status, 409);
@@ -102,7 +98,7 @@ try {
     assert.equal(tool.status, 409);
   });
 
-  check("erro desconhecido → 500 sem detalhes; MCP loga com request_id", () => {
+  await test("erro desconhecido → 500 sem detalhes; MCP loga com request_id", () => {
     const sqlite = Object.assign(new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed: jobs.id"), { code: "ERR_SQLITE_ERROR" });
     for (const error of [sqlite, new TypeError("x is undefined"), "texto solto"]) {
       const response = errorResponse(error);
@@ -128,4 +124,3 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
-console.log(`contrato de erros:\n${results.join("\n")}`);

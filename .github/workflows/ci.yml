@@ -31,8 +31,16 @@ jobs:
       - run: npm ci
       - name: Auditar dependências de produção
         run: npm audit --omit=dev --audit-level=high
-      # npm test já executa test/ops.test.mjs (backup/restore SQLite).
+      - name: Lint (Biome)
+        run: npm run lint
+      - name: Typecheck (src/ e public/)
+        run: npm run typecheck
+      - run: npm run build
+      # Testes de unidade (node:test + tsx, sem dist/), cobertura e plugin Python.
+      # Inclui test/ops*.test.mjs (backup/restore SQLite) e test/migrations.test.mjs.
       - run: npm test
+      - name: Testes ponta a ponta (servidor real em dist/)
+        run: npm run test:e2e
       - name: Smoke dos agentes (instância isolada)
         run: node scripts/ops/smoke-agents.mjs
       - name: Validar CLIs operacionais

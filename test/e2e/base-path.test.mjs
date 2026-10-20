@@ -1,12 +1,13 @@
 // #21: dashboard atrás do nginx em subcaminho (RADAR_BASE_PATH).
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
-const { normalizeBasePath, cookiePath, stripBasePath, withBaseHref } = await import("../dist/src/base-path.js");
+const { normalizeBasePath, cookiePath, stripBasePath, withBaseHref } = await import("../../dist/src/base-path.js");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-base-path-"));
 const dashboardToken = "dash-" + "c".repeat(40);
@@ -33,17 +34,11 @@ async function startServer(extraEnv = {}) {
   return { base, output: () => output, stop: async () => { child.kill("SIGTERM"); await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); }); } };
 }
 
-const results = [];
-async function t(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  ok   ${name}`); }
-  catch (error) { results.push({ name, ok: false, error }); console.log(`  FAIL ${name}\n       ${error?.stack ?? error}`); }
-}
-
 // O prefixo do exemplo do nginx é a fonte da verdade do teste: se mudar lá, o teste acompanha.
 const nginx = readFileSync("ops/hermes/nginx-radar.conf.example", "utf8");
 const nginxPrefix = /location\s+(\/\S*\/)\s*\{/u.exec(nginx)?.[1];
 
-await t("normalização do RADAR_BASE_PATH", () => {
+await test("normalização do RADAR_BASE_PATH", () => {
   assert.equal(normalizeBasePath(undefined), "/");
   assert.equal(normalizeBasePath(""), "/");
   assert.equal(normalizeBasePath("/"), "/");
@@ -60,7 +55,7 @@ await t("normalização do RADAR_BASE_PATH", () => {
   assert.equal(withBaseHref('<head><base href="/" /></head>', "/x/"), '<head><base href="/x/" /></head>');
 });
 
-await t("index.html só usa caminhos relativos ao <base href>", () => {
+await test("index.html só usa caminhos relativos ao <base href>", () => {
   const html = readFileSync("public/index.html", "utf8");
   assert.match(html, /<base href="\/" \/>/);
   assert.doesNotMatch(html, /(?:src|href)="\/[^"]/u, "nenhum asset com caminho absoluto");
@@ -68,7 +63,7 @@ await t("index.html só usa caminhos relativos ao <base href>", () => {
   assert.doesNotMatch(app, /href="\/api/u, "links de download relativos à base");
 });
 
-await t("exemplo do nginx publica em subcaminho com proxy_pass removendo o prefixo", () => {
+await test("exemplo do nginx publica em subcaminho com proxy_pass removendo o prefixo", () => {
   assert.ok(nginxPrefix, "location com prefixo no exemplo do nginx");
   assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:\d+\/;/u);
   assert.match(nginx, /RADAR_BASE_PATH/u, "exemplo cita a variável que precisa acompanhar o location");
@@ -79,7 +74,7 @@ try {
   const { base } = server;
   const prefix = nginxPrefix.replace(/\/$/u, "");
 
-  await t("HTML servido com <base href> do subcaminho e CSP aceitando base-uri 'self'", async () => {
+  await test("HTML servido com <base href> do subcaminho e CSP aceitando base-uri 'self'", async () => {
     for (const path of ["/", `${prefix}/`, prefix]) {
       const response = await fetch(`${base}${path}`);
       assert.equal(response.status, 200, path);
@@ -89,7 +84,7 @@ try {
     }
   });
 
-  await t("assets e API respondem com e sem o prefixo (proxy que remove ou repassa)", async () => {
+  await test("assets e API respondem com e sem o prefixo (proxy que remove ou repassa)", async () => {
     assert.equal((await fetch(`${base}/app.js`)).status, 200);
     assert.equal((await fetch(`${base}${prefix}/app.js`)).status, 200);
     assert.equal((await fetch(`${base}/api/health`)).status, 200);
@@ -97,7 +92,7 @@ try {
     assert.equal((await fetch(`${base}${prefix}/api/bootstrap`)).status, 401);
   });
 
-  await t("/auth redireciona para a base e o cookie usa Path=<base>", async () => {
+  await test("/auth redireciona para a base e o cookie usa Path=<base>", async () => {
     for (const path of ["/auth", `${prefix}/auth`]) {
       const response = await fetch(`${base}${path}?token=${dashboardToken}`, { redirect: "manual" });
       assert.equal(response.status, 303, path);
@@ -117,7 +112,7 @@ try {
 
 const fallback = await startServer();
 try {
-  await t("sem RADAR_BASE_PATH tudo continua na raiz", async () => {
+  await test("sem RADAR_BASE_PATH tudo continua na raiz", async () => {
     const html = await (await fetch(`${fallback.base}/`)).text();
     assert.match(html, /<base href="\/" \/>/);
     const response = await fetch(`${fallback.base}/auth?token=${dashboardToken}`, { redirect: "manual" });
@@ -129,6 +124,3 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
-const failed = results.filter((result) => !result.ok);
-console.log(`\n${results.length - failed.length}/${results.length} cenários de subcaminho passaram.`);
-if (failed.length) process.exit(1);

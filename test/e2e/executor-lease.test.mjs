@@ -13,13 +13,14 @@
  * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const directory = mkdtempSync(join(tmpdir(), "radar-executor-lease-"));
 const dbPath = join(directory, "test.sqlite");
 process.env.RADAR_DB_PATH = dbPath;
@@ -28,12 +29,6 @@ process.env.RADAR_AUTHORIZATION_SECRET = "segredo-de-teste-do-dashboard";
 const dbModuleUrl = pathToFileURL(join(repoRoot, "dist/src/db.js")).href;
 const store = await import(`${dbModuleUrl}?lease=${Date.now()}`);
 const { errorResponse } = await import(pathToFileURL(join(repoRoot, "dist/src/http-security.js")).href);
-
-const results = [];
-async function check(name, fn) {
-  try { await fn(); results.push({ name, ok: true }); console.log(`  ok   ${name}`); }
-  catch (error) { results.push({ name, ok: false }); console.log(`  FAIL ${name}\n       ${error.stack ?? error.message}`); }
-}
 
 let sequence = 0;
 function authorized(label) {
@@ -62,7 +57,7 @@ const statusOf = (fn) => { try { fn(); return 200; } catch (error) { return erro
 
 console.log("executor: revogação × claim, lease e assinatura:");
 try {
-  await check("id e nonce da autorização vêm de randomBytes(32); assinatura HMAC gravada", () => {
+  await test("id e nonce da autorização vêm de randomBytes(32); assinatura HMAC gravada", () => {
     const { application } = authorized("random");
     const row = authRow(application.id);
     assert.match(row.id, /^[0-9a-f]{64}$/u);
@@ -70,12 +65,12 @@ try {
     assert.match(String(row.signature), /^[0-9a-f]{64}$/u);
   });
 
-  await check("revogação e escolha manual: id inexistente → 404", () => {
+  await test("revogação e escolha manual: id inexistente → 404", () => {
     assert.equal(statusOf(() => store.revokeAutoApplication("nao-existe")), 404);
     assert.equal(statusOf(() => store.selectManualApplication("nao-existe")), 404);
   });
 
-  await check("revogação e escolha manual depois do claim → 409, sem alterar a execução", () => {
+  await test("revogação e escolha manual depois do claim → 409, sem alterar a execução", () => {
     const { application, job, nonce } = authorized("conflict");
     store.claimAuthorizedApplication(application.id, "worker-c", nonce);
     assert.equal(statusOf(() => store.revokeAutoApplication(application.id)), 409);
@@ -86,14 +81,14 @@ try {
     assert.equal(jobStatus(job.id), "applying");
   });
 
-  await check("revogação antes do claim: autorização revogada e claim recusado", () => {
+  await test("revogação antes do claim: autorização revogada e claim recusado", () => {
     const { application, nonce } = authorized("revoke-first");
     assert.equal(store.revokeAutoApplication(application.id).automation_mode, "assisted");
     assert.equal(authRow(application.id).state, "revoked");
     assert.throws(() => store.claimAuthorizedApplication(application.id, "worker-r", nonce), /application\.authorization\.unavailable/u);
   });
 
-  await check("assinatura HMAC conferida no claim (adulterada ou outro segredo → recusa)", () => {
+  await test("assinatura HMAC conferida no claim (adulterada ou outro segredo → recusa)", () => {
     const tampered = authorized("tampered");
     store.db.prepare("UPDATE application_authorizations SET signature=? WHERE application_id=?").run("0".repeat(64), tampered.application.id);
     assert.throws(() => store.claimAuthorizedApplication(tampered.application.id, "worker-h", tampered.nonce), /application\.authorization\.unavailable/u);
@@ -108,7 +103,7 @@ try {
     assert.equal(authRow(other.application.id).state, "claimed");
   });
 
-  await check("expiração antes do claim: TTL da emissão vence a autorização", () => {
+  await test("expiração antes do claim: TTL da emissão vence a autorização", () => {
     const { application, job, nonce } = authorized("ttl-before");
     store.db.prepare("UPDATE application_authorizations SET expires_at=? WHERE application_id=?").run(past(), application.id);
     assert.ok(!store.listAuthorizedApplications().some((item) => item.id === application.id));
@@ -119,7 +114,7 @@ try {
     assert.notEqual(jobStatus(job.id), "applying");
   });
 
-  await check("expiração depois do claim: com lease ativo o TTL da emissão não aborta a execução", () => {
+  await test("expiração depois do claim: com lease ativo o TTL da emissão não aborta a execução", () => {
     const { application, job, nonce } = authorized("ttl-after");
     const claimed = store.claimAuthorizedApplication(application.id, "worker-a", nonce);
     assert.ok(claimed.lease_expires_at > new Date().toISOString());
@@ -133,7 +128,7 @@ try {
     assert.equal(jobStatus(job.id), "applied");
   });
 
-  await check("heartbeat renova o lease e só o worker dono pode renovar", () => {
+  await test("heartbeat renova o lease e só o worker dono pode renovar", () => {
     const { application, nonce } = authorized("heartbeat");
     store.claimAuthorizedApplication(application.id, "worker-b", nonce);
     const soon = new Date(Date.now() + 5_000).toISOString();
@@ -145,7 +140,7 @@ try {
     assert.ok(authRow(application.id).heartbeat_at);
   });
 
-  await check("lease vencido sem heartbeat → needs_review com evento de resultado desconhecido", () => {
+  await test("lease vencido sem heartbeat → needs_review com evento de resultado desconhecido", () => {
     const { application, job, nonce } = authorized("lease-expired");
     store.claimAuthorizedApplication(application.id, "worker-l", nonce);
     store.db.prepare("UPDATE application_authorizations SET lease_expires_at=? WHERE application_id=?").run(past(), application.id);
@@ -163,7 +158,7 @@ try {
     assert.throws(() => store.submitAuthorizedApplication(application.id, { worker_id: "worker-l", evidence_ref: "portal:late" }), /application\.authorization\.unavailable/u);
   });
 
-  await check("pergunta humana ativa pausa o lease; a resposta recomeça o prazo", () => {
+  await test("pergunta humana ativa pausa o lease; a resposta recomeça o prazo", () => {
     const { application, nonce } = authorized("paused");
     store.claimAuthorizedApplication(application.id, "worker-p", nonce);
     const question = store.createHumanQuestion(application.id, { field_ref: "travel", question: "Aceita viagens?", choices: ["Sim", "Não"], step: "formulário" });
@@ -176,7 +171,7 @@ try {
     store.heartbeatAuthorizedApplication(application.id, "worker-p");
   });
 
-  await check("recuperação: vaga em applying sem autorização válida volta para revisão com auditoria", () => {
+  await test("recuperação: vaga em applying sem autorização válida volta para revisão com auditoria", () => {
     const { application, job, nonce } = authorized("stuck");
     store.claimAuthorizedApplication(application.id, "worker-s", nonce);
     // Estado deixado pela corrida antiga (#14): autorização revogada, candidatura in_progress em modo manual.
@@ -194,7 +189,7 @@ try {
     assert.equal(store.recoverStuckApplications(), 0);
   });
 
-  await check("dois processos: claim × revoke nunca deixam a vaga presa em applying", async () => {
+  await test("dois processos: claim × revoke nunca deixam a vaga presa em applying", async () => {
     const childScript = `
       const store = await import(${JSON.stringify(dbModuleUrl)});
       const [action, applicationId, nonce, startAt] = process.argv.slice(1);
@@ -243,6 +238,3 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
-const failed = results.filter((item) => !item.ok);
-console.log(`${results.length - failed.length}/${results.length} checagens de lease e revogação passaram.`);
-if (failed.length) process.exit(1);

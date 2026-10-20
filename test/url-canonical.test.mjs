@@ -2,13 +2,14 @@
  * Canonicalização de URL por portal (#23): tabela com URLs reais anonimizadas (IDs e slugs
  * trocados, estrutura e parâmetros de rastreamento preservados) e migração que recalcula
  * canonical_url e aponta possíveis duplicatas existentes.
- * Requer: npm run build (dist/ presente).
  */
 import assert from "node:assert/strict";
+import { test } from "node:test";
+import { importStore } from "./helpers/temp-db.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalizeJobUrl, extractSourceJobId } from "../dist/src/domain.js";
+import { canonicalizeJobUrl, extractSourceJobId } from "../src/domain.ts";
 
 // [URL de entrada, URL canônica esperada, source_job_id esperado]
 const cases = [
@@ -40,14 +41,15 @@ const cases = [
   ["https://carreiras.exemplo.com.br/vaga?b=2&a=1&msclkid=z", "https://carreiras.exemplo.com.br/vaga?a=1&b=2", null],
 ];
 
-for (const [input, canonical, sourceJobId] of cases) {
-  assert.equal(canonicalizeJobUrl(input), canonical, `canonical_url de ${input}`);
-  assert.equal(extractSourceJobId(input), sourceJobId, `source_job_id de ${input}`);
-  assert.equal(canonicalizeJobUrl(canonical), canonical, `canonicalização idempotente para ${canonical}`);
-}
-// A regra continua exigindo destino público.
-assert.throws(() => canonicalizeJobUrl("https://localhost/jobs/1"), /privado/u);
-console.log(`url-canonical: ${cases.length} casos de URL ok`);
+test("canonicalização por portal e source_job_id", () => {
+  for (const [input, canonical, sourceJobId] of cases) {
+    assert.equal(canonicalizeJobUrl(input), canonical, `canonical_url de ${input}`);
+    assert.equal(extractSourceJobId(input), sourceJobId, `source_job_id de ${input}`);
+    assert.equal(canonicalizeJobUrl(canonical), canonical, `canonicalização idempotente para ${canonical}`);
+  }
+  // A regra continua exigindo destino público.
+  assert.throws(() => canonicalizeJobUrl("https://localhost/jobs/1"), /privado/u);
+});
 
 // Migração: vagas gravadas com a regra antiga ganham a URL canônica nova e, quando passam a
 // coincidir com outra vaga da mesma empresa, viram possível duplicata (nunca mescla).
@@ -55,37 +57,40 @@ const directory = mkdtempSync(join(tmpdir(), "radar-url-canonical-"));
 process.env.RADAR_DB_PATH = join(directory, "canonical.sqlite");
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 try {
-  const first = await import(`../dist/src/db.js?canonical=${Date.now()}`);
-  assert.ok(first.db.prepare("SELECT 1 FROM schema_migrations WHERE name='recanonicalize_job_urls_v1'").get());
-  const timestamp = new Date().toISOString();
-  const insert = first.db.prepare(`INSERT INTO jobs (id,title,company,source,source_url,job_url,canonical_url,project_id,status,created_at,updated_at)
+  await test("migração recalcula canonical_url e aponta duplicatas", async () => {
+    const first = await importStore("canonical");
+    assert.ok(first.db.prepare("SELECT 1 FROM schema_migrations WHERE name='recanonicalize_job_urls_v1'").get());
+    const timestamp = new Date().toISOString();
+    const insert = first.db.prepare(`INSERT INTO jobs (id,title,company,source,source_url,job_url,canonical_url,project_id,status,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,'found',?,?)`);
-  const legacy = "https://www.linkedin.com/jobs/view/4012345678?refId=abc";
-  insert.run("legacy-a", "Analista de Dados", "Empresa Exemplo Ltda", "linkedin", legacy, legacy, legacy, "busca-emprego", "2026-09-01T00:00:00.000Z", timestamp);
-  const other = "https://linkedin.com/jobs/view/4012345678?trackingId=xyz";
-  insert.run("legacy-b", "Analista de Dados Pleno", "Empresa Exemplo", "linkedin", other, other, other, "busca-emprego", "2026-09-02T00:00:00.000Z", timestamp);
-  insert.run("legacy-c", "Analista de Dados", "Outra Empresa", "linkedin", other, other, other, "busca-emprego", "2026-09-03T00:00:00.000Z", timestamp);
-  first.db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at)
+    const legacy = "https://www.linkedin.com/jobs/view/4012345678?refId=abc";
+    insert.run("legacy-a", "Analista de Dados", "Empresa Exemplo Ltda", "linkedin", legacy, legacy, legacy, "busca-emprego", "2026-09-01T00:00:00.000Z", timestamp);
+    const other = "https://linkedin.com/jobs/view/4012345678?trackingId=xyz";
+    insert.run("legacy-b", "Analista de Dados Pleno", "Empresa Exemplo", "linkedin", other, other, other, "busca-emprego", "2026-09-02T00:00:00.000Z", timestamp);
+    insert.run("legacy-c", "Analista de Dados", "Outra Empresa", "linkedin", other, other, other, "busca-emprego", "2026-09-03T00:00:00.000Z", timestamp);
+    first.db.prepare(`INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at)
     VALUES ('occ-a','busca-emprego','legacy-a',NULL,'linkedin',NULL,?,?,'h',?)`).run(legacy, legacy, timestamp);
-  first.db.prepare("DELETE FROM schema_migrations WHERE name='recanonicalize_job_urls_v1'").run();
-  first.db.close();
+    first.db.prepare("DELETE FROM schema_migrations WHERE name='recanonicalize_job_urls_v1'").run();
+    // Banco anterior ao versionamento: sem "0001_baseline" registrado, o baseline roda de novo na abertura.
+    first.db.prepare("DELETE FROM schema_migrations WHERE name='0001_baseline'").run();
+    first.db.close();
 
-  const second = await import(`../dist/src/db.js?canonical-rerun=${Date.now()}`);
-  const jobs = second.db.prepare("SELECT id,canonical_url,job_url FROM jobs WHERE id LIKE 'legacy-%' ORDER BY id").all();
-  for (const job of jobs) {
-    assert.equal(job.canonical_url, "https://linkedin.com/jobs/view/4012345678", `canonical_url recalculada de ${job.id}`);
-    assert.equal(job.job_url, "https://linkedin.com/jobs/view/4012345678", `job_url recalculada de ${job.id}`);
-  }
-  assert.equal(second.db.prepare("SELECT canonical_url FROM job_occurrences WHERE id='occ-a'").get().canonical_url, "https://linkedin.com/jobs/view/4012345678");
-  const duplicates = second.db.prepare("SELECT job_id,candidate_job_id,status,reasons_json FROM possible_duplicates").all();
-  assert.equal(duplicates.length, 1, "só a mesma empresa normalizada vira possível duplicata");
-  assert.equal(duplicates[0].job_id, "legacy-b");
-  assert.equal(duplicates[0].candidate_job_id, "legacy-a", "a vaga mais antiga é a candidata");
-  assert.equal(duplicates[0].status, "pending");
-  assert.ok(JSON.parse(duplicates[0].reasons_json).includes("same_canonical_url_after_recanonicalization"));
-  assert.ok(second.getJob("legacy-b"), "a migração não mescla nem apaga vagas");
-  second.db.close();
-  console.log("url-canonical: migração recalcula canonical_url e aponta duplicatas");
+    const second = await importStore("canonical-rerun");
+    const jobs = second.db.prepare("SELECT id,canonical_url,job_url FROM jobs WHERE id LIKE 'legacy-%' ORDER BY id").all();
+    for (const job of jobs) {
+      assert.equal(job.canonical_url, "https://linkedin.com/jobs/view/4012345678", `canonical_url recalculada de ${job.id}`);
+      assert.equal(job.job_url, "https://linkedin.com/jobs/view/4012345678", `job_url recalculada de ${job.id}`);
+    }
+    assert.equal(second.db.prepare("SELECT canonical_url FROM job_occurrences WHERE id='occ-a'").get().canonical_url, "https://linkedin.com/jobs/view/4012345678");
+    const duplicates = second.db.prepare("SELECT job_id,candidate_job_id,status,reasons_json FROM possible_duplicates").all();
+    assert.equal(duplicates.length, 1, "só a mesma empresa normalizada vira possível duplicata");
+    assert.equal(duplicates[0].job_id, "legacy-b");
+    assert.equal(duplicates[0].candidate_job_id, "legacy-a", "a vaga mais antiga é a candidata");
+    assert.equal(duplicates[0].status, "pending");
+    assert.ok(JSON.parse(duplicates[0].reasons_json).includes("same_canonical_url_after_recanonicalization"));
+    assert.ok(second.getJob("legacy-b"), "a migração não mescla nem apaga vagas");
+    second.db.close();
+  });
 } finally {
   rmSync(directory, { recursive: true, force: true });
 }

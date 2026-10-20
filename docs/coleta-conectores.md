@@ -15,7 +15,7 @@ navega só portais sem API e enriquece o que a cascata não resolveu.
 | `workable` | `GET https://apply.workable.com/api/v1/widget/accounts/{conta}` | conta | |
 
 Código: `src/connectors/sources.ts` (normalizadores puros), testes de contrato em
-`test/connectors.test.mjs` com cargas de `test/fixtures/connector-payloads.mjs`.
+`test/e2e/connectors.test.mjs` com cargas de `test/fixtures/connector-payloads.mjs`.
 
 **Gupy.** A API oficial é só para empresas clientes. O conector usa o JSON público do portal, que
 pode mudar sem aviso; por isso o normalizador aceita nomes alternativos de campo (`name`/`title`,

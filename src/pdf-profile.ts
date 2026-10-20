@@ -273,6 +273,16 @@ async function extractWithPdfjs(bytes: Uint8Array): Promise<PdfjsPages> {
 
 const WORKER_KIND = "radar-pdf-extract";
 
+/**
+ * Só quando o módulo roda direto do fonte .ts (testes com `node --import tsx`): no Node 22.16 os
+ * hooks do tsx herdados pelo worker dependem da thread principal, que fica parada em Atomics.wait
+ * na extração síncrona (deadlock até o timeout). O worker então carrega o .ts com type stripping
+ * nativo, sem hooks. No build (dist/*.js) as opções ficam vazias e nada muda.
+ */
+const WORKER_EXEC_OPTIONS = new URL(import.meta.url).pathname.endsWith(".ts")
+  ? { execArgv: ["--experimental-strip-types", "--disable-warning=ExperimentalWarning"] }
+  : {};
+
 interface WorkerInput {
   kind: typeof WORKER_KIND;
   bytes: Uint8Array;
@@ -310,6 +320,7 @@ if (!isMainThread && (workerData as Partial<WorkerInput> | null)?.kind === WORKE
 
 function startExtractionWorker(bytes: Uint8Array, signal: Int32Array, port: MessagePort): Worker {
   return new Worker(new URL(import.meta.url), {
+    ...WORKER_EXEC_OPTIONS,
     workerData: { kind: WORKER_KIND, bytes: new Uint8Array(bytes), port, signal },
     transferList: [port],
     resourceLimits: PDF_WORKER_RESOURCE_LIMITS,

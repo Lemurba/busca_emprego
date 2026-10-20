@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
-const directory = mkdtempSync(join(tmpdir(), "radar-sdd-rounds-"));
-process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
-const store = await import(`../dist/src/db.js?rounds=${Date.now()}`);
+const { store, cleanup } = await openTempStore("radar-sdd-rounds", "test.sqlite");
+after(cleanup);
 
-try {
+test("SDD round readiness, transaction, counters, sightings, and idempotency", async () => {
   const profile = store.createProfessionalProfile({ context: { role_families: ["Dados"] } }, "tester");
   store.answerProfileInterview(profile.id, "target_role", "Analista", "tester");
   store.answerProfileInterview(profile.id, "target_role", "Engenheiro", "tester");
@@ -96,8 +94,4 @@ try {
   assert.equal(store.getJob(firstJobId).title, "Título confirmado pelo usuário");
   assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM field_conflicts WHERE job_id=? AND field_path='title' AND status='pending'").get(firstJobId).count, 1);
 
-  console.log("SDD round readiness, transaction, counters, sightings, and idempotency checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

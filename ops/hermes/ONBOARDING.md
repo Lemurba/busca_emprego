@@ -43,7 +43,7 @@ mkdir -p /opt/data/dashboard && chown radar:radar /opt/data/dashboard
 # daqui em diante como radar (ex.: s6-setuidgid radar sh)
 git clone <url-do-repositorio> /opt/data/dashboard/busca_emprego
 cd /opt/data/dashboard/busca_emprego
-npm ci && npm test            # Node >= 22.16 (node:sqlite com isTransaction); a CI usa Node 24
+npm ci && npm run build && npm test   # Node >= 22.16 (node:sqlite com isTransaction); a CI usa Node 22.16 e 24
 cp ops/hermes/radar.env.example .env.local && chmod 600 .env.local
 mkdir -p data && chmod 700 data   # radar.sqlite, -wal e -shm nascem com modo 600 (umask 077 no run do s6)
 ```
@@ -211,7 +211,7 @@ O backup agendado (`hermes/cron/radar-backup.sh`: backup, teste de restore, cóp
 3. `hermes mcp test radar-vagas-<papel>` para os quatro papéis; numa sessão, `skills_list` mostra `radar-vagas`.
 4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido.
 5. `node scripts/ops/notify-human-questions.mjs` (simulação) e `node scripts/ops/telegram-diagnose.mjs`.
-6. `node test/executor.test.mjs` antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
+6. `node test/e2e/executor.test.mjs` (após `npm run build`) antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
 7. `hermes cron run <job_id>` do watchdog com o app no ar: nenhuma mensagem.
 
 ## 11. Rotação e recuperação

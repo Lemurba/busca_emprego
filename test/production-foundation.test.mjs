@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { openTempStore } from "./helpers/temp-db.mjs";
 
-const directory = mkdtempSync(join(tmpdir(), "radar-production-"));
-process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 
-const store = await import(`../dist/src/db.js?production=${Date.now()}`);
-try {
+const { store, cleanup } = await openTempStore("radar-production", "test.sqlite");
+after(cleanup);
+test("Production foundation feedback, validation, and persisted workflow", async () => {
   const defaultAgents = store.listAgentConfigs();
   const portalAgents = defaultAgents.filter((agent) => agent.role_type === "source_scout" && agent.name.startsWith("Coletor — "));
   assert.equal(defaultAgents.length, 24);
@@ -107,8 +105,4 @@ try {
     name: "Agente inseguro", role_type: "custom", tool_scopes: ["applications.submit"], editable_fields: []
   }, "tester"), /tool_scopes.forbidden/);
 
-  console.log("Production foundation feedback, validation, and persisted workflow checks passed.");
-} finally {
-  store.db.close();
-  rmSync(directory, { recursive: true, force: true });
-}
+});

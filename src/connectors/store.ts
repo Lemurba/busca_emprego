@@ -1,46 +1,12 @@
 // Persistência dos conectores determinísticos: lista curada de empresas por conector (editável no
 // painel) e fila de vagas que a cascata não conseguiu enriquecer sem LLM. Tabelas próprias, no
-// mesmo SQLite, para não mexer no esquema central de src/db.ts.
+// mesmo SQLite, separadas do esquema central (criadas pelo baseline em src/db/migrations/).
 import { createHash } from "node:crypto";
 import { db } from "../db.js";
 import { connectorById, CONNECTORS } from "./sources.js";
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS connector_companies (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    connector TEXT NOT NULL,
-    slug TEXT NOT NULL,
-    name TEXT NOT NULL,
-    query TEXT NOT NULL DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    last_run_at TEXT,
-    last_status TEXT,
-    last_error TEXT,
-    last_count INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(project_id, connector, slug)
-  );
-
-  CREATE TABLE IF NOT EXISTS connector_enrichment_queue (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    source_job_id TEXT,
-    job_url TEXT NOT NULL,
-    title TEXT NOT NULL,
-    company TEXT NOT NULL,
-    round_id TEXT,
-    reason TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','dismissed')),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_connector_companies_project ON connector_companies(project_id, connector, enabled);
-  CREATE INDEX IF NOT EXISTS idx_connector_queue_status ON connector_enrichment_queue(project_id, status, created_at);
-`);
+// As tabelas connector_companies e connector_enrichment_queue são criadas pela migração
+// 0001_baseline (src/db/migrations/), aplicada quando src/db.ts abre o banco.
 
 export interface ConnectorCompany {
   id: string;

@@ -3,7 +3,7 @@
 # O prefixo do location precisa ser igual a RADAR_BASE_PATH no .env.local
 # (RADAR_BASE_PATH=/plugins/busca-emprego/) e o host deve estar em RADAR_ALLOWED_HOSTS.
 # O proxy_pass com "/" no fim remove o prefixo; o servidor também aceita o caminho com prefixo.
-# Coberto por test/base-path.test.mjs (teste HTTP com o mesmo prefixo).
+# Coberto por test/e2e/base-path.test.mjs (teste HTTP com o mesmo prefixo).
 #
 # O link de sessão é /auth?token=<RADAR_DASHBOARD_TOKEN>: a query string de /auth
 # não pode ir para o log. Defina no contexto `http {}` (log_format não vale dentro

@@ -1,6 +1,6 @@
 // Conectores determinísticos por ATS. Cada um busca a lista pública de vagas de uma empresa e
 // a converte para o formato de ingestRoundBatch. Os normalizadores são funções puras exportadas
-// (testes de contrato em test/connectors.test.mjs) e toleram campos ausentes, renomeados ou extras:
+// (testes de contrato em test/e2e/connectors.test.mjs) e toleram campos ausentes, renomeados ou extras:
 // um registro sem título, empresa ou URL HTTPS pública é descartado e contado em `skipped`,
 // nunca derruba o lote inteiro.
 //
