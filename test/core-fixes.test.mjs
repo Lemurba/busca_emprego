@@ -7,6 +7,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
+import { markJobOpen } from "./helpers/liveness.mjs";
+import { atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-core-fixes-"));
@@ -29,7 +31,7 @@ function newJob(overrides = {}) {
   counter += 1;
   return store.upsertJob({
     id: `core-job-${counter}`, title: `Vaga núcleo ${counter}`, company: "Empresa Núcleo", source: "fixture",
-    source_url: `https://jobs.example.test/core/${counter}`, application_url: `https://jobs.example.test/core/${counter}/apply`, ...overrides,
+    source_url: `https://jobs.example.test/core/${counter}`, application_url: atsUrl(`core-${counter}`), ...overrides,
   });
 }
 
@@ -40,6 +42,7 @@ function approvedJob(overrides = {}, mode = "assisted") {
   store.reviewResume(resume.id, { verdict: "pass" }, "reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id, automation_mode: mode });
+  markJobOpen(store, job.id);
   return { job, resume, application };
 }
 
@@ -285,9 +288,12 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
     assert.equal(notesOnly.status, "in_progress", "re-sending the current status is a no-op, not a transition");
     assert.equal(notesOnly.notes, "aguardando portal");
     assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "intruso", evidence_ref: "portal:ok" }), /worker_mismatch/);
-    assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/outra" }), /application\.url_mismatch/);
+    assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: atsUrl("outra") }), /application\.url_mismatch/);
     assert.equal(authState(run.application.id), "claimed");
-    const done = store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: `${run.job.application_url}?utm_source=x` });
+    // #32: dry-run — sem a confirmação final humana e o token o envio é recusado.
+    assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: run.job.application_url }), /application\.final_confirmation_required/);
+    const token = confirmFinal(store, run.application.id, "worker-c1", run.job.application_url);
+    const done = store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: `${run.job.application_url}?utm_source=x`, submit_token: token });
     assert.equal(done.status, "submitted");
     assert.equal(authState(run.application.id), "consumed");
     assert.equal(store.getJob(run.job.id).status, "applied");
@@ -348,8 +354,8 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
       const insert = seed.db.prepare("INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,score_final,criteria_json,created_at) VALUES (?,?,?,NULL,NULL,?,?,?,?,'[]',?)");
       insert.run("old-1", "busca-emprego", "legacy-score-job", 50, 100, "low_match", 50, "2026-01-01T00:00:00.000Z");
       insert.run("old-2", "busca-emprego", "legacy-score-job", 70, 100, "review", 70, "2026-02-01T00:00:00.000Z");
-      // Banco anterior ao versionamento: sem "0001_baseline" registrado, o baseline roda de novo na abertura.
-      seed.db.exec("DELETE FROM schema_migrations WHERE name='0001_baseline'");
+      // Banco anterior ao versionamento: nenhuma migração versionada registrada; todas rodam de novo na abertura.
+      seed.db.exec("DELETE FROM schema_migrations WHERE name GLOB '[0-9][0-9][0-9][0-9]_*'");
     } finally {
       seed.db.close();
     }

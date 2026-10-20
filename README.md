@@ -65,6 +65,18 @@ No Kanban atual, os cartões permanecem compactos. Ao abrir um cartão, o usuár
 
 PDFs de até 5 MB são guardados no SQLite local e podem ser selecionados, baixados e vinculados a currículos ATS. Os PDFs não são enviados para a API de eventos dos agentes; use o identificador do currículo-base e a rota `/api/base-resumes/{id}/file` quando a integração precisar lê-lo.
 
+### Importar e exportar em JSON Resume
+
+O Radar lê e grava currículos no formato aberto [JSON Resume v1](https://jsonresume.org/schema), sem trocar o modelo interno: o documento vira **fatos do perfil profissional**, e a exportação é montada a partir dos fatos confirmados.
+
+- **Importar** (`POST /api/profiles/import/json-resume`, corpo = o próprio documento, até 1 MB; na tela *Currículos*, botão “Importar JSON Resume”): cria uma **nova versão do perfil em rascunho** com `source: json_resume` e sem PDF-base. Cada trecho vira um fato `origin: import`, `state: proposed`, cuja evidência é o JSON Pointer de origem (`/work/0`, `/skills/1`...). Mapeamento: `basics.name` → `name`, `label` → `role`, `email` → `contact_email`, `phone` → `contact_phone`, `url` e `profiles[]` → `professional_link`, `summary` → `summary`, `location` → `location`; `work[]` → `experience` (`company`, `position`, datas, `summary`, `highlights[]`), `education[]` → `education`, `certificates[]` → `certifications`, `skills[]` → `skills`, `languages[]` → `languages`, `projects[]` → `projects`. Outras seções (`volunteer`, `awards`, `publications`...) são ignoradas. Datas aceitas: `YYYY`, `YYYY-MM` ou `YYYY-MM-DD`; URLs só `http(s)`. Documento inválido responde `422 profile.import.invalid` com o caminho do erro em `message` e `details[].path`; documento sem nada aproveitável, `422 profile.import.empty`.
+- **Confirmar**: o fluxo é o de sempre (revisar cada fato e confirmar o perfil, que gera o snapshot). Fato `import` só é confirmável com o JSON Pointer como evidência.
+- **Gerar currículo ATS**: perfis `json_resume` dispensam o PDF-base (`base_resume_id` opcional em `/api/resumes/generate`, sem exigir extração). Perfis de PDF continuam exigindo o PDF extraído.
+- **Exportar um currículo** (`GET /api/resumes/{id}/files/json`, botão “JSON Resume” ao lado de PDF/DOCX): `basics`, `education`, `certificates`, `languages`, `skills` e `projects` vêm dos fatos confirmados do snapshot gravado no currículo (ou, sem ele, do perfil confirmado atual); `work[]` vem dos fatos de experiência, com `highlights` tirados das linhas do conteúdo salvo agrupadas sob a linha que cita a empresa (melhor esforço; experiência sem linhas próprias mantém os destaques do fato). Linhas não atribuídas vão para `meta.radar.unmapped[]`. `meta.radar` traz `resume_id`, `version`, `status`, `content_sha256` (SHA-256 do conteúdo), `approved_at` (se aprovado), `exported_at` e o snapshot usado. Exportar não altera o currículo.
+- **Exportar o perfil-mestre** (`GET /api/profiles/{id}/export/json-resume`, link na tela *Operações*): só fatos confirmados.
+
+Fatos de texto livre extraídos do PDF são exportados como texto (ex.: `skills` vira um grupo “Habilidades”); a fidelidade campo a campo vale para fatos importados.
+
 O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcadores exigem latitude e longitude fornecidas com cada vaga; a aplicação não geocodifica automaticamente endereços. O mapa-base requer conexão com a internet.
 
 ## API Hermes
@@ -84,6 +96,9 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `POST` | `/api/resumes` | Criar currículo em rascunho para vaga de interesse |
 | `POST` | `/api/resumes/{id}/approve` | Registrar aprovação humana da versão salva |
 | `GET` / `POST` | `/api/base-resumes` | Consultar a biblioteca ou enviar um PDF-base |
+| `POST` | `/api/profiles/import/json-resume` | Importar um JSON Resume como novo perfil em rascunho |
+| `GET` | `/api/resumes/{id}/files/json` | Baixar o currículo em JSON Resume (também `pdf`/`docx`) |
+| `GET` | `/api/profiles/{id}/export/json-resume` | Exportar os fatos confirmados do perfil em JSON Resume |
 | `GET` | `/api/authorized-applications` | Entregar ao executor apenas candidaturas explicitamente autorizadas |
 | `GET` | `/api/preferences` | Consultar regras, sinais e sugestões de preferências |
 | `POST` | `/api/applications/{id}/questions` | Pausar candidatura por dúvida humana correlacionada |

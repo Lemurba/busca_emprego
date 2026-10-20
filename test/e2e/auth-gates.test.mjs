@@ -71,7 +71,7 @@ try {
   let resumeId = "";
   let applicationId = "";
   await test("#10: interesse → APROVO → candidatura → AUTORIZO exigem sessão; token de serviço recebe 403", async () => {
-    const job = await svc("POST", "/api/jobs", { title: "Vaga portão humano", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/gate", application_url: "https://jobs.example.test/gate/apply" });
+    const job = await svc("POST", "/api/jobs", { title: "Vaga portão humano", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/gate", application_url: "https://boards.greenhouse.io/exemplo/jobs/gate" });
     assert.equal(job.status, 201, JSON.stringify(job.data));
     jobId = job.data.id;
 
@@ -93,6 +93,8 @@ try {
 
     await refusedToService("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeId, confirmation: "AUTORIZO" });
     assert.equal((await svc("GET", "/api/authorized-applications")).data.length, 0, "sem AUTORIZO humano a fila fica vazia");
+    // #33: AUTORIZO exige a vaga confirmada aberta (aqui, confirmação manual do usuário).
+    assert.equal((await human("PATCH", `/api/jobs/${jobId}`, { opening_status: "open", opening_checked_at: new Date().toISOString() })).status, 200);
     assert.equal((await human("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeId, confirmation: "AUTORIZO" })).status, 200);
     assert.equal((await svc("GET", "/api/authorized-applications")).data.length, 1);
 

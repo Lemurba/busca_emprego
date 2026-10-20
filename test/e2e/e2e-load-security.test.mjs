@@ -52,6 +52,8 @@ try {
       ["POST", "/api/agent-events"],
       ["GET", "/api/authorized-applications"],
       ["POST", "/api/applications/missing/claim"],
+      ["POST", "/api/applications/missing/final-confirmation"],
+      ["POST", "/api/applications/missing/final-confirmation/poll"],
       ["POST", "/api/rounds/missing/batch"],
       ["POST", "/api/rounds/missing/status"],
       ["POST", "/api/jobs/missing/score"],
@@ -75,7 +77,7 @@ try {
     disabledChild.stderr.on("data", (chunk) => disabledStderr += chunk);
     try {
       await waitReady(disabledBase, () => disabledStderr);
-      const disabledRoutes = internalRoutes.filter(([, path]) => path === "/api/authorized-applications" || path.includes("/claim") || path.includes("/questions") || path.includes("/delivery") || path.includes("/answer"));
+      const disabledRoutes = internalRoutes.filter(([, path]) => path === "/api/authorized-applications" || path.includes("/claim") || path.includes("/final-confirmation") || path.includes("/questions") || path.includes("/delivery") || path.includes("/answer"));
       disabledRoutes.push(["POST", "/api/applications/missing/authorize-auto"]);
       // AUTORIZO é portão humano: chega à checagem de automação só com a sessão do dashboard.
       const disabledCookie = ((await fetch(`${disabledBase}/auth?token=${dashboardToken}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } })).headers.get("set-cookie") ?? "").split(";")[0];
@@ -85,6 +87,10 @@ try {
         assert.equal(response.status, 403, `${method} ${path} must be disabled by default`);
         assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
       }
+      // #32: autorizar é decisão humana — o token de serviço é recusado antes do gate.
+      const authorize = await fetch(`${disabledBase}/api/applications/missing/authorize-auto`, { method: "POST", headers: authHeaders, body: "{}" });
+      assert.equal(authorize.status, 403);
+      assert.equal((await authorize.json()).error, "human_session_required");
     } finally {
       disabledChild.kill("SIGTERM");
       await new Promise((resolve) => { disabledChild.once("exit", resolve); setTimeout(resolve, 2000); });

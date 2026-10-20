@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,7 @@ function approved(overrides = {}) {
   store.reviewResume(resume.id, { verdict: "pass" }, "reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
+  markJobOpen(store, job.id);
   return { job, resume, application };
 }
 const thrown = (fn) => { try { fn(); } catch (error) { return error; } assert.fail("deveria lançar"); };
@@ -71,10 +73,10 @@ try {
   });
 
   await test("claim recusa se a application_url virou http depois da autorização", () => {
-    const { job, application, resume } = approved({ source_url: "https://careers.example.test/c/1", application_url: "https://careers.example.test/c/1/apply" });
+    const { job, application, resume } = approved({ source_url: "https://careers.example.test/c/1", application_url: "https://boards.greenhouse.io/exemplo/jobs/c1" });
     store.authorizeAutoApplication(application.id, resume.id, "AUTORIZO");
     const entry = store.listAuthorizedApplications().find((item) => item.id === application.id);
-    store.db.prepare("UPDATE jobs SET application_url=? WHERE id=?").run("http://careers.example.test/c/1/apply", job.id);
+    store.db.prepare("UPDATE jobs SET application_url=? WHERE id=?").run("http://boards.greenhouse.io/exemplo/jobs/c1", job.id);
     const error = thrown(() => store.claimAuthorizedApplication(application.id, "worker-http", entry.nonce));
     assert.equal(error.code, "application.url.insecure");
   });

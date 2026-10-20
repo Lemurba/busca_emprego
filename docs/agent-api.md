@@ -264,6 +264,22 @@ Registra que o usuário revisou a versão salva do currículo. Corpo:
 
 A vaga precisa continuar marcada como de interesse. A resposta `200` contém o currículo aprovado. A aprovação não inicia candidatura e não concede autorização automática.
 
+Antes de qualquer outra regra, a checagem de fatos roda de novo: se a versão tiver afirmação bloqueante sem fato confirmado, a resposta é `409 resume.unverified_facts`, mesmo com `override_reason` (a justificativa só dispensa os demais achados da revisão ATS).
+
+### Checagem de fatos do currículo
+
+Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extraídas e conferidas contra os fatos confirmados do snapshot do perfil (o do currículo ou, sem ele, o do perfil ativo). Números, datas, empresas, cargos, títulos acadêmicos e certificações sem fato confirmado ficam `pending` e bloqueiam o APROVO; tecnologia fora do perfil é só aviso (`warning`).
+
+| Rota | Uso |
+| --- | --- |
+| `GET /api/resumes/{id}/facts` | `{ resume_version, pending, warnings, covered, resolved }`; cada item tem `claim_id`, `claim_kind`, `claim_text`, `spans` e `status` |
+| `POST /api/resumes/{id}/facts/{claimId}` | Só com sessão do painel (token de serviço → `403 human_session_required`). Corpo `{ "action": "confirm" \| "correct" \| "remove", "replacement"?: string }` |
+
+- `confirm`: cria a versão N+1 do perfil (cópia da confirmada + o fato com origem `user`), confirma, gera snapshot novo e religa o currículo a ele; o conteúdo não muda.
+- `correct` / `remove`: troca ou remove todas as ocorrências do trecho e salva nova versão do currículo, checada de novo.
+
+`POST /api/resumes/{id}/review` calcula o veredito no servidor (`verdict: "pass"` do cliente é ignorado; `verdict: "fail"` e `findings` só endurecem). Achados: `facts.unverified:N`, `content.empty`, `content.placeholder` (rascunho-padrão do painel) e, para o redator, as checagens estritas de fatos usados. Conteúdo sem nenhuma afirmação verificável passa. O bootstrap traz `fact_check: { pending, warnings }` em cada currículo e `radar_create_resume` devolve `fact_check.pending` para o agente.
+
 ### Biblioteca de PDFs-base
 
 | Método e rota | Uso |
@@ -306,9 +322,15 @@ Resposta `200` com `Application` atualizado ou `null` se não existir.
 | Método e rota | Comportamento |
 | --- | --- |
 | `POST /api/applications/{id}/select-manual` | Escolhe o modo manual em uma candidatura aguardando início; remove uma autorização automática pendente |
-| `POST /api/applications/{id}/authorize-auto` | Registra autorização automática para uma vaga e versão de currículo |
+| `POST /api/applications/{id}/authorize-auto` | Registra autorização automática para uma vaga e versão de currículo. **Só sessão do dashboard** (token de serviço → `403 session_required`); link fora de ATS permitido → `422 application.domain.not_ats` |
 | `POST /api/applications/{id}/revoke-auto` | Revoga a autorização antes do início do envio |
 | `GET /api/authorized-applications` | Lista somente candidaturas em fila com autorização ainda válida |
+| `POST /api/applications/{id}/final-confirmation` | (token interno) dry-run: `{worker_id, observed_url, fields_summary: [{label, value}] (≤100; valor ≤500), screenshot_base64 (PNG ≤2 MB)}` → `awaiting_final_confirmation` |
+| `POST /api/applications/{id}/final-confirmation/poll` | (token interno) `{worker_id}` → `not_requested`, `pending`, `paused` ou `confirmed`; a primeira consulta após o ENVIAR devolve o `submit_token` (uma vez) |
+| `POST /api/applications/{id}/confirm-final` | (só sessão) `{confirmation: "ENVIAR"}`: segunda confirmação humana desta execução |
+| `POST /api/applications/{id}/cancel-final` | (só sessão) revoga a autorização e devolve a candidatura para revisão |
+| `GET /api/applications/{id}/evidence/{evidenceId}` | (só sessão) captura PNG enviada no dry-run |
+| `GET /api/settings/automation` / `PUT` | estado do kill-switch, limite diário, limite por ATS, allowlist e uso de hoje; `PUT` (só sessão) aceita `{enabled, daily_limit, per_ats_limit, ats_allowlist}` |
 
 Para autorizar, envie `resume_id` e a confirmação exata `AUTORIZO`:
 
@@ -326,7 +348,9 @@ A vaga deve estar marcada como de interesse, o currículo associado deve estar a
 | `claim --application <id>` | `POST /api/applications/{id}/claim` | usa o `nonce` da fila, grava o estado local em `.radar/executor/<id>.json` |
 | `heartbeat` | `POST /api/applications/{id}/heartbeat` | renova o lease do claim (`{worker_id}` → `lease_expires_at`); rode logo antes do clique final — erro significa não enviar |
 | `verify --observed-url <url>` | — (mesma `canonicalizeJobUrl` de `dist/src/domain.js`) | aborta se a URL aberta difere da autorizada |
-| `submit --evidence-ref <ref>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id` e sem evidência observada no portal |
+| `request-confirmation --observed-url <url> --screenshot <png> [--fields <json>]` | `POST /api/applications/{id}/final-confirmation` | dry-run antes do clique final |
+| `confirmation-status` | `POST /api/applications/{id}/final-confirmation/poll` | mostra o `submit_token` uma única vez |
+| `submit --evidence-ref <ref> --observed-url <url> --submit-token <t>` | `POST /api/applications/{id}/submit` | recusa sem `claim` do mesmo `worker_id`, sem evidência, sem URL observada e sem token (`422 application.final_confirmation_required`); limite diário → `429 application.daily_limit_reached` |
 | `fail --reason <código>` | `POST /api/applications/{id}/fail` | grava só o código do motivo; a vaga volta para revisão |
 | `ask --field-ref <campo> --question <texto>` | `POST /api/applications/{id}/questions` | pausa a candidatura; a ponte Telegram entrega |
 | `status` | `GET /api/bootstrap` | estado local + estado no app |
