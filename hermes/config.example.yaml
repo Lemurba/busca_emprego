@@ -118,8 +118,9 @@ mcp_servers:
       RADAR_AUTHORIZATION_SECRET: "${env:RADAR_AUTHORIZATION_SECRET}"
       TELEGRAM_ALLOWED_USERS: "${env:TELEGRAM_ALLOWED_USERS}"
       TELEGRAM_HOME_CHANNEL: "${env:TELEGRAM_HOME_CHANNEL}"
-      # Gate da candidatura automática: sem "true" a fila, claim/verify/submit/fail e as
-      # perguntas humanas respondem automation_disabled.
+      # Gate da candidatura automática: sem "true" a fila, claim/verify, confirmação final,
+      # submit/fail e as perguntas humanas respondem automation_disabled. É o teto: o
+      # kill-switch do painel (settings no SQLite) pausa tudo mesmo com "true".
       RADAR_AUTO_APPLICATION_ENABLED: "${env:RADAR_AUTO_APPLICATION_ENABLED}"
     trust: untrusted
     tools:
@@ -132,6 +133,8 @@ mcp_servers:
         # escrita
         - radar_claim_application
         - radar_heartbeat_application
+        - radar_request_final_confirmation
+        - radar_get_final_confirmation
         - radar_submit_application
         - radar_fail_application
         - radar_ask_human

@@ -4,13 +4,15 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
 import { projectId } from "./config.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
+import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
+import { getResumeFactChecks, resolveResumeFact } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { connectorRoutes } from "./connectors/routes.js";
 import { schemas, validateBody } from "./http-schemas.js";
@@ -96,7 +98,7 @@ function isInternalRequest(method: string | undefined, pathname: string) {
   return method === "GET" && (pathname === "/api/authorized-applications" || pathname === "/api/liveness/due")
     || method === "POST" && (
       pathname === "/api/agent-events"
-      || /^\/api\/applications\/[^/]+\/(?:claim|heartbeat|questions|submit|fail)$/u.test(pathname)
+      || /^\/api\/applications\/[^/]+\/(?:claim|heartbeat|questions|submit|fail|final-confirmation|final-confirmation\/poll)$/u.test(pathname)
       || /^\/api\/rounds\/[^/]+\/(?:batch|status)$/u.test(pathname)
       || /^\/api\/jobs\/[^/]+\/score$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
@@ -106,7 +108,7 @@ function isInternalRequest(method: string | undefined, pathname: string) {
 function isAutomationRequest(method: string | undefined, pathname: string) {
   return method === "GET" && pathname === "/api/authorized-applications"
     || method === "POST" && (
-      /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|heartbeat|questions|submit|fail)$/u.test(pathname)
+      /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|heartbeat|questions|submit|fail|final-confirmation|final-confirmation\/poll|confirm-final)$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
     );
 }
@@ -115,19 +117,23 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
  * Portões humanos (#10): interesse, desfazer/descartar, APROVO, candidatura, AUTORIZO, revogação,
  * modo manual, registro de envio, confirmação de perfil, termos de fonte e criação/publicação de agente
  * só valem com a sessão do dashboard. O token de serviço (Hermes, scripts) recebe 403.
+ * #32: também a confirmação final do envio (ENVIAR) e o cancelamento, o kill-switch/limites
+ * (`PUT /api/settings/automation`) e a captura da confirmação final.
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
   return method === "POST" && (
     pathname === "/api/applications" || pathname === "/api/agents"
     || /^\/api\/jobs\/[^/]+\/(?:decision|decision\/undo|feedback|restore|unsuppress)$/u.test(pathname)
-    || /^\/api\/resumes\/[^/]+\/approve$/u.test(pathname)
-    || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual)$/u.test(pathname)
+    || /^\/api\/resumes\/[^/]+\/(?:approve|facts\/[^/]+)$/u.test(pathname)
+    || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual|confirm-final|cancel-final)$/u.test(pathname)
     || /^\/api\/profiles\/[^/]+\/confirm$/u.test(pathname)
     || /^\/api\/sources\/[^/]+\/terms$/u.test(pathname)
     || /^\/api\/agents\/[^/]+\/(?:publish|rollback)$/u.test(pathname)
   )
     || method === "PATCH" && /^\/api\/applications\/[^/]+$/u.test(pathname)
-    || method === "DELETE" && /^\/api\/jobs\/[^/]+$/u.test(pathname);
+    || method === "DELETE" && /^\/api\/jobs\/[^/]+$/u.test(pathname)
+    || method === "PUT" && pathname === "/api/settings/automation"
+    || method === "GET" && /^\/api\/applications\/[^/]+\/evidence\/[^/]+$/u.test(pathname);
 }
 
 /** Nome do serviço declarado pelo chamador do token (só rotula a auditoria; não dá permissão). */
@@ -197,6 +203,8 @@ function attachment(res: ServerResponse, mimeType: string, fileName: string, dat
 }
 
 const S = "([^/]+)";
+/** Captura PNG de até 2 MB em base64 (~2,8 MB) + resumo dos campos. */
+const FINAL_CONFIRMATION_BODY_LIMIT = 4 * 1024 * 1024;
 const r = (path: string) => new RegExp(`^${path.replaceAll("{id}", S)}$`, "u");
 
 const routes: Route[] = [
@@ -319,11 +327,21 @@ const routes: Route[] = [
     const file = await renderResumeFile(resume, params[1] as ResumeFileFormat);
     attachment(res, file.mimeType, file.fileName, file.data);
   } },
-  { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: ({ actor, res, params, body }) => {
+  // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
+  { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params }) => ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: async ({ actor, res, params, body }) => {
     const input = validateBody(schemas.resumeApprove, body);
+    await ensureResumeParseCheck(params[0]!);
     ok(res, 200, approveResume(params[0]!, String(input.confirmation ?? ""), { override_reason: input.override_reason == null ? undefined : String(input.override_reason), actor }));
   } },
-  { method: "POST", pattern: r("/api/resumes/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewResume(params[0]!, body, actor)) },
+  { method: "POST", pattern: r("/api/resumes/{id}/review"), handler: async ({ actor, res, params, body }) => {
+    await ensureResumeParseCheck(params[0]!);
+    ok(res, 200, reviewResume(params[0]!, body, actor));
+  } },
+  // Checagem de fatos (#31): resolver um fato é declaração humana (rota só da sessão, ver isHumanOnlyRequest).
+  { method: "GET", pattern: r("/api/resumes/{id}/facts"), handler: ({ res, params }) => ok(res, 200, getResumeFactChecks(params[0]!)) },
+  { method: "POST", pattern: r("/api/resumes/{id}/facts/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, resolveResumeFact(params[0]!, params[1]!, validateBody(schemas.resumeFactAction, body), actor, projectId)) },
   { method: "PATCH", pattern: r("/api/resumes/{id}"), handler: ({ res, params, body }) => ok(res, 200, updateResume(params[0]!, validateBody(schemas.resumePatch, body) as never)) },
 
   // Currículos-base (upload JSON com PDF em base64; único corpo de até 8 MB)
@@ -356,7 +374,18 @@ const routes: Route[] = [
   } },
   { method: "POST", pattern: r("/api/applications/{id}/submit"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationSubmit, body);
-    ok(res, 200, submitAuthorizedApplication(params[0]!, { worker_id: input.worker_id, evidence_ref: input.evidence_ref, ...(input.observed_url ? { observed_url: input.observed_url } : {}) }));
+    ok(res, 200, submitAuthorizedApplication(params[0]!, { worker_id: input.worker_id, evidence_ref: input.evidence_ref, observed_url: input.observed_url, submit_token: input.submit_token }));
+  } },
+  // #32 — dry-run: o executor para antes do clique final e pede a 2ª confirmação humana.
+  { method: "POST", pattern: r("/api/applications/{id}/final-confirmation"), bodyLimit: FINAL_CONFIRMATION_BODY_LIMIT, handler: ({ res, params, body }) => ok(res, 200, requestFinalConfirmation(params[0]!, validateBody(schemas.applicationFinalConfirmation, body))) },
+  { method: "POST", pattern: r("/api/applications/{id}/final-confirmation/poll"), handler: ({ res, params, body }) => ok(res, 200, pollFinalConfirmation(params[0]!, validateBody(schemas.applicationFinalPoll, body).worker_id)) },
+  { method: "POST", pattern: r("/api/applications/{id}/confirm-final"), handler: ({ actor, res, params, body }) => ok(res, 200, confirmFinalSubmission(params[0]!, validateBody(schemas.applicationConfirmFinal, body).confirmation, actor)) },
+  { method: "POST", pattern: r("/api/applications/{id}/cancel-final"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, cancelFinalConfirmation(params[0]!, actor)); } },
+  { method: "GET", pattern: r("/api/applications/{id}/evidence/{id}"), handler: ({ res, params }) => {
+    const evidence = getApplicationEvidence(params[0]!, params[1]!);
+    if (!evidence) throw notFound("Evidência não encontrada.");
+    res.writeHead(200, { "content-type": evidence.mime, "content-length": evidence.data.length, "content-disposition": "inline", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    res.end(evidence.data);
   } },
   { method: "POST", pattern: r("/api/applications/{id}/fail"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationFail, body);
@@ -370,6 +399,10 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/applications/{id}/revoke-auto"), handler: ({ actor, res, params }) => ok(res, 200, revokeAutoApplication(params[0]!, actor)) },
   { method: "POST", pattern: r("/api/applications/{id}/questions"), handler: ({ res, params, body }) => ok(res, 201, createHumanQuestion(params[0]!, body)) },
   { method: "PATCH", pattern: r("/api/applications/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateApplication(params[0]!, validateBody(schemas.applicationPatch, body) as never, actor)) },
+
+  // #32 — kill-switch, limite diário e allowlist de ATS (mudança só pela sessão do dashboard).
+  { method: "GET", pattern: r("/api/settings/automation"), handler: ({ res }) => ok(res, 200, automationOverview()) },
+  { method: "PUT", pattern: r("/api/settings/automation"), handler: ({ actor, res, body }) => ok(res, 200, updateAutomationSettings(validateBody(schemas.automationSettings, body), actor)) },
 
   // Preferências e perguntas humanas
   { method: "GET", pattern: r("/api/preferences"), handler: ({ res }) => ok(res, 200, listPreferenceState(projectId)) },

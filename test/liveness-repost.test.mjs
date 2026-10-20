@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { descriptionFingerprint, findReposts, hammingDistance, repostBucket } from "../src/repost.ts";
+import { atsUrl } from "./helpers/final-confirmation.mjs";
 import { markJobOpen } from "./helpers/liveness.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
@@ -17,7 +18,7 @@ function newJob(overrides = {}) {
   counter += 1;
   return store.upsertJob({
     id: `live-${counter}`, title: `Vaga viva ${counter}`, company: "Empresa Viva", source: "fixture",
-    source_url: `https://jobs.example.test/live/${counter}`, application_url: `https://jobs.example.test/live/${counter}/apply`, ...overrides,
+    source_url: `https://jobs.example.test/live/${counter}`, application_url: atsUrl(`live-${counter}`), ...overrides,
   });
 }
 

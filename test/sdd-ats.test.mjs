@@ -32,7 +32,11 @@ endstream endobj
 
   const modified = store.generateAtsResume({ job_id: job.id, profile_snapshot_id: snapshotId, base_resume_id: base.id, facts_used: ["fact-skill"] });
   store.updateResume(modified.id, { status: "review", content: "skills: TypeScript, Node.js\ncertification: invented" });
-  assert.equal(store.reviewResume(modified.id, { verdict: "pass" }).review_status, "fail");
-  assert.throws(() => store.approveResume(modified.id, "APROVO"), /ATS_REVIEW_REQUIRED/);
+  const reviewed = store.reviewResume(modified.id, { verdict: "pass" });
+  assert.equal(reviewed.review_status, "fail");
+  assert.ok(reviewed.review_findings.includes("content.unsupported_or_modified"));
+  assert.ok(reviewed.review_findings.includes("facts.unverified:1"), "a certificação inventada também falha na checagem de fatos");
+  // A checagem de fatos (#31) vem antes da exigência de revisão ATS e não aceita justificativa.
+  assert.throws(() => store.approveResume(modified.id, "APROVO", { override_reason: "Revisado manualmente por mim" }), /resume\.unverified_facts/);
 
 });

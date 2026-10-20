@@ -71,7 +71,7 @@ try {
   let resumeId = "";
   let applicationId = "";
   await test("#10: interesse → APROVO → candidatura → AUTORIZO exigem sessão; token de serviço recebe 403", async () => {
-    const job = await svc("POST", "/api/jobs", { title: "Vaga portão humano", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/gate", application_url: "https://jobs.example.test/gate/apply" });
+    const job = await svc("POST", "/api/jobs", { title: "Vaga portão humano", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/gate", application_url: "https://boards.greenhouse.io/exemplo/jobs/gate" });
     assert.equal(job.status, 201, JSON.stringify(job.data));
     jobId = job.data.id;
 

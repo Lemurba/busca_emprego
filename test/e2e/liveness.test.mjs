@@ -96,6 +96,8 @@ test("verificação agora, fila do cron e gate do AUTORIZO", async () => {
 
   const human = { human: true };
   assert.match(cookie, /^radar_session=/);
+  // #32: o AUTORIZO só vale em ATS de empresa. O link muda depois da verificação acima (host inválido, sem rede).
+  assert.equal((await api("PATCH", `/api/jobs/${job.id}`, { application_url: "https://boards.greenhouse.io/exemplo/jobs/vaga-e2e" }, human)).status, 200);
   await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" }, human);
   const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: "CV", content: "Experiência confirmada" }, human)).data;
   await api("POST", `/api/resumes/${resume.id}/review`, { verdict: "pass" }, human);

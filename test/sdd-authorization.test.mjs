@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { markJobOpen } from "./helpers/liveness.mjs";
+import { atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
 process.env.HERMES_LINKED_RECIPIENT_ID = "telegram-user";
@@ -31,7 +32,7 @@ test("SDD authorization URL, nonce, claim, evidence, revocation, and resume", as
   const missingUrl = preparedApplication("missing-url");
   assert.throws(() => store.authorizeAutoApplication(missingUrl.application.id, missingUrl.resume.id, "AUTORIZO"), /application\.url\.required/);
 
-  const submitted = preparedApplication("submitted", "https://jobs.example.test/submitted/apply");
+  const submitted = preparedApplication("submitted", atsUrl("submitted"));
   const submittedAuthorization = authorize(submitted);
   assert.ok(submittedAuthorization?.nonce);
   assert.throws(() => store.updateApplication(submitted.application.id, { status: "in_progress" }), /application\.claim\.required/);
@@ -42,15 +43,18 @@ test("SDD authorization URL, nonce, claim, evidence, revocation, and resume", as
   // C1: the PATCH path no longer records authorized submissions; the claiming worker uses the internal route.
   assert.throws(() => store.updateApplication(submitted.application.id, { status: "submitted", evidence_ref: "portal:confirmation:submitted" }), /application\.internal_route_required/);
   assert.throws(() => store.submitAuthorizedApplication(submitted.application.id, { worker_id: "worker-1" }), /SUBMISSION_EVIDENCE_REQUIRED/);
-  store.submitAuthorizedApplication(submitted.application.id, { worker_id: "worker-1", evidence_ref: "portal:confirmation:submitted" });
+  // #32: a URL observada é obrigatória e o envio final exige a confirmação humana + token.
+  assert.throws(() => store.submitAuthorizedApplication(submitted.application.id, { worker_id: "worker-1", evidence_ref: "portal:confirmation:submitted" }), /application\.observed_url\.required/);
+  const submitToken = confirmFinal(store, submitted.application.id, "worker-1", atsUrl("submitted"));
+  store.submitAuthorizedApplication(submitted.application.id, { worker_id: "worker-1", evidence_ref: "portal:confirmation:submitted", observed_url: atsUrl("submitted"), submit_token: submitToken });
   const consumed = store.db.prepare("SELECT state,evidence_ref FROM application_authorizations WHERE application_id=?").get(submitted.application.id);
   assert.equal(consumed.state, "consumed");
   assert.equal(consumed.evidence_ref, "portal:confirmation:submitted");
 
-  const changedUrl = preparedApplication("changed-url", "https://jobs.example.test/changed/apply");
+  const changedUrl = preparedApplication("changed-url", atsUrl("changed"));
   const changedAuthorization = authorize(changedUrl);
   store.claimAuthorizedApplication(changedUrl.application.id, "worker-url", changedAuthorization.nonce);
-  store.updateJob(changedUrl.job.id, { application_url: "https://jobs.example.test/changed/new-apply" });
+  store.updateJob(changedUrl.job.id, { application_url: atsUrl("changed-new") });
   const revokedApplication = store.listApplications().find((item) => item.id === changedUrl.application.id);
   assert.equal(revokedApplication.status, "needs_review");
   assert.equal(revokedApplication.automation_mode, "assisted");
@@ -58,7 +62,7 @@ test("SDD authorization URL, nonce, claim, evidence, revocation, and resume", as
   assert.equal(store.db.prepare("SELECT state FROM application_authorizations WHERE application_id=?").get(changedUrl.application.id).state, "revoked");
 
   for (const action of ["answer", "skip"]) {
-    const paused = preparedApplication(`paused-${action}`, `https://jobs.example.test/paused-${action}/apply`);
+    const paused = preparedApplication(`paused-${action}`, atsUrl(`paused-${action}`));
     const authorization = authorize(paused);
     store.claimAuthorizedApplication(paused.application.id, `worker-${action}`, authorization.nonce);
     const question = store.createHumanQuestion(paused.application.id, {

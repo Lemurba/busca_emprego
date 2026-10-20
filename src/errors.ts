@@ -23,6 +23,8 @@ export class DomainError extends Error {
 /** Status por código: regras na ordem; a primeira que casar vence. Sem regra → 400. */
 const STATUS_RULES: Array<[RegExp, number]> = [
   [/^AUTOMATION_DISABLED$/u, 403],
+  // #32: limite diário de envios automáticos.
+  [/^application\.daily_limit_reached$/u, 429],
   [/^PDF_DUPLICATE$/u, 409],
   [/^PDF_TOO_LARGE$/u, 413],
   [/^VERSION_CONFLICT$|^ILLEGAL_TRANSITION$/u, 409],
@@ -30,6 +32,8 @@ const STATUS_RULES: Array<[RegExp, number]> = [
   [/\.forbidden$|\.internal_route_required$/u, 403],
   [/(?:^|\.)not_found$/u, 404],
   [/version_conflict|\.race$|\.already_active$/u, 409],
+  [/^resume\.unverified_facts$/u, 409],
+  [/^resume\.pdf_parse_failed$/u, 409],
   [/^validation\./u, 422],
   [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
   [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict|decision)\./u, 422],
@@ -46,7 +50,18 @@ export const ERROR_MESSAGES: Record<string, string> = {
   internal_token_required: "Esta rota aceita somente o token de serviço interno.",
   internal_token_not_configured: "O token de serviço interno não está configurado no servidor.",
   internal_error: "Erro interno. Tente novamente; se persistir, consulte o log do servidor.",
-  AUTOMATION_DISABLED: "A candidatura automatizada está desligada nesta instalação.",
+  AUTOMATION_DISABLED: "A candidatura automatizada está desligada nesta instalação (variável de ambiente ou kill-switch do painel).",
+  // #32 — executor: ATS de empresa, dry-run com confirmação final, limite diário.
+  "application.domain.not_ats": "O link de candidatura não é de um ATS de empresa permitido para envio automático. Use “Enviar manualmente”.",
+  "application.final_confirmation_required": "O envio final exige a sua confirmação no painel (ENVIAR) e o token de envio dessa confirmação.",
+  "application.final_confirmation.not_pending": "Não há confirmação final pendente para esta candidatura.",
+  "application.final_confirmation.text_required": "Confirme digitando ENVIAR.",
+  "application.daily_limit_reached": "O limite diário de envios automáticos foi atingido; a candidatura voltou para revisão.",
+  "application.observed_url.required": "Informe a URL observada no portal.",
+  "application.evidence.screenshot_invalid": "A captura de tela precisa ser um PNG válido em base64.",
+  "application.evidence.screenshot_too_large": "A captura de tela deve ter no máximo 2 MB.",
+  "application.evidence.fields_invalid": "Resumo dos campos inválido (até 100 itens com rótulo e valor curtos).",
+  "settings.automation.empty": "Nenhuma configuração de automação informada.",
   not_found: "Recurso não encontrado.",
   not_implemented: "Operação ainda não disponível nesta versão do servidor.",
   PDF_DUPLICATE: "Este PDF já está na biblioteca.",
@@ -75,6 +90,14 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado.",
   "human_question.identity_unauthorized": "Resposta recebida de uma identidade não vinculada ao Radar.",
   "human_question.reply_not_correlated": "A resposta não corresponde à pergunta enviada.",
+  "resume.unverified_facts": "O currículo tem fatos novos sem confirmação. Confirme, corrija ou remova cada um antes de aprovar.",
+  "resume.fact.not_found": "Esse fato não existe na versão atual do currículo.",
+  "resume.fact.stale": "O currículo mudou desde a checagem. Atualize e tente de novo.",
+  "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
+  "resume.fact.already_resolved": "Esse fato já foi resolvido.",
+  "resume.fact.approved_locked": "Retorne o currículo aprovado para revisão antes de alterá-lo.",
+  "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: um parser não enxerga parte do currículo. Corrija o conteúdo; a justificativa de exceção não libera esse bloqueio.",
+  "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio em evidence.",
 };
 
 export const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";

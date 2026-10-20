@@ -73,10 +73,10 @@ try {
   });
 
   await test("claim recusa se a application_url virou http depois da autorização", () => {
-    const { job, application, resume } = approved({ source_url: "https://careers.example.test/c/1", application_url: "https://careers.example.test/c/1/apply" });
+    const { job, application, resume } = approved({ source_url: "https://careers.example.test/c/1", application_url: "https://boards.greenhouse.io/exemplo/jobs/c1" });
     store.authorizeAutoApplication(application.id, resume.id, "AUTORIZO");
     const entry = store.listAuthorizedApplications().find((item) => item.id === application.id);
-    store.db.prepare("UPDATE jobs SET application_url=? WHERE id=?").run("http://careers.example.test/c/1/apply", job.id);
+    store.db.prepare("UPDATE jobs SET application_url=? WHERE id=?").run("http://boards.greenhouse.io/exemplo/jobs/c1", job.id);
     const error = thrown(() => store.claimAuthorizedApplication(application.id, "worker-http", entry.nonce));
     assert.equal(error.code, "application.url.insecure");
   });

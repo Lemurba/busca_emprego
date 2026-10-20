@@ -10,6 +10,7 @@ import {
   createHumanQuestion,
   createResume,
   db,
+  getResumeFactChecks,
   enrichJobFromAgent,
   failAuthorizedApplication,
   heartbeatAuthorizedApplication,
@@ -22,10 +23,12 @@ import {
   listHumanQuestions,
   listPublishedAgentConfigs,
   listSourceConfigs,
+  pollFinalConfirmation,
   proposeAgentPrompt,
   recordAgentRun,
   recordMatchScore,
   startSearchRound,
+  requestFinalConfirmation,
   submitAuthorizedApplication,
   validateSourceBatch,
 } from "./db.js";
@@ -50,8 +53,11 @@ import { projectId } from "./config.js";
  * - campos de texto vindos da web voltam dentro de `untrusted_content`, com aviso explícito;
  * - URLs tocadas pela ferramenta precisam estar em `allowed_domains` do agente;
  * - o `nonce` da autorização nunca sai deste processo: o claim o consulta no banco;
- * - candidatura automática (fila, claim, verify, submit, fail, perguntas) só com
- *   RADAR_AUTO_APPLICATION_ENABLED=true;
+ * - candidatura automática (fila, claim, verify, confirmação final, submit, fail, perguntas)
+ *   só com RADAR_AUTO_APPLICATION_ENABLED=true; o kill-switch do painel (settings no banco,
+ *   relido a cada chamada) e a allowlist de ATS valem no núcleo para os dois processos;
+ * - dry-run sempre: o envio final só com o `submit_token` entregue depois que o usuário
+ *   confirma no painel (radar_request_final_confirmation → radar_get_final_confirmation);
  * - erros viram `isError: true` com código estável e mensagem pt-BR segura
  *   (sem stack trace nem mensagem de SQL).
  */
@@ -92,6 +98,7 @@ const SAFE_MESSAGES: Record<string, string> = {
   "agent.published_version.required": "O agente não tem versão publicada.",
   "job.salary.invalid": "Faixa salarial inválida.",
   "job.coordinates.invalid": "Coordenadas inválidas.",
+  "job.requirements_json.invalid": "Exigências explícitas inválidas: cada campo precisa do trecho literal do anúncio em evidence.",
   "application.not_found": "Candidatura não encontrada.",
   "application.url.required": "A vaga não tem URL de candidatura.",
   "application.authorization.required": "A candidatura não tem autorização automática (AUTORIZO).",
@@ -104,6 +111,13 @@ const SAFE_MESSAGES: Record<string, string> = {
   "application.failure.reason_required": "Informe o motivo da falha.",
   "application.resume_version.changed": "O currículo mudou depois da autorização.",
   "SUBMISSION_EVIDENCE_REQUIRED": "Envio sem evidência observável do portal não é registrado.",
+  "application.domain.not_ats": "A URL não é de um ATS de empresa permitido para envio automático; o envio precisa ser manual.",
+  "application.final_confirmation_required": "Envio final sem a confirmação humana no painel e o submit_token dela é recusado.",
+  "application.daily_limit_reached": "Limite diário de envios automáticos atingido; a candidatura voltou para revisão humana.",
+  "application.observed_url.required": "Informe a URL observada no portal.",
+  "application.evidence.screenshot_invalid": "A captura precisa ser um PNG válido em base64.",
+  "application.evidence.screenshot_too_large": "A captura deve ter no máximo 2 MB.",
+  "application.evidence.fields_invalid": "Resumo dos campos inválido (até 100 itens {label, value}).",
   "human_question.already_active": "Já existe pergunta ativa para esta candidatura.",
   "human_question.invalid": "Pergunta inválida.",
   "human_question.not_active": "A pergunta não está aguardando resposta.",
@@ -131,6 +145,11 @@ export function toolError(error: unknown) {
     const base = domain.code.split(":")[0] ?? domain.code;
     code = domain instanceof DomainValidationError ? domain.code : base;
     message = SAFE_MESSAGES[base] ?? (domain instanceof DomainValidationError ? domain.message : userMessage(domain));
+    if (base === "AUTOMATION_DISABLED") {
+      // #32: kill-switch do painel — mesmo código do gate por variável de ambiente.
+      code = "automation_disabled";
+      message = "Candidatura automática pausada (kill-switch do painel ou RADAR_AUTO_APPLICATION_ENABLED).";
+    }
     status = domain.status;
     details = domain.details;
   } else if (error instanceof Error && error.constructor === Error && !("code" in error)
@@ -301,6 +320,25 @@ function withUntrustedContent(job: unknown) {
 const agentId = z.string().min(1).optional().describe("ID do agente que executa a ação. Em servidor vinculado (RADAR_MCP_AGENT_ID) pode ser omitido; se informado, precisa ser o mesmo.");
 const workerId = z.string().min(1).max(120).describe("Identidade estável do executor que reservou a candidatura.");
 
+/** Exigências explícitas do anúncio (eliminatórios): só com o trecho literal em evidence[campo]. */
+const explicitRequirements = z.object({
+  location: z.string().max(200).optional(),
+  work_model: z.enum(["remote", "hybrid", "onsite"]).optional(),
+  work_authorization: z.object({ countries: z.array(z.string().min(1).max(80)).min(1).max(20), sponsorship: z.boolean().optional() }).optional(),
+  min_years: z.number().min(0).max(60).optional(),
+  evidence: z.record(z.string(), z.string().min(1).max(300)),
+}).describe("Somente exigências EXPLÍCITAS do anúncio; cada campo preenchido exige o trecho literal em evidence[campo]. Na dúvida, omita.");
+
+/** Critério do score: número (legado, tratado como estimado) ou valor com base e evidência. */
+const criterion = z.union([
+  z.number().min(0).max(100).nullable(),
+  z.object({
+    value: z.number().min(0).max(100).nullable(),
+    basis: z.enum(["explicit", "estimated"]).default("estimated").describe("explicit = dado declarado na vaga; estimated = inferência"),
+    evidence: z.string().max(500).optional().describe("Trecho da vaga que sustenta a nota (obrigatório na prática quando explicit)."),
+  }),
+]);
+
 const jobFields = {
   source: z.string().min(1),
   title: z.string().min(1),
@@ -318,6 +356,7 @@ const jobFields = {
   job_url: z.string().url().optional(),
   application_url: z.string().url().optional(),
   posted_at: z.string().optional(),
+  requirements_json: explicitRequirements.optional(),
 };
 
 export { RADAR_MCP_ROLES, RADAR_MCP_TOOLS };
@@ -435,7 +474,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_create_resume")) server.registerTool("radar_create_resume", {
-    description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia.",
+    description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia. A resposta traz fact_check.pending: números, datas, empresas, cargos, títulos e certificações sem fato confirmado no perfil, que bloqueiam a aprovação.",
     inputSchema: {
       agent_id: agentId,
       job_id: z.string().min(1),
@@ -448,7 +487,15 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }, async ({ agent_id, ...input }) => execute(() => {
     const agent = agentFor(agent_id, "resume.write");
     // Rascunho do redator: o evento registra o agente que o criou, não o usuário (#19).
-    return { resume: createResume({ ...input, generation_source: "writer" } as never, `agent:${agent.id}`) };
+    const resume = createResume({ ...input, generation_source: "writer" } as never, `agent:${agent.id}`);
+    // #31: afirmações sem fato confirmado bloqueiam o APROVO; o agente deve corrigi-las ou removê-las.
+    const facts = resume ? getResumeFactChecks(resume.id) : null;
+    const brief = (rows: NonNullable<typeof facts>["pending"]) => rows.map((row) => ({ claim_id: row.claim_id, kind: row.claim_kind, text: row.claim_text }));
+    return {
+      resume,
+      fact_check: facts ? { pending: brief(facts.pending), warnings: brief(facts.warnings) } : null,
+      ...(facts?.pending.length ? { next_step: "Há afirmações sem fato confirmado no perfil (fact_check.pending). Reescreva sem elas ou peça à pessoa para confirmá-las no painel; a aprovação fica bloqueada até lá." } : {}),
+    };
   }));
 
   if (has("radar_propose_agent_prompt")) server.registerTool("radar_propose_agent_prompt", {
@@ -467,17 +514,17 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_record_score")) server.registerTool("radar_record_score", {
-    description: "Registra a nota de compatibilidade de uma vaga (0–100 por critério; null = sem dado). Escopo jobs.write (avaliador de compatibilidade).",
+    description: "Registra a nota de aderência de uma vaga (0–100 por critério; null = sem dado). Cada critério aceita número ou {value, basis: explicit|estimated, evidence}. Escopo jobs.write (avaliador de compatibilidade).",
     inputSchema: {
       agent_id: agentId,
       job_id: z.string().min(1),
       scores: z.object({
-        role_family: z.number().min(0).max(100).nullable(),
-        skills: z.number().min(0).max(100).nullable(),
-        seniority: z.number().min(0).max(100).nullable(),
-        location_work_model: z.number().min(0).max(100).nullable(),
-        compensation: z.number().min(0).max(100).nullable(),
-        explicit_preferences: z.number().min(0).max(100).nullable(),
+        role_family: criterion,
+        skills: criterion,
+        seniority: criterion,
+        location_work_model: criterion,
+        compensation: criterion,
+        explicit_preferences: criterion,
       }),
       profile_snapshot_id: z.string().optional(),
       round_id: z.string().optional(),
@@ -549,20 +596,50 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     };
   }));
 
+  if (has("radar_request_final_confirmation")) server.registerTool("radar_request_final_confirmation", {
+    description: "Dry-run: com o formulário preenchido e ANTES do clique final, envia a captura de tela (PNG em base64, até 2 MB) e o resumo dos campos para o usuário confirmar no painel. A candidatura fica aguardando confirmação final.",
+    inputSchema: {
+      agent_id: agentId,
+      application_id: z.string().min(1),
+      worker_id: workerId,
+      observed_url: z.string().url(),
+      fields_summary: z.array(z.object({ label: z.string().min(1).max(200), value: z.string().max(500) })).max(100),
+      screenshot_base64: z.string().min(1).max(2_900_000),
+    },
+  }, async ({ agent_id, application_id, worker_id, observed_url, fields_summary, screenshot_base64 }) => execute(() => {
+    requireAutomation();
+    const agent = agentFor(agent_id, "application.prepare");
+    requireAllowedDomain(agent, observed_url);
+    requireClaimHolder(application_id, worker_id);
+    const requested = requestFinalConfirmation(application_id, { worker_id, observed_url, fields_summary, screenshot_base64 });
+    return { application: applicationView(application_id), evidence_id: requested.evidence_id };
+  }));
+
+  if (has("radar_get_final_confirmation")) server.registerTool("radar_get_final_confirmation", {
+    description: "Consulta a confirmação final do usuário (not_requested, pending, paused ou confirmed). Na primeira consulta após a confirmação devolve o submit_token de uso único; guarde-o para radar_submit_application.",
+    inputSchema: { agent_id: agentId, application_id: z.string().min(1), worker_id: workerId },
+  }, async ({ agent_id, application_id, worker_id }) => execute(() => {
+    requireAutomation();
+    agentFor(agent_id, "application.prepare");
+    requireClaimHolder(application_id, worker_id);
+    return { confirmation: pollFinalConfirmation(application_id, worker_id) };
+  }));
+
   if (has("radar_submit_application")) server.registerTool("radar_submit_application", {
-    description: "Registra o envio confirmado pelo portal. Exige reserva deste worker, evidência observável (evidence_ref) e a URL observada igual à autorizada.",
+    description: "Registra o envio confirmado pelo portal. Exige reserva deste worker, o submit_token da confirmação final, evidência observável (evidence_ref) e a URL observada igual à autorizada.",
     inputSchema: {
       agent_id: agentId,
       application_id: z.string().min(1),
       worker_id: workerId,
       evidence_ref: z.string().min(1).max(500),
       observed_url: z.string().url(),
+      submit_token: z.string().min(1).max(200),
     },
-  }, async ({ agent_id, application_id, worker_id, evidence_ref, observed_url }) => execute(() => {
+  }, async ({ agent_id, application_id, worker_id, evidence_ref, observed_url, submit_token }) => execute(() => {
     requireAutomation();
     const agent = agentFor(agent_id, "application.prepare");
     requireAllowedDomain(agent, observed_url);
-    submitAuthorizedApplication(application_id, { worker_id, evidence_ref, observed_url });
+    submitAuthorizedApplication(application_id, { worker_id, evidence_ref, observed_url, submit_token });
     return { application: applicationView(application_id) };
   }));
 
