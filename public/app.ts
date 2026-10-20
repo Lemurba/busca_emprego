@@ -56,7 +56,7 @@ type Job = {
 };
 type Lifecycle = "open" | "unknown" | "applied" | "lost" | "not_interested";
 
-type Resume = { id: string; job_id: string; base_resume_id: string | null; version: number; title: string; status: string; content: string; keywords: string[]; changes: string[]; updated_at: string };
+type Resume = { id: string; job_id: string; base_resume_id: string | null; version: number; title: string; status: string; content: string; keywords: string[]; changes: string[]; updated_at: string; review_status?: string; review_findings?: string[]; fact_check?: { pending: number; warnings: number } };
 type BaseResume = { id: string; title: string; file_name: string; mime_type: "application/pdf"; is_base: boolean; created_at: string; updated_at: string };
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
@@ -665,7 +665,7 @@ function renderResumes(data: Data) {
       <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
       <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
     <div class="section-head"><div><h2>Currículos por vaga</h2><p>Cada um nasce quando você marca interesse numa vaga.</p></div></div>
-    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
+    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
 }
 
 function companyStats(data: Data) {
@@ -885,6 +885,10 @@ const errorMessages: Record<string, string> = {
   VERSION_CONFLICT: "A vaga foi alterada em outra tela. Atualize e tente de novo.",
   "workflow.version_conflict": "A vaga foi alterada em outra tela. Atualize e tente de novo.",
   "resume.content.empty": "O currículo está vazio. Escreva o conteúdo antes de revisar ou aprovar.",
+  "resume.unverified_facts": "O currículo tem fatos novos sem confirmação. Confirme, corrija ou remova cada um antes de aprovar.",
+  "resume.fact.stale": "O currículo mudou desde a checagem. Atualize e tente de novo.",
+  "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
+  "resume.fact.already_resolved": "Esse fato já foi resolvido.",
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado, não pelo dashboard.",
   "application.claim.worker_mismatch": "Esta candidatura está reservada por outro executor.",
   "application.url_mismatch": "A página da candidatura não corresponde à URL autorizada. Revise e autorize de novo.",
@@ -1372,24 +1376,115 @@ function showResumeModal(id: string) {
   openModal("Editar currículo", "Salve as alterações antes de aprovar: a aprovação vale para a versão salva.", `<form data-form="resume" data-resume-id="${escapeHtml(resume.id)}" data-current-status="${escapeHtml(resume.status)}"><div class="form-grid"><div class="form-field full"><label for="resume-title">Título</label><input class="input" id="resume-title" name="title" required value="${escapeHtml(resume.title)}" /></div><div class="form-field"><label for="resume-base">Currículo-base</label><select class="select" id="resume-base" name="base_resume_id"><option value="">Nenhum</option>${selectOptions(baseOptions, selectedBaseId)}</select></div><div class="form-field"><label for="resume-status">Situação</label><select class="select" id="resume-status" name="status">${selectOptions(statusOptions, resume.status)}</select></div><div class="form-field full"><label for="resume-keywords">Palavras-chave (separadas por vírgula)</label><input class="input" id="resume-keywords" name="keywords" value="${escapeHtml(resume.keywords.join(", "))}" /></div><div class="form-field full"><label for="resume-content">Conteúdo do currículo</label><textarea class="textarea textarea-tall" id="resume-content" name="content">${escapeHtml(resume.content)}</textarea></div><div class="form-field full"><label for="resume-changes">Sugestões de ajuste (uma por linha)</label><textarea class="textarea" id="resume-changes" name="changes">${escapeHtml(resume.changes.join("\n"))}</textarea></div></div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="modal-actions">${approveButton}<button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar alterações</button></div></form>`);
 }
 
+// Checagem de fatos (#31): afirmações do currículo sem fato confirmado bloqueiam o APROVO.
+type FactRow = { claim_id: string; claim_kind: string; claim_text: string; spans: [number, number][]; status: string; blocking: boolean };
+type FactReport = { resume_version: number; pending: FactRow[]; warnings: FactRow[]; covered: FactRow[]; resolved: FactRow[] };
+type FactChoice = { action: "confirm" | "correct" | "remove"; claimId: string };
+
+const claimKindLabels: Record<string, string> = { number: "Número", date: "Data", company: "Empresa", role: "Cargo", degree: "Título acadêmico", certification: "Certificação", technology: "Tecnologia" };
+const reviewFindingLabels: Record<string, string> = {
+  "facts.unverified": "Fatos novos sem confirmação no perfil",
+  "content.placeholder": "O conteúdo ainda é o rascunho-padrão",
+  "content.empty": "O currículo está vazio",
+  "content.unsupported_or_modified": "O texto não corresponde aos fatos usados",
+  "keyword.unsupported": "Palavra-chave sem fato que a sustente",
+  "reviewer.fail": "O revisor reprovou esta versão",
+};
+
+function reviewFindingLabel(finding: string) {
+  const [code, count] = finding.split(":");
+  const text = reviewFindingLabels[code ?? ""] ?? humanize(finding);
+  return count && /^\d+$/.test(count) ? `${text} (${count})` : text;
+}
+
+/** Conteúdo com as afirmações destacadas; todo texto passa por escapeHtml. */
+function highlightedResume(content: string, report: FactReport) {
+  const tones: [FactRow[], string, string][] = [
+    [report.pending, "pending", "Fato novo: confirme, corrija ou remova"],
+    [report.warnings, "warning", "Tecnologia fora do perfil (aviso)"],
+    [report.covered, "covered", "Coberto por fato confirmado"],
+    [report.resolved.filter((row) => row.status === "confirmed"), "covered", "Confirmado por você"],
+  ];
+  const marks = tones.flatMap(([rows, tone, title]) => rows.flatMap((row) => row.spans.map(([start, end]) => ({ start, end, tone, title: `${claimKindLabels[row.claim_kind] ?? row.claim_kind}: ${title}` }))))
+    .filter((mark) => mark.start >= 0 && mark.end <= content.length && mark.start < mark.end)
+    .sort((left, right) => left.start - right.start);
+  let html = "";
+  let cursor = 0;
+  for (const mark of marks) {
+    if (mark.start < cursor) continue;
+    html += `${escapeHtml(content.slice(cursor, mark.start))}<mark class="fact-mark ${mark.tone}" title="${escapeHtml(mark.title)}">${escapeHtml(content.slice(mark.start, mark.end))}</mark>`;
+    cursor = mark.end;
+  }
+  return `<div class="fact-preview" aria-label="Conteúdo do currículo com fatos destacados">${html}${escapeHtml(content.slice(cursor))}</div>`;
+}
+
+function factChecklist(report: FactReport) {
+  const pending = report.pending.map((row) => `<li class="fact-item"><div><span class="tag">${escapeHtml(claimKindLabels[row.claim_kind] ?? row.claim_kind)}</span> <strong>${escapeHtml(row.claim_text)}</strong></div><div class="button-row"><button type="button" class="secondary-button" data-fact-action="confirm" data-claim-id="${escapeHtml(row.claim_id)}">Confirmar</button><button type="button" class="secondary-button" data-fact-action="correct" data-claim-id="${escapeHtml(row.claim_id)}">Corrigir…</button><button type="button" class="text-button danger-text" data-fact-action="remove" data-claim-id="${escapeHtml(row.claim_id)}">Remover</button></div></li>`).join("");
+  const warnings = report.warnings.map((row) => `<span class="tag">${escapeHtml(row.claim_text)}</span>`).join("");
+  return `${pending ? `<section class="fact-list"><h3>Fatos novos (${report.pending.length})</h3><p>Estes trechos não aparecem nos fatos confirmados do seu perfil. Confirme só o que for verdade (vira um fato do perfil, numa nova versão), corrija ou remova.</p><ul>${pending}</ul></section>` : ""}${warnings ? `<section class="fact-list"><h3>Tecnologias fora do perfil</h3><p>Só um aviso: não bloqueia a aprovação.</p><div class="tag-list">${warnings}</div></section>` : ""}`;
+}
+
 async function confirmResumeApproval(id: string) {
   if (state.modalDirty) { toast("Salve as alterações antes de aprovar: a aprovação vale para a versão salva.", true); return; }
   const resume = currentData().resumes.find((item) => item.id === id);
   if (!resume) throw new Error("Currículo não encontrado.");
   if (!resume.content.trim()) throw new Error(errorMessages["resume.content.empty"]);
-  // A aprovação exige revisão ATS "pass" (ou exceção justificada): roda a revisão primeiro.
+  // A revisão roda as checagens reais no servidor (o painel não envia veredito).
   const reviewed = await fetchJson<{ review_status?: string; review_findings?: string[] }>(`/api/resumes/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({}) });
+  const facts = await fetchJson<FactReport>(`/api/resumes/${encodeURIComponent(id)}/facts`);
+  const blocked = facts.pending.length > 0;
+  const otherFindings = (reviewed.review_findings ?? []).filter((finding) => !finding.startsWith("facts.unverified"));
   const failed = Boolean(reviewed.review_status && reviewed.review_status !== "pass");
-  const findings = (reviewed.review_findings ?? []).map((finding) => `<li>${escapeHtml(humanize(finding))}</li>`).join("");
+  const findings = otherFindings.map((finding) => `<li>${escapeHtml(reviewFindingLabel(finding))}</li>`).join("");
+  const reviewBlock = blocked
+    ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Aprovação bloqueada: há ${escapeHtml(facts.pending.length)} fato${facts.pending.length === 1 ? "" : "s"} novo${facts.pending.length === 1 ? "" : "s"} sem confirmação.</strong>${findings ? `<ul>${findings}</ul>` : ""}Resolva cada fato abaixo; a justificativa de exceção não vale para fatos novos.</div></div>`
+    : failed
+      ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>A revisão ATS encontrou pontos de atenção.</strong>${findings ? `<ul>${findings}</ul>` : ""}Para aprovar mesmo assim, explique o motivo.</div></div><div class="form-field"><label for="approve-reason">Justificativa</label><textarea class="textarea" id="approve-reason" name="override_reason" required minlength="10" maxlength="500" data-message="Escreva uma justificativa com pelo menos 10 caracteres."></textarea></div>`
+      : `<div class="notice"><span aria-hidden="true">✓</span><div>A revisão ATS e a checagem de fatos passaram.</div></div>`;
+  const choice: { value: FactChoice | null } = { value: null };
   const result = await openDialog({
     title: "Aprovar currículo",
     confirmLabel: "Aprovar esta versão",
-    body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${failed ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>A revisão ATS encontrou pontos de atenção.</strong>${findings ? `<ul>${findings}</ul>` : ""}Para aprovar mesmo assim, explique o motivo.</div></div><div class="form-field"><label for="approve-reason">Justificativa</label><textarea class="textarea" id="approve-reason" name="override_reason" required minlength="10" maxlength="500" data-message="Escreva uma justificativa com pelo menos 10 caracteres."></textarea></div>` : `<div class="notice"><span aria-hidden="true">✓</span><div>A revisão ATS passou.</div></div>`}<label class="check-row"><input type="checkbox" name="confirmed" required data-message="Confirme que revisou o conteúdo." /> <span>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</span></label>`
+    body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${reviewBlock}${highlightedResume(resume.content, facts)}${factChecklist(facts)}${blocked ? "" : `<label class="check-row"><input type="checkbox" name="confirmed" required data-message="Confirme que revisou o conteúdo." /> <span>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</span></label>`}`,
+    onRender: (form) => {
+      const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (blocked && submit) { submit.disabled = true; submit.title = "Resolva os fatos novos antes de aprovar."; }
+      for (const button of form.querySelectorAll<HTMLButtonElement>("[data-fact-action]")) {
+        button.addEventListener("click", () => {
+          choice.value = { action: button.dataset.factAction as FactChoice["action"], claimId: button.dataset.claimId ?? "" };
+          form.querySelector<HTMLButtonElement>("[data-dialog-cancel]")?.click();
+        });
+      }
+    }
   });
-  if (!result) return;
+  if (choice.value) { await resolveResumeFactChoice(id, choice.value, facts); return; }
+  if (!result || blocked) return;
   const overrideReason = String(result.get("override_reason") ?? "").trim();
   await fetchJson(`/api/resumes/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ confirmation: "APROVO", ...(failed ? { override_reason: overrideReason } : {}) }) });
   closeModal(); await loadData(); toast("Currículo aprovado. Agora escolha como se candidatar.");
+}
+
+/** Confirmar, corrigir ou remover um fato novo; depois recarrega o currículo e volta à aprovação. */
+async function resolveResumeFactChoice(id: string, choice: FactChoice, facts: FactReport) {
+  const row = facts.pending.find((item) => item.claim_id === choice.claimId);
+  if (!row) return;
+  let replacement: string | undefined;
+  if (choice.action === "correct") {
+    const corrected = await openDialog({
+      title: "Corrigir fato",
+      confirmLabel: "Salvar correção",
+      body: `<p>Trecho atual: <strong>${escapeHtml(row.claim_text)}</strong></p><div class="form-field"><label for="fact-replacement">Texto correto</label><input class="input" id="fact-replacement" name="replacement" required maxlength="500" value="${escapeHtml(row.claim_text)}" data-message="Escreva o texto correto." /></div><p>Todas as ocorrências do trecho são trocadas e uma nova versão do currículo é salva.</p>`
+    });
+    if (!corrected) { await confirmResumeApproval(id); return; }
+    replacement = String(corrected.get("replacement") ?? "").trim();
+  } else if (choice.action === "confirm") {
+    if (!await confirmDialog("Confirmar fato?", `“${row.claim_text}” passa a ser um fato confirmado do seu perfil (uma nova versão do perfil é criada). Confirme só se for verdade.`, "Confirmar fato")) { await confirmResumeApproval(id); return; }
+  }
+  await fetchJson(`/api/resumes/${encodeURIComponent(id)}/facts/${encodeURIComponent(row.claim_id)}`, { method: "POST", body: JSON.stringify({ action: choice.action, ...(replacement === undefined ? {} : { replacement }) }) });
+  await loadData();
+  showResumeModal(id);
+  toast(choice.action === "confirm" ? "Fato confirmado e adicionado ao perfil." : choice.action === "correct" ? "Trecho corrigido numa nova versão." : "Trecho removido numa nova versão.");
+  await confirmResumeApproval(id);
 }
 
 /** Status atual mais as transições que o servidor aceita pelo painel; reserva e resultado do executor ficam com o executor autorizado. */

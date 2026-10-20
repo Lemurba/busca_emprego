@@ -1,4 +1,5 @@
 import { baseline } from "./0001_baseline.js";
+import { migration0002 } from "./0002_resume_fact_checks.js";
 import { migration0003 } from "./0003_executor_ats_dry_run.js";
 import type { Migration } from "./types.js";
 
@@ -15,6 +16,7 @@ import type { Migration } from "./types.js";
  */
 export const MIGRATIONS: readonly Migration[] = [
   baseline,
+  migration0002,
   migration0003
 ];
 

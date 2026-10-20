@@ -10,6 +10,7 @@ import {
   createHumanQuestion,
   createResume,
   db,
+  getResumeFactChecks,
   enrichJobFromAgent,
   failAuthorizedApplication,
   heartbeatAuthorizedApplication,
@@ -451,7 +452,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_create_resume")) server.registerTool("radar_create_resume", {
-    description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia.",
+    description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia. A resposta traz fact_check.pending: números, datas, empresas, cargos, títulos e certificações sem fato confirmado no perfil, que bloqueiam a aprovação.",
     inputSchema: {
       agent_id: agentId,
       job_id: z.string().min(1),
@@ -464,7 +465,15 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }, async ({ agent_id, ...input }) => execute(() => {
     const agent = agentFor(agent_id, "resume.write");
     // Rascunho do redator: o evento registra o agente que o criou, não o usuário (#19).
-    return { resume: createResume({ ...input, generation_source: "writer" } as never, `agent:${agent.id}`) };
+    const resume = createResume({ ...input, generation_source: "writer" } as never, `agent:${agent.id}`);
+    // #31: afirmações sem fato confirmado bloqueiam o APROVO; o agente deve corrigi-las ou removê-las.
+    const facts = resume ? getResumeFactChecks(resume.id) : null;
+    const brief = (rows: NonNullable<typeof facts>["pending"]) => rows.map((row) => ({ claim_id: row.claim_id, kind: row.claim_kind, text: row.claim_text }));
+    return {
+      resume,
+      fact_check: facts ? { pending: brief(facts.pending), warnings: brief(facts.warnings) } : null,
+      ...(facts?.pending.length ? { next_step: "Há afirmações sem fato confirmado no perfil (fact_check.pending). Reescreva sem elas ou peça à pessoa para confirmá-las no painel; a aprovação fica bloqueada até lá." } : {}),
+    };
   }));
 
   if (has("radar_propose_agent_prompt")) server.registerTool("radar_propose_agent_prompt", {
