@@ -261,6 +261,17 @@ h3 { margin-bottom: 4px; color: var(--heading); font-size: var(--type-body); }
 .notice strong { color: inherit; }
 .notice ul { margin: 6px 0; padding-left: 18px; }
 .notice.warning { border-color: var(--orange-line); color: var(--orange-fg); background: var(--orange-bg); }
+/* Checagem de fatos do currículo (#31) */
+.fact-preview { max-height: 260px; overflow: auto; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-sm); line-height: 1.6; }
+.fact-mark { padding: 0 2px; border-radius: 4px; color: inherit; }
+.fact-mark.pending { background: var(--red-bg); box-shadow: inset 0 -2px 0 var(--red-fg); }
+.fact-mark.warning { background: var(--orange-bg); }
+.fact-mark.covered { background: var(--teal-bg); }
+.fact-list { margin: 14px 0; }
+.fact-list h3 { margin: 0 0 6px; font-size: var(--type-body); }
+.fact-list ul { margin: 0; padding: 0; list-style: none; }
+.fact-item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.fact-item .button-row { margin: 0; }
 .modal-alert { padding: 11px 12px; margin-bottom: 13px; border-radius: var(--radius); color: var(--orange-fg); background: var(--orange-bg); font-size: var(--type-sm); }
 
 /* ------------------------------------------------------------------ */
@@ -681,3 +692,13 @@ body.auth-required .app-shell, body.auth-required .mobile-tabbar { display: none
 .signal-table td.num, .signal-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .signal-table small { display: block; color: var(--muted); }
 .parser-view { max-height: 320px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--type-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* #32 — confirmação final da candidatura automática (captura + resumo dos campos). */
+.final-confirmation { display: block; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.final-confirmation:last-child { border-bottom: 0; }
+.final-confirmation h3 { margin: 0; font-size: var(--type-md, 1rem); }
+.final-confirmation-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 14px; align-items: start; margin-top: 10px; }
+.final-shot { display: block; width: 100%; max-height: 420px; object-fit: contain; object-position: top; border: 1px solid var(--line); border-radius: var(--radius); background: var(--neutral-bg); }
+.final-fields div { grid-template-columns: minmax(90px, 40%) 1fr; }
+[data-automation-form] textarea { min-height: 110px; font-family: inherit; }
+@media (max-width: 760px) { .final-confirmation-body { grid-template-columns: 1fr; } }

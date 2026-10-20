@@ -11,6 +11,9 @@ import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
+import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
+import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
+import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
 import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements, parseJobRequirementsColumn } from "./blockers.js";
 import { computeCoverage } from "./coverage.js";
 import { expectedContacts, runResumeParseCheck as runParseCheck } from "./resume-parse-check.js";
@@ -281,7 +284,7 @@ export function getBootstrap(projectId = "busca-emprego") {
   const suppressedJobs = listSuppressedJobs(projectId);
   return {
     jobs,
-    resumes: listResumes(),
+    resumes: listResumes().map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
     baseResumes: listBaseResumes(),
     applications,
     preferences: listPreferenceState(projectId),
@@ -299,6 +302,8 @@ export function getBootstrap(projectId = "busca-emprego") {
     archivedJobs: listArchivedJobs(projectId),
     suppressedJobs,
     timezone: radarTimeZone(),
+    // #32: kill-switch, limite diário, allowlist de ATS e confirmações finais pendentes.
+    automation: executor.automationOverview(),
     stats: {
       total: jobs.length,
       suppressed: suppressedJobs.length,
@@ -1211,11 +1216,11 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
       }
     }
     if (entries.some(([field]) => ["application_url", "job_url", "source_url"].includes(field))) {
-      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
+      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress','awaiting_final_confirmation')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
       db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,
         authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,
         current_step='Autorização revogada: URL da vaga alterada',updated_at=?
-        WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')`).run(now(), id);
+        WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress','awaiting_final_confirmation')`).run(now(), id);
       abortApplyingJob(id, "job_url_changed", options.actor ?? "system");
     }
     audit("job", id, "updated", { changed_fields: Object.keys(requested), ...(options.actor ? { actor: options.actor } : {}) });
@@ -1279,7 +1284,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
   if (!job) throw new Error("Vaga não encontrada.");
   if (decision === "interested" && ["discarded", "expired", "completed"].includes(job.status)) throw new Error("Reabra a vaga com motivo antes de registrar novo interesse.");
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
-  if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
+  if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
     throw new Error("A decisão não pode ser alterada enquanto a candidatura está em andamento ou já foi enviada.");
   }
   const timestamp = now();
@@ -1503,16 +1508,15 @@ export function confirmProfessionalProfile(id: string, actor = "user", projectId
   if (!facts.some((fact) => fact.state === "confirmed") && !Object.keys(profile.context).length) throw new Error("PROFILE_EMPTY");
   const contextJson = profileContext(profile, facts);
   const timestamp = now();
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  // tx (e não BEGIN cru) para poder rodar aninhada: a confirmação de fato do currículo (#31) cria a versão N+1 numa só transação.
+  tx(() => {
     db.prepare("UPDATE professional_profiles SET status='retired',updated_at=? WHERE project_id=? AND status='confirmed'").run(timestamp, projectId);
     db.prepare("UPDATE professional_profiles SET status='confirmed',context_json=?,confirmed_at=?,confirmed_by=?,updated_at=? WHERE id=? AND project_id=?").run(contextJson, timestamp, actor, timestamp, id, projectId);
     const snapshotId = idFor(`profile-snapshot|${id}|${profile.version}|${contextJson}`);
     db.prepare(`INSERT OR IGNORE INTO profile_snapshots (id,profile_id,profile_version,context_json,facts_json,created_at) VALUES (?,?,?,?,?,?)`)
       .run(snapshotId, id, profile.version, contextJson, JSON.stringify(facts.filter((fact) => fact.state === "confirmed")), timestamp);
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("profile", id, "confirmed", { actor, version: profile.version });
+    audit("profile", id, "confirmed", { actor, version: profile.version });
+  });
   return { ...getProfile(id, projectId), facts: listProfileFacts(id), snapshot: getLatestProfileSnapshot(id) };
 }
 
@@ -1574,6 +1578,7 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
     const eventActor = actor ?? (metadata.generation_source === "writer" ? "resume_writer" : "user");
     advanceJobTo(input.job_id, "resume", { actor: eventActor, data: { reason: "resume_draft_created" } });
     refreshResumeCoverage(id);
+    refreshResumeFactChecks(id);
     audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft", actor: eventActor });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
@@ -1588,7 +1593,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
   if (!entries.length) return listResumes().find((resume) => resume.id === id) ?? null;
   const current = listResumes().find((resume) => resume.id === id);
   if (current?.status === "approved" && patch.status !== "review") throw new Error("Retorne o currículo aprovado para revisão antes de alterá-lo.");
-  if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status = 'in_progress' LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
+  if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
   if (patch.status !== undefined && !["draft", "review"].includes(String(patch.status))) throw new Error("resume.status.invalid");
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
   tx(() => {
@@ -1605,6 +1610,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
       }
     }
     refreshResumeCoverage(id);
+    refreshResumeFactChecks(id);
     audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
@@ -1672,34 +1678,174 @@ function atsSnapshotForResume(resume: Resume) {
   return db.prepare("SELECT * FROM profile_snapshots WHERE id=?").get(resume.profile_snapshot_id) as Record<string, unknown> | undefined ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// Checagem de fatos do currículo (#31): toda afirmação bloqueante (número, data, empresa,
+// cargo, título acadêmico, certificação) precisa de fato confirmado no perfil, ou de
+// confirmação/correção/remoção humana, antes do APROVO. Tecnologia nova é só aviso.
+// ---------------------------------------------------------------------------
+
+/** Snapshot usado na checagem: o do currículo ou, se ele não tiver, o do perfil ativo. */
+function factCheckSnapshot(resume: Resume, projectId = "busca-emprego") {
+  return atsSnapshotForResume(resume) ?? (db.prepare(`SELECT s.* FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id
+    WHERE p.project_id=? AND p.status='confirmed' ORDER BY s.profile_version DESC, s.created_at DESC LIMIT 1`).get(projectId) as Record<string, unknown> | undefined) ?? null;
+}
+
+function factCorpusValues(resume: Resume): unknown[] {
+  const snapshot = factCheckSnapshot(resume);
+  return snapshot ? snapshotFacts(snapshot).filter((fact) => fact.state === "confirmed").map((fact) => fact.value) : [];
+}
+
+/** Recalcula e grava a checagem da versão atual (chamar dentro da transação que alterou o currículo). */
+function refreshResumeFactChecks(id: string): FactCheckRow[] {
+  const resume = getResume(id);
+  return resume ? recomputeFactChecks(db, resume, factCorpusValues(resume)) : [];
+}
+
+/** Linhas gravadas da versão atual; bancos anteriores à 0002 calculam em memória, sem escrever. */
+function currentFactChecks(resume: Resume): FactCheckRow[] {
+  const stored = storedFactChecks(db, resume.id, resume.version);
+  return stored.length ? stored : computeFactChecks(db, resume, factCorpusValues(resume));
+}
+
+function resumeFactSummary(resume: Resume) {
+  return summarizeFactChecks(currentFactChecks(resume));
+}
+
+export function getResumeFactChecks(id: string): FactCheckReport {
+  const resume = getResume(id);
+  if (!resume) throw new Error("resume.not_found");
+  return factCheckReport(db, resume, currentFactChecks(resume));
+}
+
+/** Tipo do fato de perfil criado quando a pessoa confirma uma afirmação do currículo. */
+const CLAIM_FACT_TYPES: Record<string, string> = {
+  company: "experience", role: "experience", date: "experience", number: "achievement",
+  certification: "certifications", degree: "education", technology: "skills",
+};
+
+/**
+ * Perfil N+1 = cópia do perfil confirmado atual + o fato novo (origem user, confirmado), já
+ * confirmado com snapshot próprio. Tudo numa transação: falhou, nada muda.
+ * Devolve o mapa id antigo → id novo dos fatos copiados (para remapear `facts_used`).
+ */
+function createProfileVersionWithFact(fact: { type: string; value: string; evidence_excerpt: string }, actor: string, projectId: string) {
+  return tx(() => {
+    const active = getActiveProfile(projectId);
+    const idMap = new Map<string, string>();
+    const context = { ...(active?.context ?? {}) } as Record<string, unknown>;
+    delete context.confirmed_facts; // recalculado na confirmação
+    const draft = createProfessionalProfile({ base_resume_id: active?.base_resume_id ?? null, context }, actor, projectId) as { id: string; version: number };
+    if (active) {
+      const copy = db.prepare(`INSERT INTO profile_facts (id,profile_id,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,updated_at)
+        SELECT ?,?,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,? FROM profile_facts WHERE id=?`);
+      for (const item of listProfileFacts(active.id)) {
+        const newId = idFor(`profile-fact|${draft.id}|${item.id}`);
+        copy.run(newId, draft.id, now(), item.id);
+        idMap.set(String(item.id), newId);
+      }
+    }
+    const added = addProfileFact(draft.id, { type: fact.type, value: fact.value, origin: "user", state: "confirmed", evidence_excerpt: fact.evidence_excerpt }, actor);
+    const confirmed = confirmProfessionalProfile(draft.id, actor, projectId);
+    audit("profile", draft.id, "version_from_resume_fact", { actor, from_profile_id: active?.id ?? null, version: draft.version, fact_id: added.id });
+    return { profile: confirmed, fact: added, snapshotId: String(confirmed.snapshot?.id ?? ""), idMap };
+  });
+}
+
+export type ResumeFactAction = { action: "confirm" | "correct" | "remove"; replacement?: string | null };
+
+/** Resolve uma afirmação da versão atual: confirmar (perfil N+1), corrigir ou remover o trecho. */
+export function resolveResumeFact(resumeId: string, claimId: string, input: ResumeFactAction, actor = "user", projectId = "busca-emprego") {
+  const resume = getResume(resumeId);
+  if (!resume) throw new Error("resume.not_found");
+  if (resume.status === "approved") throw new Error("resume.fact.approved_locked");
+  if (!["confirm", "correct", "remove"].includes(String(input.action))) throw new Error("resume.fact.action.invalid");
+  const rows = tx(() => refreshResumeFactChecks(resume.id));
+  const row = rows.find((item) => item.claim_id === claimId);
+  if (!row) throw new Error("resume.fact.not_found");
+  if (input.action === "confirm") {
+    if (!["pending", "warning"].includes(row.status)) throw new Error("resume.fact.already_resolved");
+    tx(() => {
+      const created = createProfileVersionWithFact({
+        type: CLAIM_FACT_TYPES[row.claim_kind] ?? "experience",
+        value: row.claim_text,
+        evidence_excerpt: `Declaração humana na checagem de fatos do currículo (versão ${resume.version}): ${row.claim_text}`.slice(0, 500),
+      }, actor, projectId);
+      const factsUsed = (resume.facts_used ?? []).map((factId) => created.idMap.get(factId) ?? factId);
+      db.prepare("UPDATE resumes SET profile_snapshot_id=?,facts_used=?,review_status='not_run',review_findings='[]',updated_at=? WHERE id=?")
+        .run(created.snapshotId, JSON.stringify(factsUsed), now(), resume.id);
+      resolveFactCheck(db, resume.id, resume.version, claimId, "confirmed", actor, String(created.fact.id));
+      refreshResumeFactChecks(resume.id);
+      audit("resume", resume.id, "fact_confirmed", { actor, claim_id: claimId, claim_kind: row.claim_kind, profile_id: created.profile.id, profile_version: created.profile.version, profile_snapshot_id: created.snapshotId, profile_fact_id: created.fact.id });
+    });
+  } else {
+    // O trecho gravado precisa bater com o conteúdo atual (ninguém editou no meio).
+    if (row.spans.some(([start, end]) => resume.content.slice(start, end) !== row.claim_text)) throw new Error("resume.fact.stale");
+    const replacement = String(input.replacement ?? "").trim();
+    if (input.action === "correct" && (!replacement || replacement.length > 500)) throw new Error("resume.fact.replacement_required");
+    const content = input.action === "correct" ? replaceSpans(resume.content, row.spans, replacement) : removeSpans(resume.content, row.spans);
+    tx(() => {
+      resolveFactCheck(db, resume.id, resume.version, claimId, input.action === "correct" ? "corrected" : "removed", actor);
+      updateResume(resume.id, { content });
+      audit("resume", resume.id, input.action === "correct" ? "fact_corrected" : "fact_removed", { actor, claim_id: claimId, claim_kind: row.claim_kind, from_version: resume.version });
+    });
+  }
+  return { resume: getResume(resume.id), fact_check: getResumeFactChecks(resume.id) };
+}
+
+// Achados da revisão ATS, um helper por regra; cada um devolve códigos estáveis.
+function contentFindings(resume: Resume): string[] {
+  const content = resume.content.trim();
+  if (!content) return ["content.empty"];
+  return content === RESUME_PLACEHOLDER_CONTENT ? ["content.placeholder"] : [];
+}
+
+function factCheckFindings(resume: Resume): string[] {
+  const pending = refreshResumeFactChecks(resume.id).filter((row) => row.status === "pending").length;
+  return pending ? [`facts.unverified:${pending}`] : [];
+}
+
+function writerFindings(resume: Resume): string[] {
+  const findings: string[] = [];
+  const content = resume.content.trim();
+  if (!resume.base_resume_id) findings.push("base_resume.required");
+  else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
+  const snapshot = atsSnapshotForResume(resume);
+  const facts = snapshot ? snapshotFacts(snapshot) : [];
+  const byId = new Map(facts.filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
+  const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
+  if (!snapshot) findings.push("profile_snapshot.required");
+  if (!(resume.facts_used?.length) || used.length !== resume.facts_used.length) findings.push("facts.unconfirmed_or_missing");
+  if (used.length && content !== factualAtsContent(used)) findings.push("content.unsupported_or_modified");
+  const supported = normalizeComparableText(used.map((fact) => printableFactValue(fact.value)).join(" "));
+  if (resume.keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) findings.push("keyword.unsupported");
+  return findings;
+}
+
+/**
+ * Revisão ATS. O veredito é sempre calculado aqui pelas checagens reais (conteúdo, fatos e,
+ * para o redator, aderência estrita aos fatos usados): `verdict: "pass"` do cliente é ignorado.
+ * O revisor só pode endurecer: `verdict: "fail"` e `findings` extras viram achados.
+ * Conteúdo sem nenhuma afirmação verificável passa (salvo o rascunho-padrão do painel).
+ */
 export function reviewResume(id: string, input: Record<string, unknown> = {}, actor = "reviewer") {
   const resume = getResume(id);
   if (!resume) throw new Error("resume.not_found");
-  const findings = Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : [];
-  const content = resume.content.trim();
-  const verdict = String(input.verdict ?? (content ? "pass" : "fail"));
-  if (!["pass", "fail"].includes(verdict)) throw new Error("resume.review.verdict.invalid");
-  if (!content) findings.push("content.empty");
-  // Teste de leitura do PDF reprovado é bloqueante (a exceção justificada não o contorna).
-  findings.unshift(...resumeParseFindings(db, id));
-  if (resume.generation_source === "writer") {
-    if (!resume.base_resume_id) findings.push("base_resume.required");
-    else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
-    const snapshot = atsSnapshotForResume(resume);
-    const facts = snapshot ? snapshotFacts(snapshot) : [];
-    const byId = new Map(facts.filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
-    const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
-    if (!snapshot) findings.push("profile_snapshot.required");
-    if (!(resume.facts_used?.length) || used.length !== resume.facts_used.length) findings.push("facts.unconfirmed_or_missing");
-    if (used.length && content !== factualAtsContent(used)) findings.push("content.unsupported_or_modified");
-    const supported = normalizeComparableText(used.map((fact) => printableFactValue(fact.value)).join(" "));
-    if (resume.keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) findings.push("keyword.unsupported");
-  }
-  const finalVerdict = findings.length ? "fail" : verdict;
-  const timestamp = now();
-  db.prepare("UPDATE resumes SET review_status=?,review_findings=?,updated_at=? WHERE id=?").run(finalVerdict, JSON.stringify([...new Set(findings)].slice(0, 10)), timestamp, id);
-  audit("resume", id, "ats_reviewed", { actor, verdict: finalVerdict, findings_count: findings.length });
-  return getResume(id);
+  if (input.verdict != null && !["pass", "fail"].includes(String(input.verdict))) throw new Error("resume.review.verdict.invalid");
+  const reviewerFindings = [...(Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : []), ...(input.verdict === "fail" ? ["reviewer.fail"] : [])];
+  return tx(() => {
+    const findings = [
+      // Teste de leitura do PDF reprovado é bloqueante (a exceção justificada não o contorna).
+      ...resumeParseFindings(db, id),
+      ...contentFindings(resume),
+      ...factCheckFindings(resume),
+      ...(resume.generation_source === "writer" ? writerFindings(resume) : []),
+      ...reviewerFindings,
+    ];
+    const finalVerdict = findings.length ? "fail" : "pass";
+    db.prepare("UPDATE resumes SET review_status=?,review_findings=?,updated_at=? WHERE id=?").run(finalVerdict, JSON.stringify([...new Set(findings)].slice(0, 10)), now(), id);
+    audit("resume", id, "ats_reviewed", { actor, verdict: finalVerdict, findings_count: findings.length });
+    return getResume(id);
+  });
 }
 
 export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = "busca-emprego") {
@@ -1737,6 +1883,8 @@ export function approveResume(id: string, confirmation: string, options: { overr
   if (confirmation !== "APROVO") throw new Error("Digite APROVO para confirmar a revisão deste currículo.");
   const resume = listResumes().find((item) => item.id === id);
   if (!resume) throw new Error("Currículo não encontrado.");
+  // #31: afirmação sem fato confirmado bloqueia sempre; override_reason não vale para esta regra.
+  if (resume.status !== "approved" && tx(() => refreshResumeFactChecks(id)).some((row) => row.status === "pending")) throw new Error("resume.unverified_facts");
   const job = getJob(resume.job_id);
   if (!job || job.decision !== "interested") throw new Error("A vaga precisa estar marcada como de interesse antes da aprovação.");
   if (resume.status === "approved") throw new Error("Este currículo já foi aprovado.");
@@ -1872,6 +2020,8 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   if (!job?.application_url?.trim()) throw new Error("application.url.required");
   const applicationUrl = canonicalizeJobUrl(job.application_url);
   if (!isHttpsUrl(applicationUrl)) throw new DomainError("application.url.insecure", 422);
+  // #32: envio automático só em ATS de empresa (allowlist); LinkedIn e portais amplos são manuais.
+  assertAtsUrl(db, applicationUrl);
   const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
   // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
   const authorizationId = randomBytes(32).toString("hex");
@@ -1883,6 +2033,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   });
   db.exec("BEGIN IMMEDIATE");
   try {
+    assertAutomationActive(db);
     const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL AND status IN ('queued','needs_review','failed')").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
     if (!update.changes) throw new Error("application.authorization.race");
     db.prepare(`INSERT INTO application_authorizations
@@ -1913,6 +2064,7 @@ export function revokeAutoApplication(id: string, actor = "user") {
 
 export function listAuthorizedApplications() {
   expireAuthorizations();
+  assertAutomationActive(db);
   return db.prepare(`SELECT applications.*, jobs.title AS job_title, jobs.company AS job_company,
       jobs.application_url, jobs.source_url, auth.application_url_hash,auth.redirect_chain_hash,auth.nonce,auth.state AS authorization_state,
       auth.issued_at,auth.expires_at,resumes.title AS resume_title,resumes.version AS resume_version
@@ -1936,6 +2088,13 @@ export function listAuthorizedApplications() {
 const LEASE_EXPIRED_STEP = "Resultado desconhecido — verificar no portal";
 /** Pergunta humana ativa pausa a execução: o lease não vence enquanto o executor espera a resposta. */
 const NO_ACTIVE_QUESTION = "NOT EXISTS (SELECT 1 FROM human_questions q WHERE q.application_id=auth.application_id AND q.status IN ('pending','delivered','delivery_failed'))";
+/**
+ * #32 — espera humana do executor: confirmação final pendente no painel ou automação pausada
+ * pelo kill-switch. Nesse intervalo o lease sozinho não derruba a reserva (o usuário pode
+ * demorar): ela vale até o mais tardio entre o lease e o TTL da emissão (`expires_at`). A
+ * confirmação, a retomada e cada consulta do worker reiniciam o lease.
+ */
+const HUMAN_WAIT = "(auth.paused_at IS NOT NULL OR EXISTS (SELECT 1 FROM applications a WHERE a.authorization_id=auth.id AND a.status='awaiting_final_confirmation'))";
 
 /**
  * Expira autorizações vencidas:
@@ -1946,7 +2105,8 @@ const NO_ACTIVE_QUESTION = "NOT EXISTS (SELECT 1 FROM human_questions q WHERE q.
 export function expireAuthorizations() {
   const timestamp = now();
   const pending = db.prepare(`SELECT 1 FROM application_authorizations auth WHERE (auth.state='issued' AND auth.expires_at <= ?)
-    OR (auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}) LIMIT 1`).get(timestamp, timestamp);
+    OR (auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION} AND NOT ${HUMAN_WAIT})
+    OR (auth.state='claimed' AND MAX(auth.expires_at, COALESCE(auth.lease_expires_at, auth.expires_at)) <= ? AND ${HUMAN_WAIT}) LIMIT 1`).get(timestamp, timestamp, timestamp);
   if (pending) tx(() => {
     const issued = db.prepare("SELECT id FROM application_authorizations WHERE state='issued' AND expires_at <= ?").all(timestamp) as { id: string }[];
     for (const authorization of issued) {
@@ -1958,7 +2118,7 @@ export function expireAuthorizations() {
       for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
     }
     const leases = db.prepare(`SELECT auth.id,auth.application_id,auth.job_id,auth.claimed_by,COALESCE(auth.lease_expires_at, auth.expires_at) AS lease_expires_at
-      FROM application_authorizations auth WHERE auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}`).all(timestamp) as Record<string, string>[];
+      FROM application_authorizations auth WHERE auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION} AND NOT ${HUMAN_WAIT}`).all(timestamp) as Record<string, string>[];
     for (const lease of leases) {
       db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='lease_expired' WHERE id=? AND state='claimed'").run(timestamp, lease.id);
       const updated = db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
@@ -1969,6 +2129,17 @@ export function expireAuthorizations() {
         authorization_id: lease.id, worker_id: lease.claimed_by, lease_expires_at: lease.lease_expires_at, message: "resultado desconhecido — verificar no portal",
       });
       abortApplyingJob(String(lease.job_id), "lease_expired_unknown_result", "system:authorization");
+    }
+    // #32: espera humana além do TTL da emissão — nada foi enviado (o clique final exige o token).
+    const waiting = db.prepare(`SELECT auth.id,auth.application_id,auth.job_id,auth.claimed_by FROM application_authorizations auth
+      WHERE auth.state='claimed' AND MAX(auth.expires_at, COALESCE(auth.lease_expires_at, auth.expires_at)) <= ? AND ${HUMAN_WAIT}`).all(timestamp) as Record<string, string>[];
+    for (const row of waiting) {
+      db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired_waiting_human' WHERE id=? AND state='claimed'").run(timestamp, row.id);
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+        claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada aguardando sua confirmação final',updated_at=?
+        WHERE authorization_id=? AND status IN ('in_progress','needs_review','awaiting_final_confirmation')`).run(timestamp, row.id);
+      audit("application", String(row.application_id), "authorization_expired_waiting_human", { authorization_id: row.id, worker_id: row.claimed_by });
+      abortApplyingJob(String(row.job_id), "authorization_expired", "system:authorization");
     }
   });
   recoverStuckApplications();
@@ -1984,7 +2155,7 @@ export function recoverStuckApplications(): number {
     FROM applications
     JOIN jobs ON jobs.id=applications.job_id
     LEFT JOIN application_authorizations auth ON auth.id=applications.authorization_id
-    WHERE jobs.status='applying' AND applications.status IN ('in_progress','needs_review') AND applications.claimed_by IS NOT NULL
+    WHERE jobs.status='applying' AND applications.status IN ('in_progress','needs_review','awaiting_final_confirmation') AND applications.claimed_by IS NOT NULL
       AND (auth.id IS NULL OR auth.state<>'claimed' OR applications.automation_mode<>'authorized_auto')`).all() as Record<string, string | null>[];
   if (!find().length) return 0;
   return tx(() => {
@@ -2023,9 +2194,19 @@ function currentAuthorization(applicationId: string) {
     WHERE applications.id=?`).get(applicationId) as Record<string, unknown> | undefined;
 }
 
-/** #18: `issued` vale pelo TTL da emissão; `claimed`, pelo lease renovado no heartbeat. */
+/**
+ * #18: `issued` vale pelo TTL da emissão; `claimed`, pelo lease renovado no heartbeat.
+ * #32: em espera humana (confirmação final pendente ou kill-switch) vale o mais tardio entre o
+ * lease e o TTL da emissão: a demora do usuário não derruba a reserva antes do TTL.
+ */
 function authorizationValidUntil(value: Record<string, unknown>) {
-  return String(value.state === "claimed" ? (value.lease_expires_at ?? value.expires_at) : value.expires_at);
+  if (value.state !== "claimed") return String(value.expires_at);
+  if (value.paused_at || value.application_status === "awaiting_final_confirmation") {
+    const lease = String(value.lease_expires_at ?? value.expires_at);
+    const ttl = String(value.expires_at);
+    return lease > ttl ? lease : ttl;
+  }
+  return String(value.lease_expires_at ?? value.expires_at);
 }
 
 function assertCurrentAuthorization(value: Record<string, unknown> | undefined, expectedState: "issued" | "claimed", timestamp = now()) {
@@ -2052,10 +2233,12 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
   const lease = leaseExpiresAt();
   db.exec("BEGIN IMMEDIATE");
   try {
+    assertAutomationActive(db);
     const authorization = assertCurrentAuthorization(currentAuthorization(applicationId), "issued", timestamp);
     if (authorization.nonce !== nonce) throw new Error("application.authorization.unavailable");
     // #10: só vale autorização emitida pelo dashboard (assinatura HMAC com o segredo do processo).
     if (!hasValidAuthorizationSignature(authorization)) throw new Error("application.authorization.unavailable");
+    assertAtsUrl(db, authorization.application_url);
     if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     // Vaga excluída nunca é enviada, mesmo que uma autorização tenha escapado da revogação.
     assertJobNotArchived(String(authorization.job_id));
@@ -2082,10 +2265,11 @@ export function heartbeatAuthorizedApplication(id: string, workerId: string) {
   return tx(() => {
     const timestamp = now();
     const { authorization, worker } = claimedAuthorizationFor(id, workerId);
-    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     const lease = leaseExpiresAt();
+    // A validade (lease, ou TTL durante a espera humana do #32) já foi conferida acima.
     const renewed = db.prepare(`UPDATE application_authorizations SET lease_expires_at=?,heartbeat_at=?
-      WHERE id=? AND state='claimed' AND claimed_by=? AND COALESCE(lease_expires_at, expires_at) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
+      WHERE id=? AND state='claimed' AND claimed_by=? AND MAX(expires_at, COALESCE(lease_expires_at, expires_at)) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
     if (!renewed.changes) throw new Error("application.authorization.unavailable");
     return { application_id: id, authorization_valid: true, lease_expires_at: lease, heartbeat_at: timestamp };
   });
@@ -2153,27 +2337,29 @@ function claimedAuthorizationFor(id: string, workerId: string) {
 
 /**
  * C1 — confirms an authorized automatic submission. Only the worker holding the claim may
- * call it, with observable evidence; an observed URL must canonicalize to the authorized one.
+ * call it, with observable evidence and the observed URL (same canonical hash as the
+ * authorized one, on an allowlisted ATS). #32: it also needs the single-use `submit_token`
+ * delivered after the human final confirmation, the kill-switch on and the daily limit free.
  */
-export function submitAuthorizedApplication(id: string, input: { worker_id: string; evidence_ref: string; observed_url?: string | null }) {
+export function submitAuthorizedApplication(id: string, input: { worker_id: string; evidence_ref: string; observed_url?: string | null; submit_token?: string | null }) {
   expireAuthorizations();
   const evidenceRef = String(input?.evidence_ref ?? "").trim();
   const timestamp = now();
-  tx(() => {
+  const limited = tx(() => {
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
     if (authorization.application_status !== "in_progress") throw new Error("application.authorization.unavailable");
     if (!evidenceRef) throw new Error("SUBMISSION_EVIDENCE_REQUIRED");
-    if (input.observed_url != null && String(input.observed_url).trim() !== "") {
-      let observedHash = "";
-      try { observedHash = createHash("sha256").update(canonicalizeJobUrl(String(input.observed_url))).digest("hex"); } catch { throw new Error("application.url_mismatch"); }
-      if (observedHash !== authorization.application_url_hash) throw new Error("application.url_mismatch");
-    }
-    const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=? WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
+    const hit = executor.checkFinalSubmit(id, authorization, input ?? {}, worker, timestamp);
+    if (hit) return hit;
+    const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=?,submit_token_hash=NULL WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
     if (!consumed.changes) throw new Error("application.authorization.unavailable");
     db.prepare("UPDATE applications SET status='submitted',submitted_at=?,evidence_ref=?,current_step='Envio confirmado pelo portal',updated_at=? WHERE id=? AND status='in_progress'").run(timestamp, evidenceRef.slice(0, 500), timestamp, id);
     markJobApplied(String(authorization.job_id), timestamp, `worker:${worker}`, evidenceRef.slice(0, 500));
-    audit("application", id, "submitted_authorized", { worker_id: worker, authorization_id: authorization.id });
+    audit("application", id, "submitted_authorized", { worker_id: worker, authorization_id: authorization.id, final_confirmation_by: authorization.final_confirmation_by ?? null });
+    return null;
   });
+  // O limite revoga a autorização (gravado acima); só então o envio é recusado.
+  if (limited) throw new Error("application.daily_limit_reached");
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
@@ -2184,7 +2370,7 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
   const timestamp = now();
   tx(() => {
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
-    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     revokeAuthorizationRows(id, `execution_failed:${reason}`);
     db.prepare(`UPDATE applications SET status='failed',automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,
       authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=?`).run(`Falha no envio autorizado: ${reason}`, timestamp, id);
@@ -2194,6 +2380,10 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
   });
   return listApplications().find((item) => item.id === id) ?? null;
 }
+
+// #32 — dry-run com segunda confirmação humana, limite diário e kill-switch (src/db/applications.ts).
+const executor = createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, listApplications, leaseExpiresAt });
+export const { requestFinalConfirmation, confirmFinalSubmission, cancelFinalConfirmation, pollFinalConfirmation, getApplicationEvidence, automationOverview, updateAutomationSettings } = executor;
 
 export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }) {
   // A random id never collides between runs started in the same millisecond; an explicit id
@@ -2266,7 +2456,7 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   const job = getJob(jobId);
   if (!job) throw new Error("job.not_found");
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(jobId) as { status: string } | undefined;
-  if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new Error("A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.");
+  if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new Error("A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.");
   const timestamp = now();
   const id = idFor(`feedback|${jobId}|${timestamp}|${mode}|${reasonCode}|${detailKey}`);
   const cycle = Number((db.prepare("SELECT COALESCE(MAX(cycle),0)+1 AS cycle FROM job_feedback_events WHERE job_id = ?").get(jobId) as { cycle: number }).cycle);
@@ -2369,7 +2559,7 @@ export function archiveJob(id: string, input: { reason?: unknown; confirmation?:
   const job = getJob(id);
   if (!job) throw new Error("job.not_found");
   if ((job as Job & { archived_at?: string | null }).archived_at) throw new Error("job.archived");
-  const executing = db.prepare("SELECT id FROM applications WHERE job_id=? AND status='in_progress' LIMIT 1").get(id);
+  const executing = db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id);
   if (executing || job.status === "applying") throw new Error("job.archive.application_in_progress");
   const reason = String(input.reason ?? "").trim().slice(0, 500);
   const timestamp = now();
@@ -2440,7 +2630,7 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   const projectId = job.project_id ?? "busca-emprego";
   const timestamp = now();
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
-  const locked = activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status);
+  const locked = activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status);
   type FeedbackRow = { id: string; project_id: string; mode: string; detail_key: string | null; job_id: string; facet_value: string | null };
 
   if (input.feedback_id) {

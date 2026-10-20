@@ -91,7 +91,7 @@ test("score explicável, eliminatórios e teste de leitura pelo HTTP", { timeout
   assert.equal(blockers.find((item) => item.kind === "work_model").status, "blocked");
 
   await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
-  const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: "CV", content: "Experiência\nBackend em Node.js desde 2019" })).data;
+  const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: "CV", content: "Experiência\nBackend em Node.js" })).data;
   assert.equal((await api("GET", `/api/resumes/${resume.id}/parse-check`)).data.parse_check, null);
   const reviewed = (await api("POST", `/api/resumes/${resume.id}/review`, { verdict: "pass" })).data;
   assert.equal(reviewed.review_status, "fail");
@@ -100,7 +100,7 @@ test("score explicável, eliminatórios e teste de leitura pelo HTTP", { timeout
   assert.equal(blocked.status, 409);
   assert.equal(blocked.data.error, "resume.pdf_parse_failed");
 
-  assert.equal((await api("PATCH", `/api/resumes/${resume.id}`, { content: "Contato\nana@example.com\nExperiência\nBackend em Node.js desde 2019" })).status, 200);
+  assert.equal((await api("PATCH", `/api/resumes/${resume.id}`, { content: "Contato\nana@example.com\nExperiência\nBackend em Node.js" })).status, 200);
   const check = (await api("POST", `/api/resumes/${resume.id}/parse-check`)).data.parse_check;
   assert.equal(check.ok, true, JSON.stringify(check.missing));
   assert.match(check.extracted_text, /ana@example\.com/u);

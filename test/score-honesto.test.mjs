@@ -133,7 +133,7 @@ describe("teste de leitura do PDF", () => {
     store.confirmProfessionalProfile(profile.id, "tester");
     const job = interestedJob("parse-job");
 
-    const good = store.createResume({ job_id: job.id, title: "CV Ana", content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js e PostgreSQL desde 2019" });
+    const good = store.createResume({ job_id: job.id, title: "CV Ana", content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js e PostgreSQL" });
     const passed = await store.runResumeParseCheck(good.id);
     assert.equal(passed.ok, true, JSON.stringify(passed.missing));
     assert.equal(passed.stale, false);
@@ -141,7 +141,7 @@ describe("teste de leitura do PDF", () => {
     assert.equal(store.getResumeParseCheck(good.id).ok, true);
     assert.equal(store.reviewResume(good.id, { verdict: "pass" }).review_status, "pass");
 
-    const noContact = store.createResume({ job_id: job.id, title: "CV sem contato", content: "Experiência\nBackend em Node.js e PostgreSQL desde 2019" });
+    const noContact = store.createResume({ job_id: job.id, title: "CV sem contato", content: "Experiência\nBackend em Node.js e PostgreSQL" });
     const failed = await store.ensureResumeParseCheck(noContact.id);
     assert.equal(failed.ok, false);
     assert.ok(failed.missing.some((item) => item.includes("ana.souza@example.com")));
@@ -153,7 +153,7 @@ describe("teste de leitura do PDF", () => {
     assert.equal(errorResponse(new Error("resume.pdf_parse_failed")).status, 409);
 
     // Corrigir o conteúdo invalida o teste anterior (stale) e o novo teste libera.
-    store.updateResume(noContact.id, { content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js e PostgreSQL desde 2019" });
+    store.updateResume(noContact.id, { content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js e PostgreSQL" });
     assert.equal(store.getResumeParseCheck(noContact.id).stale, true);
     assert.equal((await store.ensureResumeParseCheck(noContact.id)).ok, true);
   });
@@ -165,6 +165,22 @@ describe("teste de leitura do PDF", () => {
     assert.equal(check.ok, false);
     assert.ok(check.token_ratio < 0.95);
     assert.equal(store.reviewResume(resume.id).review_findings[0], "pdf.parse_failed");
+  });
+
+  test("fato novo (#31) e teste de leitura (#34) bloqueiam juntos; só corrigir o conteúdo libera", async () => {
+    const job = interestedJob("parse-and-facts-job");
+    const resume = store.createResume({ job_id: job.id, title: "CV", content: "Experiência\nAumentei a receita em 40% com Node.js" });
+    await store.ensureResumeParseCheck(resume.id);
+    const reviewed = store.reviewResume(resume.id, { verdict: "pass" });
+    assert.equal(reviewed.review_status, "fail");
+    assert.ok(reviewed.review_findings.includes("pdf.parse_failed"), JSON.stringify(reviewed.review_findings));
+    assert.ok(reviewed.review_findings.some((finding) => finding.startsWith("facts.unverified")), JSON.stringify(reviewed.review_findings));
+    assert.throws(() => store.approveResume(resume.id, "APROVO", { override_reason: "Aprovo mesmo assim, revisei manualmente." }), /resume\.unverified_facts/u);
+
+    store.updateResume(resume.id, { content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js" });
+    assert.equal((await store.ensureResumeParseCheck(resume.id)).ok, true);
+    assert.equal(store.reviewResume(resume.id, { verdict: "pass" }).review_status, "pass");
+    assert.equal(store.approveResume(resume.id, "APROVO").status, "approved");
   });
 });
 

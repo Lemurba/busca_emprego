@@ -142,6 +142,8 @@ export interface Resume {
   coverage?: ResumeCoverage | null;
   /** Resumo do último teste de leitura do PDF (sem o texto extraído). */
   parse_check?: { ok: boolean; stale: boolean; missing: string[]; checked_at: string; token_ratio: number } | null;
+  /** Resumo da checagem de fatos da versão atual (#31): bloqueantes pendentes e avisos. */
+  fact_check?: { pending: number; warnings: number };
   created_at: string;
   updated_at: string;
 }
@@ -164,7 +166,7 @@ export interface Application {
   id: string;
   job_id: string;
   resume_id: string | null;
-  status: "queued" | "in_progress" | "needs_review" | "submitted" | "accepted" | "rejected" | "failed";
+  status: "queued" | "in_progress" | "awaiting_final_confirmation" | "needs_review" | "submitted" | "accepted" | "rejected" | "failed";
   automation_mode: "manual" | "assisted" | "authorized_auto";
   auto_authorized_at: string | null;
   authorized_resume_id: string | null;

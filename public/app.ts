@@ -2,6 +2,7 @@ import * as LeafletModule from "leaflet";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
+import { type AutomationOverview, authorizationCell, automationPanel, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
 
 // Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
 const leafletLib: any = (LeafletModule as any).default ?? LeafletModule;
@@ -63,7 +64,7 @@ type ParseCheckSummary = { ok: boolean; stale: boolean; missing: string[]; check
 type ParseCheck = ParseCheckSummary & { extracted_text: string; checks: Array<{ key: string; label: string; ok: boolean; detail: string }> };
 type Lifecycle = "open" | "unknown" | "applied" | "lost" | "not_interested";
 
-type Resume = { id: string; job_id: string; base_resume_id: string | null; version: number; title: string; status: string; content: string; keywords: string[]; changes: string[]; updated_at: string; coverage?: Coverage | null; parse_check?: ParseCheckSummary | null; review_status?: string; review_findings?: string[] };
+type Resume = { id: string; job_id: string; base_resume_id: string | null; version: number; title: string; status: string; content: string; keywords: string[]; changes: string[]; updated_at: string; coverage?: Coverage | null; parse_check?: ParseCheckSummary | null; review_status?: string; review_findings?: string[]; fact_check?: { pending: number; warnings: number } };
 type BaseResume = { id: string; title: string; file_name: string; mime_type: "application/pdf"; is_base: boolean; created_at: string; updated_at: string };
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
@@ -73,7 +74,7 @@ type SourceConfig = { id: string; name: string; source_type: string; domain: str
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
 type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; automation?: AutomationOverview; stats: Record<string, any> };
 
 /* ------------------------------------------------------------------ */
 /* Vocabulário: um único lugar traduz cada enum para a interface.      */
@@ -107,8 +108,8 @@ const lifecycleMeta: Record<Lifecycle, { label: string; plural: string; tone: st
 };
 const lifecycleOrder: Lifecycle[] = ["open", "unknown", "applied", "lost", "not_interested"];
 
-const applicationStatusLabels: Record<string, string> = { queued: "Na fila", needs_review: "Precisa de revisão", in_progress: "Em andamento", submitted: "Enviada", accepted: "Aceita", rejected: "Recusada", failed: "Falhou" };
-const applicationStatusTone: Record<string, string> = { submitted: "teal", accepted: "teal", rejected: "red", failed: "red", in_progress: "purple" };
+const applicationStatusLabels: Record<string, string> = { queued: "Na fila", needs_review: "Precisa de revisão", in_progress: "Em andamento", awaiting_final_confirmation: "Aguardando sua confirmação final", submitted: "Enviada", accepted: "Aceita", rejected: "Recusada", failed: "Falhou" };
+const applicationStatusTone: Record<string, string> = { submitted: "teal", accepted: "teal", rejected: "red", failed: "red", in_progress: "purple", awaiting_final_confirmation: "orange" };
 const automationModeLabels: Record<string, string> = { manual: "Manual", assisted: "Assistido", authorized_auto: "Automático autorizado" };
 const roleLabels: Record<string, string> = {
   coordinator: "Coordenador", source_scout: "Coletor de vagas", job_enrichment: "Enriquecedor de vagas", normalizer_deduper: "Normalizador e deduplicador",
@@ -754,13 +755,13 @@ function renderApplications(data: Data) {
   const applications = data.applications.filter((application) => byId.has(application.job_id));
   const rows = applications.map((application) => {
     const job = byId.get(application.job_id)!;
-    return `<tr><td data-label="Vaga"><button type="button" class="table-link" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button><small>${escapeHtml(job.company)}</small></td><td data-label="Estado"><span class="status-pill ${applicationStatusTone[application.status] ?? "orange"}">${escapeHtml(label(applicationStatusLabels, application.status))}</span></td><td data-label="Data">${escapeHtml(formatDate(application.submitted_at))}</td><td data-label="Desde o envio">${escapeHtml(job.application_date ? relativeApplication(job) : "Ainda não enviada")}</td><td data-label="Modo">${escapeHtml(label(automationModeLabels, application.automation_mode))}</td><td data-label="Etapa">${escapeHtml(application.current_step || "—")}</td><td class="cell-action"><button class="secondary-button" data-detail="${escapeHtml(job.id)}" aria-label="${escapeHtml(`Abrir ${job.title}`)}">Abrir</button></td></tr>`;
+    return `<tr><td data-label="Vaga"><button type="button" class="table-link" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button><small>${escapeHtml(job.company)}</small></td><td data-label="Estado"><span class="status-pill ${applicationStatusTone[application.status] ?? "orange"}">${escapeHtml(label(applicationStatusLabels, application.status))}</span></td><td data-label="Data">${escapeHtml(formatDate(application.submitted_at))}</td><td data-label="Desde o envio">${escapeHtml(job.application_date ? relativeApplication(job) : "Ainda não enviada")}</td><td data-label="Modo">${escapeHtml(label(automationModeLabels, application.automation_mode))}</td><td data-label="Autorização">${authorizationCell(data.automation, application.id, { escapeHtml, formatDate })}</td><td data-label="Etapa">${escapeHtml(application.current_step || "—")}</td><td class="cell-action"><button class="secondary-button" data-detail="${escapeHtml(job.id)}" aria-label="${escapeHtml(`Abrir ${job.title}`)}">Abrir</button></td></tr>`;
   }).join("");
   const pending = data.jobs.filter((job) => job.lifecycle === "open" || job.lifecycle === "unknown");
   return `${pageHeading(pageMeta.applications.label, "Veja quando cada candidatura foi registrada e há quanto tempo ela está no histórico.")}
-    <div class="metric-grid">${metric("Enviadas", data.stats.applied ?? 0, "Com data registrada", "✓", "teal", true)}${metric("Na fila", applications.filter((item) => ["queued", "in_progress", "needs_review"].includes(item.status)).length, "Precisam de revisão ou envio", "↗", "orange")}${metric("Vagas perdidas", data.stats.lost ?? 0, "Prazo passou sem envio", "!", "red")}${metric("Sem interesse", data.stats.notInterested ?? 0, "Decisão registrada", "×", "neutral")}</div>
+    <div class="metric-grid">${metric("Enviadas", data.stats.applied ?? 0, "Com data registrada", "✓", "teal", true)}${metric("Na fila", applications.filter((item) => ["queued", "in_progress", "awaiting_final_confirmation", "needs_review"].includes(item.status)).length, "Precisam de revisão ou envio", "↗", "orange")}${metric("Vagas perdidas", data.stats.lost ?? 0, "Prazo passou sem envio", "!", "red")}${metric("Sem interesse", data.stats.notInterested ?? 0, "Decisão registrada", "×", "neutral")}</div>
     <div class="section-head"><div><h2>Histórico de candidaturas</h2><p>Uma data só é registrada quando o envio é confirmado.</p></div></div>
-    <div class="table-wrap"><table class="data-table responsive-table"><thead><tr><th>Vaga</th><th>Estado</th><th>Data da candidatura</th><th>Tempo desde envio</th><th>Modo</th><th>Etapa</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${rows || `<tr><td colspan="7"><div class="empty-state"><div><strong>Nenhuma candidatura registrada</strong><span>Abra uma vaga e registre o envio quando ele acontecer.</span></div></div></td></tr>`}</tbody></table></div>
+    <div class="table-wrap"><table class="data-table responsive-table"><thead><tr><th>Vaga</th><th>Estado</th><th>Data da candidatura</th><th>Tempo desde envio</th><th>Modo</th><th>Autorização</th><th>Etapa</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${rows || `<tr><td colspan="8"><div class="empty-state"><div><strong>Nenhuma candidatura registrada</strong><span>Abra uma vaga e registre o envio quando ele acontecer.</span></div></div></td></tr>`}</tbody></table></div>
     <div class="section-head"><div><h2>Vagas ainda sem candidatura</h2><p>Abertas ou a confirmar, ordenadas pelo prazo.</p></div>${pending.length > 6 ? `<button class="text-button" data-page="jobs">Ver todas →</button>` : ""}</div><div class="company-grid">${pending.sort((a, b) => (daysUntil(a.deadline_at) ?? 999) - (daysUntil(b.deadline_at) ?? 999)).slice(0, 6).map((job) => `<article class="company-card"><div class="company-top"><div><h3>${escapeHtml(job.title)}</h3><p>${escapeHtml(job.company)} · ${escapeHtml(job.location)}</p></div>${lifecycleChip(job)}</div><div class="company-stat"><div><span>Prazo</span><strong>${escapeHtml(deadlineText(job))}</strong></div><div><span>Decisão</span><strong>${escapeHtml(label(decisionLabels, job.decision))}</strong></div></div><button class="secondary-button" data-detail="${escapeHtml(job.id)}">Revisar vaga</button></article>`).join("") || `<div class="empty-state"><div><strong>Todas as vagas estão encaminhadas</strong></div></div>`}</div>`;
 }
 
@@ -771,7 +772,7 @@ function renderResumes(data: Data) {
       <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
       <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
     <div class="section-head"><div><h2>Currículos por vaga</h2><p>Cada um nasce quando você marca interesse numa vaga.</p></div></div>
-    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
+    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
 }
 
 function companyStats(data: Data) {
@@ -843,6 +844,7 @@ function renderOperations(data: Data) {
   const sourceRows = data.sourceConfigs.map((source) => `<tr><td data-label="Fonte"><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(source.domain)}</small></td><td data-label="Prontidão"><span class="status-pill ${readinessTone[source.readiness_status ?? ""] ?? "orange"}">${escapeHtml(label(readinessLabels, source.readiness_status ?? "configured"))}</span></td><td data-label="Detalhe">${escapeHtml(source.readiness_reason || "Ainda não testada")}</td><td data-label="Último teste">${escapeHtml(formatDate(source.last_smoke_test_at))}</td></tr>`).join("");
   return `${pageHeading(pageMeta.operations.label, "Perfil confirmado, rodadas de busca e decisões que dependem de você.", `<button class="secondary-button" data-page="agents">Ver agentes</button>`)}
     <div class="metric-grid">${metric("Perfil ativo", profile ? `v${profile.version}` : "—", profile ? `${facts.length} informações confirmadas` : "Confirmação necessária", "◎", "teal")}${metric("Rodadas", data.rounds.length, `${data.rounds.filter((round) => round.status === "running").length} em execução`, "↻", "purple")}${metric("Duplicatas", data.possibleDuplicates.length, "aguardando sua decisão", "≋", "orange")}${metric("Perguntas", openQuestions.length, "esperando resposta no Telegram", "?", "red")}</div>
+    ${automationPanel(data.automation, (applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || ""), { escapeHtml, formatDate })}
     <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>${profile ? `<span class="status-pill teal">${escapeHtml(label(profileStatusLabels, profile.status))}</span>` : `<span class="status-pill red">Ausente</span>`}</div><div class="ops-list">${facts.map((fact: any) => `<article class="ops-item"><div><strong>${escapeHtml(label(factTypeLabels, fact.type))}</strong><span>${escapeHtml(factDisplay(fact))} · ${escapeHtml(label(originLabels, fact.origin))}${fact.evidence_page ? ` · página ${escapeHtml(fact.evidence_page)}` : ""}</span></div><span class="status-pill ${fact.state === "confirmed" ? "teal" : "orange"}">${fact.state === "confirmed" ? "Confirmado" : "A revisar"}</span></article>`).join("") || `<div class="empty-state"><div><strong>Nenhum perfil confirmado</strong><span>Crie o perfil a partir do currículo-base antes da busca.</span></div></div>`}</div>${profile ? missingBlockerFacts(facts) : ""}</section>
     <section class="panel"><div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta no Telegram.</p></div></div><div class="ops-list">${questions || `<div class="empty-state"><div><strong>Nenhuma pergunta pendente</strong><span>Nenhuma automação está esperando por você.</span></div></div>`}</div></section></div>
     <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Quando há dúvida, você decide.</p></div></div><div class="ops-list">${duplicates || `<div class="empty-state"><div><strong>Fila limpa</strong><span>Nenhuma possível duplicata pendente.</span></div></div>`}</div></section><section class="panel"><div class="section-head flush"><div><h2>Preferências aprendidas</h2><p>Criadas pelo seu “Não tenho interesse”. Pausar não apaga o histórico.</p></div></div><div class="ops-list">${rules || `<div class="empty-state"><div><strong>Sem regras</strong><span>Seus motivos de descarte viram regras aqui.</span></div></div>`}</div></section></div>
@@ -963,7 +965,15 @@ const errorMessages: Record<string, string> = {
   not_found: "Item não encontrado. Atualize a página.",
   not_implemented: "Operação ainda não disponível nesta versão.",
   internal_error: "Erro interno no servidor. Tente novamente.",
-  AUTOMATION_DISABLED: "A candidatura automatizada está desligada nesta instalação.",
+  AUTOMATION_DISABLED: "A candidatura automatizada está desligada (no servidor ou pelo kill-switch do painel).",
+  session_required: "Esta ação precisa da sua sessão no painel.",
+  "application.domain.not_ats": "O link de candidatura não é de um ATS de empresa permitido para envio automático. Use “Enviar manualmente”.",
+  "application.final_confirmation.text_required": "Digite ENVIAR para confirmar o envio.",
+  "application.final_confirmation.not_pending": "Esta candidatura não está mais aguardando confirmação final. Atualize a página.",
+  "application.daily_limit_reached": "O limite diário de envios automáticos foi atingido; a candidatura voltou para sua revisão.",
+  "settings.automation.ats_allowlist.invalid": "Lista de ATS inválida: use um domínio por linha (ex.: greenhouse.io).",
+  "settings.automation.daily_limit.invalid": "O limite diário precisa ser um número inteiro de 0 a 100.",
+  "settings.automation.per_ats_limit.invalid": "O limite por ATS precisa ser um número inteiro de 0 a 100.",
   TLS_REQUIRED: "Acesse o dashboard por HTTPS.",
   PDF_DUPLICATE: "Este PDF já está na biblioteca.",
   PDF_TOO_LARGE: "O PDF deve ter no máximo 5 MB.",
@@ -982,6 +992,10 @@ const errorMessages: Record<string, string> = {
   VERSION_CONFLICT: "A vaga foi alterada em outra tela. Atualize e tente de novo.",
   "workflow.version_conflict": "A vaga foi alterada em outra tela. Atualize e tente de novo.",
   "resume.content.empty": "O currículo está vazio. Escreva o conteúdo antes de revisar ou aprovar.",
+  "resume.unverified_facts": "O currículo tem fatos novos sem confirmação. Confirme, corrija ou remova cada um antes de aprovar.",
+  "resume.fact.stale": "O currículo mudou desde a checagem. Atualize e tente de novo.",
+  "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
+  "resume.fact.already_resolved": "Esse fato já foi resolvido.",
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado, não pelo dashboard.",
   "application.claim.worker_mismatch": "Esta candidatura está reservada por outro executor.",
   "application.url_mismatch": "A página da candidatura não corresponde à URL autorizada. Revise e autorize de novo.",
@@ -1394,6 +1408,8 @@ function showJobDetail(id: string) {
       primary = `<button class="primary-button" data-action="create-resume" data-job-id="${escapeHtml(job.id)}">Preparar currículo</button>`;
     } else if (resume.status !== "approved") {
       primary = `<button class="primary-button" data-edit-resume="${escapeHtml(resume.id)}">Revisar e aprovar currículo</button>`;
+    } else if (application?.status === "awaiting_final_confirmation") {
+      notice = `<div class="notice warning"><span aria-hidden="true">!</span><div>O executor preencheu o formulário e aguarda sua confirmação final. Revise a captura em “${escapeHtml(pageMeta.operations.label)}” e digite ENVIAR, ou cancele o envio.</div></div>`;
     } else if (application?.status === "in_progress") {
       notice = `<div class="notice warning"><span aria-hidden="true">!</span><div>O envio automático está em andamento. Decisões e modo ficam travados até o executor terminar.</div></div>`;
     } else if (!application) {
@@ -1408,10 +1424,11 @@ function showJobDetail(id: string) {
       primary = `<button class="primary-button" data-action="prepare-manual" data-job-id="${escapeHtml(job.id)}">Vou me candidatar manualmente</button><button class="secondary-button" data-action="authorize-auto" data-job-id="${escapeHtml(job.id)}">Autorizar envio automático</button>`;
     }
   }
-  const secondary = job.lifecycle !== "lost" && job.lifecycle !== "applied" && job.decision !== "not_interested" && application?.status !== "in_progress"
+  const executing = Boolean(application && ["in_progress", "awaiting_final_confirmation"].includes(application.status));
+  const secondary = job.lifecycle !== "lost" && job.lifecycle !== "applied" && job.decision !== "not_interested" && !executing
     ? `<button class="text-button" data-action="no-time" data-job-id="${escapeHtml(job.id)}">Sem tempo agora</button><button class="text-button danger-text" data-action="not-interested" data-job-id="${escapeHtml(job.id)}">Não tenho interesse…</button>`
     : "";
-  const decisionLocked = Boolean(application && ["in_progress", "submitted", "accepted", "rejected"].includes(application.status));
+  const decisionLocked = Boolean(application && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(application.status));
   const canUndoInterest = job.decision !== "interested" || (!resume && !application);
   // Só estas decisões têm desfazer; "expired"/"applied" refletem o estado da vaga.
   const decisionNotice = ["interested", "no_time", "not_interested"].includes(job.decision) && !decisionLocked
@@ -1423,7 +1440,7 @@ function showJobDetail(id: string) {
   notice = decisionNotice + insecureNotice + notice;
   const sourceLinks = `${externalLink(job.job_url, "Abrir vaga ↗")}${externalLink(job.application_url, "Página de candidatura ↗")}${externalLink(job.linkedin_post_url, "Post do LinkedIn ↗")}${externalLink(job.salary_source_url, "Fonte do salário ↗")}`;
   const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
-  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score)}</strong><small>${blockedBlockers(job).length ? `${escapeHtml(blockedBlockers(job).length)} eliminatório(s) — fora da nota` : "Estimativa, não é nota de ATS"}</small></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${application?.status === "in_progress" ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
+  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score)}</strong><small>${blockedBlockers(job).length ? `${escapeHtml(blockedBlockers(job).length)} eliminatório(s) — fora da nota` : "Estimativa, não é nota de ATS"}</small></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${executing ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
   const descriptionRoot = modalRoot().querySelector<HTMLElement>(".detail-description");
   if (descriptionRoot) {
     const enrichmentEvents = data.enrichmentEvents.filter((event) => event.job_id === job.id);
@@ -1471,29 +1488,123 @@ function showResumeModal(id: string) {
   loadParseCheck(resume.id, false).catch(() => { /* o editor continua disponível */ });
 }
 
+// Checagem de fatos (#31): afirmações do currículo sem fato confirmado bloqueiam o APROVO.
+type FactRow = { claim_id: string; claim_kind: string; claim_text: string; spans: [number, number][]; status: string; blocking: boolean };
+type FactReport = { resume_version: number; pending: FactRow[]; warnings: FactRow[]; covered: FactRow[]; resolved: FactRow[] };
+type FactChoice = { action: "confirm" | "correct" | "remove"; claimId: string };
+
+const claimKindLabels: Record<string, string> = { number: "Número", date: "Data", company: "Empresa", role: "Cargo", degree: "Título acadêmico", certification: "Certificação", technology: "Tecnologia" };
+const reviewFindingLabels: Record<string, string> = {
+  "facts.unverified": "Fatos novos sem confirmação no perfil",
+  "content.placeholder": "O conteúdo ainda é o rascunho-padrão",
+  "content.empty": "O currículo está vazio",
+  "content.unsupported_or_modified": "O texto não corresponde aos fatos usados",
+  "keyword.unsupported": "Palavra-chave sem fato que a sustente",
+  "reviewer.fail": "O revisor reprovou esta versão",
+};
+
+function reviewFindingLabel(finding: string) {
+  const [code, count] = finding.split(":");
+  const text = findingLabels[finding] ?? reviewFindingLabels[code ?? ""] ?? humanize(finding);
+  return count && /^\d+$/.test(count) ? `${text} (${count})` : text;
+}
+
+/** Conteúdo com as afirmações destacadas; todo texto passa por escapeHtml. */
+function highlightedResume(content: string, report: FactReport) {
+  const tones: [FactRow[], string, string][] = [
+    [report.pending, "pending", "Fato novo: confirme, corrija ou remova"],
+    [report.warnings, "warning", "Tecnologia fora do perfil (aviso)"],
+    [report.covered, "covered", "Coberto por fato confirmado"],
+    [report.resolved.filter((row) => row.status === "confirmed"), "covered", "Confirmado por você"],
+  ];
+  const marks = tones.flatMap(([rows, tone, title]) => rows.flatMap((row) => row.spans.map(([start, end]) => ({ start, end, tone, title: `${claimKindLabels[row.claim_kind] ?? row.claim_kind}: ${title}` }))))
+    .filter((mark) => mark.start >= 0 && mark.end <= content.length && mark.start < mark.end)
+    .sort((left, right) => left.start - right.start);
+  let html = "";
+  let cursor = 0;
+  for (const mark of marks) {
+    if (mark.start < cursor) continue;
+    html += `${escapeHtml(content.slice(cursor, mark.start))}<mark class="fact-mark ${mark.tone}" title="${escapeHtml(mark.title)}">${escapeHtml(content.slice(mark.start, mark.end))}</mark>`;
+    cursor = mark.end;
+  }
+  return `<div class="fact-preview" aria-label="Conteúdo do currículo com fatos destacados">${html}${escapeHtml(content.slice(cursor))}</div>`;
+}
+
+function factChecklist(report: FactReport) {
+  const pending = report.pending.map((row) => `<li class="fact-item"><div><span class="tag">${escapeHtml(claimKindLabels[row.claim_kind] ?? row.claim_kind)}</span> <strong>${escapeHtml(row.claim_text)}</strong></div><div class="button-row"><button type="button" class="secondary-button" data-fact-action="confirm" data-claim-id="${escapeHtml(row.claim_id)}">Confirmar</button><button type="button" class="secondary-button" data-fact-action="correct" data-claim-id="${escapeHtml(row.claim_id)}">Corrigir…</button><button type="button" class="text-button danger-text" data-fact-action="remove" data-claim-id="${escapeHtml(row.claim_id)}">Remover</button></div></li>`).join("");
+  const warnings = report.warnings.map((row) => `<span class="tag">${escapeHtml(row.claim_text)}</span>`).join("");
+  return `${pending ? `<section class="fact-list"><h3>Fatos novos (${report.pending.length})</h3><p>Estes trechos não aparecem nos fatos confirmados do seu perfil. Confirme só o que for verdade (vira um fato do perfil, numa nova versão), corrija ou remova.</p><ul>${pending}</ul></section>` : ""}${warnings ? `<section class="fact-list"><h3>Tecnologias fora do perfil</h3><p>Só um aviso: não bloqueia a aprovação.</p><div class="tag-list">${warnings}</div></section>` : ""}`;
+}
+
 async function confirmResumeApproval(id: string) {
   if (state.modalDirty) { toast("Salve as alterações antes de aprovar: a aprovação vale para a versão salva.", true); return; }
   const resume = currentData().resumes.find((item) => item.id === id);
   if (!resume) throw new Error("Currículo não encontrado.");
   if (!resume.content.trim()) throw new Error(errorMessages["resume.content.empty"]);
-  // A aprovação exige revisão ATS "pass" (ou exceção justificada): roda a revisão primeiro.
+  // A revisão roda as checagens reais no servidor (o painel não envia veredito).
   const reviewed = await fetchJson<{ review_status?: string; review_findings?: string[]; parse_check?: ParseCheckSummary | null; coverage?: Coverage | null }>(`/api/resumes/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({}) });
+  const facts = await fetchJson<FactReport>(`/api/resumes/${encodeURIComponent(id)}/facts`);
+  const blocked = facts.pending.length > 0;
+  const otherFindings = (reviewed.review_findings ?? []).filter((finding) => !finding.startsWith("facts.unverified"));
   const failed = Boolean(reviewed.review_status && reviewed.review_status !== "pass");
-  const findings = (reviewed.review_findings ?? []).map((finding) => `<li>${escapeHtml(findingLabels[finding] ?? humanize(finding))}</li>`).join("");
+  const findings = otherFindings.map((finding) => `<li>${escapeHtml(reviewFindingLabel(finding))}</li>`).join("");
   // Teste de leitura do PDF reprovado bloqueia a aprovação: a justificativa não libera.
   const parseFailed = (reviewed.review_findings ?? []).includes("pdf.parse_failed");
   const parseMissing = (reviewed.parse_check?.missing ?? []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   const coverageNotice = `<details class="detail-section"><summary>Cobertura de requisitos (${reviewed.coverage ? `${escapeHtml(reviewed.coverage.total)}%` : "—"})</summary>${coverageBlock(reviewed.coverage)}</details>`;
+  const parseBlock = parseFailed ? `<div class="notice danger"><span aria-hidden="true">!</span><div><strong>Um parser não consegue ler parte deste currículo.</strong>${parseMissing ? `<ul>${parseMissing}</ul>` : ""}Corrija o conteúdo (veja “Como um parser enxerga” no editor). Esse bloqueio não aceita justificativa.</div></div>` : "";
+  const reviewBlock = blocked
+    ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Aprovação bloqueada: há ${escapeHtml(facts.pending.length)} fato${facts.pending.length === 1 ? "" : "s"} novo${facts.pending.length === 1 ? "" : "s"} sem confirmação.</strong>${findings ? `<ul>${findings}</ul>` : ""}Resolva cada fato abaixo; a justificativa de exceção não vale para fatos novos.</div></div>`
+    : parseFailed
+      ? ""
+      : failed
+        ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>A revisão ATS encontrou pontos de atenção.</strong>${findings ? `<ul>${findings}</ul>` : ""}Para aprovar mesmo assim, explique o motivo.</div></div><div class="form-field"><label for="approve-reason">Justificativa</label><textarea class="textarea" id="approve-reason" name="override_reason" required minlength="10" maxlength="500" data-message="Escreva uma justificativa com pelo menos 10 caracteres."></textarea></div>`
+        : `<div class="notice"><span aria-hidden="true">✓</span><div>A revisão ATS e a checagem de fatos passaram.</div></div>`;
+  const choice: { value: FactChoice | null } = { value: null };
   const result = await openDialog({
     title: "Aprovar currículo",
     confirmLabel: "Aprovar esta versão",
     validate: () => parseFailed ? "O teste de leitura do PDF falhou. Corrija o conteúdo e salve antes de aprovar." : null,
-    body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${coverageNotice}${parseFailed ? `<div class="notice danger"><span aria-hidden="true">!</span><div><strong>Um parser não consegue ler parte deste currículo.</strong>${parseMissing ? `<ul>${parseMissing}</ul>` : ""}Corrija o conteúdo (veja “Como um parser enxerga” no editor). Esse bloqueio não aceita justificativa.</div></div>` : failed ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>A revisão ATS encontrou pontos de atenção.</strong>${findings ? `<ul>${findings}</ul>` : ""}Para aprovar mesmo assim, explique o motivo.</div></div><div class="form-field"><label for="approve-reason">Justificativa</label><textarea class="textarea" id="approve-reason" name="override_reason" required minlength="10" maxlength="500" data-message="Escreva uma justificativa com pelo menos 10 caracteres."></textarea></div>` : `<div class="notice"><span aria-hidden="true">✓</span><div>A revisão ATS passou.</div></div>`}<label class="check-row"><input type="checkbox" name="confirmed" required data-message="Confirme que revisou o conteúdo." /> <span>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</span></label>`
+    body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${coverageNotice}${parseBlock}${reviewBlock}${highlightedResume(resume.content, facts)}${factChecklist(facts)}${blocked ? "" : `<label class="check-row"><input type="checkbox" name="confirmed" required data-message="Confirme que revisou o conteúdo." /> <span>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</span></label>`}`,
+    onRender: (form) => {
+      const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (blocked && submit) { submit.disabled = true; submit.title = "Resolva os fatos novos antes de aprovar."; }
+      for (const button of form.querySelectorAll<HTMLButtonElement>("[data-fact-action]")) {
+        button.addEventListener("click", () => {
+          choice.value = { action: button.dataset.factAction as FactChoice["action"], claimId: button.dataset.claimId ?? "" };
+          form.querySelector<HTMLButtonElement>("[data-dialog-cancel]")?.click();
+        });
+      }
+    }
   });
-  if (!result) return;
+  if (choice.value) { await resolveResumeFactChoice(id, choice.value, facts); return; }
+  if (!result || blocked) return;
   const overrideReason = String(result.get("override_reason") ?? "").trim();
   await fetchJson(`/api/resumes/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ confirmation: "APROVO", ...(failed ? { override_reason: overrideReason } : {}) }) });
   closeModal(); await loadData(); toast("Currículo aprovado. Agora escolha como se candidatar.");
+}
+
+/** Confirmar, corrigir ou remover um fato novo; depois recarrega o currículo e volta à aprovação. */
+async function resolveResumeFactChoice(id: string, choice: FactChoice, facts: FactReport) {
+  const row = facts.pending.find((item) => item.claim_id === choice.claimId);
+  if (!row) return;
+  let replacement: string | undefined;
+  if (choice.action === "correct") {
+    const corrected = await openDialog({
+      title: "Corrigir fato",
+      confirmLabel: "Salvar correção",
+      body: `<p>Trecho atual: <strong>${escapeHtml(row.claim_text)}</strong></p><div class="form-field"><label for="fact-replacement">Texto correto</label><input class="input" id="fact-replacement" name="replacement" required maxlength="500" value="${escapeHtml(row.claim_text)}" data-message="Escreva o texto correto." /></div><p>Todas as ocorrências do trecho são trocadas e uma nova versão do currículo é salva.</p>`
+    });
+    if (!corrected) { await confirmResumeApproval(id); return; }
+    replacement = String(corrected.get("replacement") ?? "").trim();
+  } else if (choice.action === "confirm") {
+    if (!await confirmDialog("Confirmar fato?", `“${row.claim_text}” passa a ser um fato confirmado do seu perfil (uma nova versão do perfil é criada). Confirme só se for verdade.`, "Confirmar fato")) { await confirmResumeApproval(id); return; }
+  }
+  await fetchJson(`/api/resumes/${encodeURIComponent(id)}/facts/${encodeURIComponent(row.claim_id)}`, { method: "POST", body: JSON.stringify({ action: choice.action, ...(replacement === undefined ? {} : { replacement }) }) });
+  await loadData();
+  showResumeModal(id);
+  toast(choice.action === "confirm" ? "Fato confirmado e adicionado ao perfil." : choice.action === "correct" ? "Trecho corrigido numa nova versão." : "Trecho removido numa nova versão.");
+  await confirmResumeApproval(id);
 }
 
 /** Status atual mais as transições que o servidor aceita pelo painel; reserva e resultado do executor ficam com o executor autorizado. */
@@ -1646,10 +1757,16 @@ async function authorizeAutomaticApplication(jobId: string) {
   if (!resume || !job) throw new Error("Aprove o currículo antes de autorizar.");
   const existing = currentData().applications.find((item) => item.job_id === jobId);
   if (existing?.automation_mode === "authorized_auto" && existing.auto_authorized_at) throw new Error("Esta candidatura já está autorizada. Revogue a autorização ativa antes de criar outra.");
+  // #32: o servidor só autoriza o link de candidatura (application_url) de um ATS de empresa.
+  if (!isAutomaticAllowed(currentData().automation, job.application_url)) {
+    const reason = job.application_url ? `O link de candidatura (${job.application_url}) não é de um ATS de empresa permitido para envio automático. LinkedIn e portais amplos servem só para descoberta.` : "A vaga não tem link de candidatura. Edite a vaga e informe o link do ATS da empresa, ou envie manualmente.";
+    if (await confirmDialog("Envio automático indisponível para esta vaga", reason, "Enviar manualmente")) await prepareManualApplication(jobId);
+    return;
+  }
   const result = await openDialog({
     title: "Autorizar envio automático",
     confirmLabel: "Autorizar envio",
-    body: `${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher e enviar a candidatura por você.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url || job.job_url || "—")}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
+    body: `${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
   });
   if (!result) return;
   const application = existing ?? await fetchJson<Application>("/api/applications", { method: "POST", body: JSON.stringify({ job_id: jobId, resume_id: resume.id, automation_mode: "assisted" }) });
@@ -1881,6 +1998,7 @@ async function handleAction(target: HTMLElement) {
       await fetchJson(`/api/base-resumes/${encodeURIComponent(action.dataset.resumeId ?? "")}`, { method: "DELETE" }); await loadData(); toast("PDF removido da biblioteca."); return;
     }
   }
+  if (await handleAutomationAction(target, { escapeHtml, formatDate, fetchJson, openDialog, confirmDialog, reload: () => loadData(), toast })) return;
   const editResume = target.closest<HTMLElement>("[data-edit-resume]")?.dataset.editResume;
   if (editResume) { showResumeModal(editResume); return; }
   const approve = target.closest<HTMLElement>("[data-approve-resume]")?.dataset.approveResume;

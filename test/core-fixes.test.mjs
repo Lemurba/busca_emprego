@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
+import { atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-core-fixes-"));
@@ -29,7 +30,7 @@ function newJob(overrides = {}) {
   counter += 1;
   return store.upsertJob({
     id: `core-job-${counter}`, title: `Vaga núcleo ${counter}`, company: "Empresa Núcleo", source: "fixture",
-    source_url: `https://jobs.example.test/core/${counter}`, application_url: `https://jobs.example.test/core/${counter}/apply`, ...overrides,
+    source_url: `https://jobs.example.test/core/${counter}`, application_url: atsUrl(`core-${counter}`), ...overrides,
   });
 }
 
@@ -285,9 +286,12 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
     assert.equal(notesOnly.status, "in_progress", "re-sending the current status is a no-op, not a transition");
     assert.equal(notesOnly.notes, "aguardando portal");
     assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "intruso", evidence_ref: "portal:ok" }), /worker_mismatch/);
-    assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: "https://jobs.example.test/outra" }), /application\.url_mismatch/);
+    assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: atsUrl("outra") }), /application\.url_mismatch/);
     assert.equal(authState(run.application.id), "claimed");
-    const done = store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: `${run.job.application_url}?utm_source=x` });
+    // #32: dry-run — sem a confirmação final humana e o token o envio é recusado.
+    assert.throws(() => store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: run.job.application_url }), /application\.final_confirmation_required/);
+    const token = confirmFinal(store, run.application.id, "worker-c1", run.job.application_url);
+    const done = store.submitAuthorizedApplication(run.application.id, { worker_id: "worker-c1", evidence_ref: "portal:ok", observed_url: `${run.job.application_url}?utm_source=x`, submit_token: token });
     assert.equal(done.status, "submitted");
     assert.equal(authState(run.application.id), "consumed");
     assert.equal(store.getJob(run.job.id).status, "applied");
