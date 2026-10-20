@@ -80,18 +80,28 @@ Cadastre fontes em `/api/sources`. `auth_strategy` aceita `none`, `bearer`, `bas
 
 ### Executor autorizado de candidatura
 
-A candidatura automática só existe com autorização explícita do usuário (`AUTORIZO`) para a vaga e para a versão exata do currículo aprovado. O navegador é o Browser Harness do Hermes; o protocolo é guardado por `scripts/ops/apply-authorized.mjs`:
+A candidatura automática só existe com autorização explícita do usuário (`AUTORIZO`, dado na sessão do dashboard — o token de serviço não autoriza) para a vaga e para a versão exata do currículo aprovado, e só para link de candidatura de **ATS de empresa** (allowlist editável no painel: Gupy, Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Recruitee, Workable…). LinkedIn e portais amplos servem só para descoberta: a autorização é recusada com `application.domain.not_ats` e o painel oferece "Enviar manualmente". O navegador é o Browser Harness do Hermes; o protocolo é guardado por `scripts/ops/apply-authorized.mjs`:
 
 ```bash
 node scripts/ops/apply-authorized.mjs list                      # fila autorizada: nonce, hash da URL, TTL
 node scripts/ops/apply-authorized.mjs claim --application <id>  # reserva com o nonce (status in_progress) e abre o lease
-#  ... Browser Harness abre a URL autorizada e preenche com o currículo aprovado ...
+#  ... Browser Harness abre a URL autorizada e preenche com o currículo aprovado, SEM clicar em enviar ...
 node scripts/ops/apply-authorized.mjs heartbeat --application <id>  # renova o lease; obrigatório logo antes do clique final
 node scripts/ops/apply-authorized.mjs verify --application <id> --observed-url <url aberta>
-node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <referência do portal>
+node scripts/ops/apply-authorized.mjs request-confirmation --application <id> --observed-url <url> --screenshot tela.png --fields campos.json
+#  ... o usuário confere captura e campos no painel (Saúde das buscas → Aguardando confirmação final) e digita ENVIAR ...
+node scripts/ops/apply-authorized.mjs confirmation-status --application <id>   # entrega o submit_token UMA vez
+#  ... Browser Harness clica em enviar e captura a confirmação do portal ...
+node scripts/ops/apply-authorized.mjs submit --application <id> --evidence-ref <referência do portal> --observed-url <url> --submit-token <token>
 node scripts/ops/apply-authorized.mjs fail   --application <id> --reason captcha_manual
 node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref cnh --question "Possui CNH?"
 ```
+
+**Dry-run sempre:** toda execução para antes do clique final. O envio só é registrado com o `submit_token` de uso único gerado depois do ENVIAR do usuário para aquela execução (o banco guarda só o SHA-256); sem ele a rota responde 422 `application.final_confirmation_required`. "Cancelar envio" no painel revoga a autorização e devolve a candidatura para revisão.
+
+**Limite diário:** padrão de 5 envios automáticos por dia (America/Sao_Paulo), contados no envio final; opcionalmente também por ATS. Atingido o limite (no pedido de confirmação ou no envio), a rota responde 429 `application.daily_limit_reached`, a autorização é revogada e a candidatura volta para revisão. Ajuste no painel ou com `node scripts/ops/automation.mjs limit <n>` / `ats-limit <n|none>`.
+
+**Kill-switch ("pausar e manter"):** no painel (Automação de candidaturas → Pausar) ou `node scripts/ops/automation.mjs off`. Vale na hora para o dashboard e para o servidor MCP (ambos releem o SQLite a cada verificação): autorizar, reservar, pedir/confirmar a confirmação final e enviar respondem 403 `AUTOMATION_DISABLED`. Autorizações emitidas continuam (com o TTL) e voltam a poder ser reservadas ao religar (`automation.mjs on`). Execuções já reservadas mantêm a reserva, vão para `needs_review` com a etapa "Automação pausada (kill-switch)" e perdem qualquer confirmação final; ao religar voltam ao mesmo executor, que precisa pedir nova confirmação. `fail` continua permitido durante a pausa. `RADAR_AUTO_APPLICATION_ENABLED` segue como teto: diferente de `true`, tudo fica desligado independentemente do painel.
 
 Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `--evidence-ref` observado no portal o envio não é confirmado; URL observada diferente da autorizada (mesma canonicalização do app) aborta a execução — nesse caso use `ask` para revisão humana; `fail` grava apenas o código do motivo (nada de conteúdo de página, token ou URL com credencial). Pergunta humana criada com `ask` pausa a candidatura e é entregue por `notify-human-questions.mjs`.
 
@@ -99,15 +109,25 @@ Lease: a reserva vale pelo lease (`RADAR_AUTHORIZATION_LEASE_SECONDS`), não pel
 
 **Navegador:** o executor conduz o navegador configurado no Hermes por `browser.cdp_url: http://127.0.0.1:9222` (`hermes/config.example.yaml`), que tem precedência sobre o motor padrão; com o CDP fora do ar o Hermes não deve abrir outro navegador para candidatura — pare e corrija o serviço do Chrome. Se houver visualizador remoto da sessão, sua URL fica em `RADAR_BROWSER_VIEWER_URL` no `.env.local`. Logins de portais vêm do cofre de credenciais do Hermes (`hermes vault add`); nenhuma candidatura roda em outro perfil ou endpoint CDP.
 
-Verificação obrigatória antes de ligar o gate (após `npm run build`): `node test/e2e/executor.test.mjs` (claim, heartbeat, URL divergente, evidência ausente, pausa por pergunta, envio, falha, gate desligado, automação desligada) e `node test/e2e/executor-lease.test.mjs` (revogação × claim em dois processos, lease, assinatura).
+Verificação obrigatória antes de ligar o gate (após `npm run build`): `node test/e2e/executor.test.mjs` (sessão obrigatória no AUTORIZO/ENVIAR, link fora de ATS, claim, heartbeat, URL divergente, evidência ausente, pausa por pergunta, dry-run com token único, kill-switch, envio, falha, gate desligado) e `node test/e2e/executor-lease.test.mjs` (revogação × claim em dois processos, lease, assinatura).
 
-Para provar o harness **no ambiente real**, use um formulário HTTPS **público** (ex.: `https://httpbin.org/forms/post`) no navegador da instância única: preencha os campos, envie e use a página de confirmação/eco do portal como `--evidence-ref`. O Hermes bloqueia URL privada/interna no navegador (`allow_private_urls: false`), então o fixture local `node test/fixtures/portal-fixture.mjs 8791` serve para checar o **formato** de portal (upload de PDF, consentimento, redirect com protocolo) fora do fluxo autorizado — nunca como URL de candidatura. Isso é coerente com o app: o Radar só autoriza `application_url` pública HTTPS.
+**Lease × espera humana:** enquanto a execução aguarda a confirmação final ou está pausada pelo kill-switch, o lease do claim não vence (o usuário pode demorar); o limite passa a ser o TTL da autorização (`RADAR_AUTHORIZATION_TTL_SECONDS`). Pedir a confirmação, o ENVIAR, cada `confirmation-status` e religar a automação renovam o lease.
+
+Para provar o harness **no ambiente real**, use um formulário HTTPS **público** (ex.: `https://httpbin.org/forms/post`) no navegador da instância única: inclua o domínio temporariamente na allowlist de ATS do painel (e remova depois), preencha os campos, peça a confirmação final, confirme com ENVIAR, envie e use a página de confirmação/eco do portal como `--evidence-ref`. O Hermes bloqueia URL privada/interna no navegador (`allow_private_urls: false`), então o fixture local `node test/fixtures/portal-fixture.mjs 8791` serve para checar o **formato** de portal (upload de PDF, consentimento, redirect com protocolo) fora do fluxo autorizado — nunca como URL de candidatura. Isso é coerente com o app: o Radar só autoriza `application_url` pública HTTPS.
 
 ## 4. Ativação
 
 Antes de habilitar os agentes, confirmar operador, canal de incidente, release anterior, backup íntegro e espaço livre. Não é necessário parar todo o Hermes quando o supervisor permite controle individual. Após iniciar:
 
 **Serviço e watchdog:** o app roda como serviço s6 (seção 1). O watchdog versionado `hermes/cron/radar-watchdog.sh` é copiado para `/opt/data/scripts/` e registrado com `hermes cron create "every 10m" --no-agent --script radar-watchdog.sh --deliver telegram`: checa `/api/health` na `PORT` do `.env.local` (padrão 8787), só envia mensagem quando falha e fica em silêncio com `.radar-stopped`.
+
+**Vaga viva (revalidação sem LLM, #33):** `hermes/cron/radar-liveness.sh` é copiado para o mesmo diretório de scripts e registrado com `hermes cron create "every 6h" --no-agent --script radar-liveness.sh --deliver telegram --name radar-liveness`. Ele roda `scripts/ops/check-liveness.mjs --report`, que lista as vagas pendentes em `GET /api/liveness/due` (token interno; interesse/candidatura em preparo a cada 6 h, demais abertas/desconhecidas a cada 48 h), pede `POST /api/jobs/{id}/check-liveness` para cada uma (em sequência, 1 s entre vagas do mesmo host). Vaga encerrada expira na hora; a expiração por prazo segue com o timer do servidor e `radar-expire-jobs.sh` (não há cron duplicado). Só escreve no Telegram quando alguma vaga foi encerrada na fonte. Diagnóstico manual: `node scripts/ops/check-liveness.mjs --dry-run` (lista sem verificar) e `--limit N`.
+
+- A verificação é feita pelo servidor do Radar, determinística: API pública do Greenhouse (`boards-api.greenhouse.io`), Lever (`api.lever.co`) e Ashby (`api.ashbyhq.com`, vaga ausente do quadro = fechada); Gupy e demais páginas por HTTP 404/410, JSON-LD `JobPosting.validThrough` e marcadores de encerramento ("vaga encerrada", "no longer accepting applications"...). Redirect para listagem, erro de rede, destino recusado ou sinais conflitantes resultam em `unknown` — a vaga **nunca** é fechada na dúvida.
+- Travas de saída: só HTTPS público, todo IP resolvido precisa ser público (o transporte conecta só nesses IPs), no máximo 3 redirects (cada salto revalidado), 10 s, corpo cortado em 2 MB, User-Agent `RadarVagas/1.0 (+verificação de vaga)` e 1 req/s por host.
+- Vaga fechada pela verificação segue o mesmo caminho de "fechada pela fonte" (expira se não houver candidatura em andamento) e não entra mais na avaliação de compatibilidade (`radar_record_score` → `job.closed`).
+- **AUTORIZO** exige a vaga confirmada aberta nas últimas 24 h (`job.liveness.stale`, HTTP 422) por uma verificação do próprio Radar ou por confirmação manual do usuário na sessão do dashboard; `opening_status` gravado por agente, ingestão ou token de serviço não vale como prova. No dashboard, use "Verificar agora" no detalhe da vaga ou no diálogo de autorização. Quando a página não dá sinal determinístico (`unknown`), o usuário pode confirmar manualmente editando a vaga (estado aberta + data da verificação).
+- Repostagem: na ingestão a descrição recebe um SimHash de 64 bits; vaga da mesma empresa, título ≥ 0,92 e descrição a ≤ 6 bits de uma anterior mais antiga (inclusive arquivada/fechada) é registrada em `job_reposts`. A deduplicação exata/multi-chave (`dedup_key`, `description_hash`) continua juntando a mesma vaga numa só; quando essa vaga revista chega com data de publicação ao menos 7 dias mais nova que a última conhecida, a republicação também conta como repostagem. O cartão mostra "Repostada N vezes desde dd/mm/aaaa"; não há penalidade fixa — o motivo de feedback "Vaga repostada" alimenta a faceta `repost_bucket`, que só reduz o score se o usuário costuma rejeitar vagas repostadas.
 
 - verificar API, SQLite e volume com `health-check.mjs`;
 - verificar logs sem CV, tokens, URLs privadas ou conteúdo de prompts;

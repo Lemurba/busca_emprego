@@ -25,7 +25,7 @@ export const agentEditableJobFields = new Set([
   "title", "company", "location", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period",
   "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url",
   "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities",
-  "additional_information", "posted_at", "latitude", "longitude"
+  "additional_information", "posted_at", "latitude", "longitude", "requirements_json"
 ]);
 
 function validatedStringArray(value: unknown, allowed: Set<string>, field: string) {

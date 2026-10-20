@@ -8,7 +8,9 @@
  *     idempotente (`{duplicate:true, question}`), `reply_to_message_ref` precisa casar com
  *     `telegram_message_ref` (422 human_question.reply_not_correlated);
  *   - C1: POST /api/applications/{id}/submit e /fail — exigem claim do mesmo worker, evidência
- *     e (no submit) hash da URL observada igual ao autorizado (422 application.url_mismatch).
+ *     e (no submit) hash da URL observada igual ao autorizado (422 application.url_mismatch);
+ *   - #32: POST /api/applications/{id}/final-confirmation (+ /poll) e submit_token de uso único:
+ *     `confirmFinal(id)` simula o ENVIAR do usuário no painel.
  * Toda requisição recebida fica em `requests` para as asserções.
  */
 import { createHash, randomUUID } from "node:crypto";
@@ -32,9 +34,9 @@ export async function startFakeRadarApi({ token, allowedUsers = [], canonicalize
     return raw ? JSON.parse(raw) : {};
   };
 
-  const claimOf = (app, workerId) => {
+  const claimOf = (app, workerId, statuses = ["in_progress"]) => {
     if (!app) return [404, { error: "application.not_found" }];
-    if (app.authorization !== "claimed" || app.status !== "in_progress") return [409, { error: "application.claim.required" }];
+    if (app.authorization !== "claimed" || !statuses.includes(app.status)) return [409, { error: "application.claim.required" }];
     if (app.claimed_by !== String(workerId ?? "")) return [409, { error: "application.claim.worker_mismatch" }];
     return null;
   };
@@ -85,6 +87,18 @@ export async function startFakeRadarApi({ token, allowedUsers = [], canonicalize
       }
     }
 
+    if (req.method === "POST" && segments[0] === "api" && segments[1] === "applications" && segments.length === 5 && segments[3] === "final-confirmation" && segments[4] === "poll") {
+      const app = applications.get(segments[2]);
+      const refused = claimOf(app, body.worker_id, ["in_progress", "awaiting_final_confirmation"]);
+      if (refused) return send(res, ...refused);
+      if (!app.final_requested) return send(res, 200, { application_id: app.id, status: "not_requested" });
+      if (!app.final_confirmed) return send(res, 200, { application_id: app.id, status: "pending" });
+      if (app.token_delivered) return send(res, 200, { application_id: app.id, status: "confirmed", token_delivered: true });
+      app.token_delivered = true;
+      app.submit_token = `token-${randomUUID()}`;
+      return send(res, 200, { application_id: app.id, status: "confirmed", token_delivered: false, submit_token: app.submit_token });
+    }
+
     if (req.method === "POST" && segments[0] === "api" && segments[1] === "applications" && segments.length === 4) {
       const app = applications.get(segments[2]);
       if (segments[3] === "claim") {
@@ -92,12 +106,22 @@ export async function startFakeRadarApi({ token, allowedUsers = [], canonicalize
         Object.assign(app, { authorization: "claimed", status: "in_progress", claimed_by: String(body.worker_id) });
         return send(res, 200, app);
       }
+      if (segments[3] === "final-confirmation") {
+        const refused = claimOf(app, body.worker_id);
+        if (refused) return send(res, ...refused);
+        if (!body.observed_url || hashOf(body.observed_url) !== app.application_url_hash) return send(res, 422, { error: "application.url_mismatch" });
+        if (!String(body.screenshot_base64 ?? "").startsWith("iVBORw0KGgo")) return send(res, 422, { error: "application.evidence.screenshot_invalid" });
+        Object.assign(app, { status: "awaiting_final_confirmation", final_requested: true, final_confirmed: false, token_delivered: false, fields_summary: body.fields_summary });
+        return send(res, 200, { application: app, evidence_id: `evidence-${app.id}` });
+      }
       if (segments[3] === "submit") {
         const refused = claimOf(app, body.worker_id);
         if (refused) return send(res, ...refused);
         if (!String(body.evidence_ref ?? "").trim()) return send(res, 422, { error: "SUBMISSION_EVIDENCE_REQUIRED" });
-        if (body.observed_url != null && hashOf(body.observed_url) !== app.application_url_hash) return send(res, 422, { error: "application.url_mismatch" });
-        Object.assign(app, { authorization: "consumed", status: "submitted", evidence_ref: String(body.evidence_ref) });
+        if (!body.observed_url) return send(res, 400, { error: "invalid_body" });
+        if (hashOf(body.observed_url) !== app.application_url_hash) return send(res, 422, { error: "application.url_mismatch" });
+        if (!app.submit_token || body.submit_token !== app.submit_token) return send(res, 422, { error: "application.final_confirmation_required" });
+        Object.assign(app, { authorization: "consumed", status: "submitted", evidence_ref: String(body.evidence_ref), submit_token: null });
         return send(res, 200, app);
       }
       if (segments[3] === "fail") {
@@ -135,6 +159,12 @@ export async function startFakeRadarApi({ token, allowedUsers = [], canonicalize
       const applicationUrl = fields.application_url ?? `https://portal.example.test/${id}/aplicar`;
       const app = { id, status: "queued", authorization: "issued", nonce: randomUUID(), application_url: applicationUrl, application_url_hash: hashOf(applicationUrl), ...fields };
       applications.set(id, app);
+      return app;
+    },
+    /** Simula o ENVIAR do usuário no painel (segunda confirmação). */
+    confirmFinal(id) {
+      const app = applications.get(id);
+      Object.assign(app, { status: "in_progress", final_confirmed: true });
       return app;
     },
     stop: () => new Promise((resolve) => server.close(resolve)),

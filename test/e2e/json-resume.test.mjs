@@ -118,7 +118,7 @@ test("currículo aprovado baixa em JSON Resume sem ser alterado", async () => {
   const { confirmed } = state;
   const job = await json(await call("POST", "/api/jobs", { title: "Compression Engineer", company: "Endframe", source: "fixture", source_url: "https://jobs.example/endframe" }), 201);
   await json(await call("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" }), 200);
-  const factsUsed = confirmed.snapshot.facts.filter((fact) => ["name", "experience"].includes(fact.type)).map((fact) => fact.id);
+  const factsUsed = confirmed.snapshot.facts.filter((fact) => ["name", "contact_email", "contact_phone", "experience"].includes(fact.type)).map((fact) => fact.id);
   const resume = await json(await call("POST", "/api/resumes/generate", { job_id: job.id, profile_snapshot_id: confirmed.snapshot.id, facts_used: factsUsed, title: "Currículo Endframe" }), 201);
   await json(await call("POST", `/api/resumes/${resume.id}/review`, { verdict: "pass" }), 200);
   const approved = await json(await call("POST", `/api/resumes/${resume.id}/approve`, { confirmation: "APROVO" }), 200);
