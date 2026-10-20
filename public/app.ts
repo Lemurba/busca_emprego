@@ -1614,7 +1614,7 @@ async function confirmResumeApproval(id: string) {
   const reviewed = await fetchJson<{ review_status?: string; review_findings?: string[]; parse_check?: ParseCheckSummary | null; coverage?: Coverage | null }>(`/api/resumes/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({}) });
   const facts = await fetchJson<FactReport>(`/api/resumes/${encodeURIComponent(id)}/facts`);
   const blocked = facts.pending.length > 0;
-  const otherFindings = (reviewed.review_findings ?? []).filter((finding) => !finding.startsWith("facts.unverified"));
+  const otherFindings = (reviewed.review_findings ?? []).filter((finding) => !finding.startsWith("facts.unverified") && finding !== "pdf.parse_failed");
   const failed = Boolean(reviewed.review_status && reviewed.review_status !== "pass");
   const findings = otherFindings.map((finding) => `<li>${escapeHtml(reviewFindingLabel(finding))}</li>`).join("");
   // Teste de leitura do PDF reprovado bloqueia a aprovação: a justificativa não libera.
