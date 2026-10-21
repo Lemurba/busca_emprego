@@ -14,7 +14,7 @@ const pages = [
   { page: "overview", hash: "painel", label: "Visão geral" },
   { page: "board", hash: "quadro", label: "Quadro" },
   { page: "jobs", hash: "vagas", label: "Vagas", seeded: "Pessoa desenvolvedora TypeScript" },
-  { page: "applications", hash: "candidaturas", label: "Candidaturas" },
+  { page: "applications", hash: "candidaturas", label: "Candidaturas", seeded: "Analista de candidaturas smoke" },
   { page: "resumes", hash: "curriculos", label: "Currículos", seeded: "Currículo smoke" },
   { page: "companies", hash: "empresas", label: "Empresas", seeded: "Outra Empresa" },
   { page: "analytics", hash: "analises", label: "Análises" },
@@ -81,6 +81,15 @@ async function seed(browser: Browser) {
   });
   await api("POST", `api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   await api("POST", "api/resumes", { job_id: job.id, title: "Currículo smoke", content: "RESUMO\nExperiência confirmada com TypeScript." });
+  // Terceira vaga com currículo aprovado (APROVO) e candidatura manual, para a tabela de Candidaturas.
+  const applied = await api("POST", "api/jobs", {
+    title: "Analista de candidaturas smoke", company: "Empresa Candidatura", location: "Curitiba, PR", source: "fixture",
+    source_url: "https://jobs.example.test/ui-smoke/3", application_url: "https://jobs.example.test/ui-smoke/3/apply"
+  });
+  await api("POST", `api/jobs/${applied.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
+  const resume = await api("POST", "api/resumes", { job_id: applied.id, title: "Currículo candidatura smoke", content: "RESUMO\nAnálise de processos." });
+  await api("POST", `api/resumes/${resume.id}/approve`, { confirmation: "APROVO", override_reason: "Currículo semeado pelo smoke de UI." });
+  await api("POST", "api/applications", { job_id: applied.id, resume_id: resume.id, automation_mode: "manual", current_step: "Etapa smoke" });
   await context.close();
 }
 
@@ -128,6 +137,84 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("Vagas: digitar no filtro mantém o foco e filtra; Detalhes abre o modal da vaga", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/vagas");
+    const search = page.locator('#view input[data-filter="query"]');
+    const rows = page.locator("#view .data-table tbody tr");
+    await expect(rows.filter({ hasText: "Pessoa desenvolvedora TypeScript" })).toHaveCount(1);
+    await search.click();
+    // Tecla a tecla: cada uma re-renderiza a página (diff do Preact) sem recriar o campo.
+    await search.pressSequentially("Recife", { delay: 20 });
+    await expect(search).toBeFocused();
+    await expect(search).toHaveValue("Recife");
+    await expect(page.locator("#view .results-count")).toHaveText("1 vaga");
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Engenharia de dados");
+    await expect(page).toHaveURL(/#\/vagas\?q=Recife/);
+    await search.press("End");
+    await search.pressSequentially(" sem resultado");
+    await expect(search).toBeFocused();
+    await expect(page.locator("#view .empty-state")).toContainText("Nenhuma vaga encontrada");
+    await search.fill("");
+    await expect(rows.filter({ hasText: "Pessoa desenvolvedora TypeScript" })).toHaveCount(1);
+    // Select de filtro e ordenação continuam funcionando sem perder o elemento.
+    await page.locator('#view select[data-filter="minMatch"]').selectOption("90");
+    await expect(page.locator('#view select[data-filter="minMatch"]')).toHaveValue("90");
+    await page.locator('#view select[data-filter="minMatch"]').selectOption("0");
+    const salarySort = page.locator('#view [data-sort="salary"]');
+    await salarySort.click();
+    await expect(salarySort).toHaveClass(/active/);
+    await expect(salarySort).toBeFocused();
+    await expect(page).toHaveURL(/ordem=salary/);
+    // Detalhe continua sendo o modal legado (showJobDetail), aberto pela delegação do #view.
+    await page.getByRole("button", { name: "Detalhes de Pessoa desenvolvedora TypeScript" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await expect(page.locator("#modal-root .modal")).toContainText("Pessoa desenvolvedora TypeScript");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+    await page.locator("#view .table-link", { hasText: "Engenharia de dados" }).click();
+    await expect(page.locator("#modal-root .modal")).toContainText("Engenharia de dados");
+    await page.keyboard.press("Escape");
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Currículos: cartão semeado, links de download e formulários de envio/importação", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    const bootstrap = await (await page.request.get("api/bootstrap")).json();
+    const resume = bootstrap.resumes.find((item: { title: string }) => item.title === "Currículo smoke");
+    expect(resume, "currículo semeado no bootstrap").toBeTruthy();
+    await page.goto("#/curriculos");
+    const card = page.locator("#view .resume-card", { hasText: "Currículo smoke" });
+    await expect(card).toHaveCount(1);
+    await expect(card).toContainText("Empresa Exemplo · versão 1");
+    await expect(card).toContainText("Cobertura de requisitos:");
+    await expect(card.locator(".status-pill").first()).toBeVisible();
+    const base = `api/resumes/${encodeURIComponent(resume.id)}/files`;
+    await expect(card.getByRole("link", { name: "Baixar PDF" })).toHaveAttribute("href", `${base}/pdf`);
+    await expect(card.getByRole("link", { name: "Baixar DOCX" })).toHaveAttribute("href", `${base}/docx`);
+    await expect(card.getByRole("link", { name: "JSON Resume" })).toHaveAttribute("href", `${base}/json`);
+    const download = await page.request.get(`${base}/json`);
+    expect(download.ok(), "download JSON Resume do currículo semeado").toBeTruthy();
+    // Envio do PDF-base e importação do JSON Resume (#35) lado a lado.
+    await expect(page.locator('#view form[data-form="base-resume"] input[type="file"]#base-resume-file')).toHaveAttribute("accept", "application/pdf,.pdf");
+    const importInput = page.locator('#view form[data-form="json-resume-import"] input[type="file"]#json-resume-file');
+    await expect(importInput).toHaveAttribute("accept", "application/json,.json");
+    // O submit continua delegado no #view (handleForm): arquivo inválido é recusado no navegador, sem criar perfil.
+    await importInput.setInputFiles({ name: "curriculo.json", mimeType: "application/json", buffer: Buffer.from("não é json") });
+    await page.getByRole("button", { name: "Importar JSON Resume" }).click();
+    await expect(page.locator("#toast-root .toast.error")).toContainText("O arquivo não é um JSON válido.");
+    // Editar continua abrindo o editor legado (modal).
+    await card.getByRole("button", { name: "Editar →" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await expect(page.locator("#modal-root #resume-title")).toHaveValue("Currículo smoke");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Agentes: cartões, Editar e Novo agente abrem o modal", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);
@@ -158,16 +245,16 @@ test.describe("smoke de UI", () => {
     await login(page);
     await expect(page.locator("#view .metric-card")).toHaveCount(4);
     await expect(page.locator("#view .metric-card").first()).toContainText("Vagas abertas");
-    // Fontes de descoberta: as duas vagas semeadas vêm da fonte "fixture".
+    // Fontes de descoberta: as três vagas semeadas vêm da fonte "fixture".
     const sourceBar = page.locator('#view .bar-list [data-chart-filter-type="source"][data-chart-filter-value="fixture"]');
     await expect(sourceBar).toHaveAttribute("aria-pressed", "false");
-    await expect(sourceBar.locator("strong")).toHaveText("2");
-    await expect(page.locator("#view .donut-chart")).toHaveAttribute("aria-label", /Distribuição das 2 vagas/);
+    await expect(sourceBar.locator("strong")).toHaveText("3");
+    await expect(page.locator("#view .donut-chart")).toHaveAttribute("aria-label", /Distribuição das 3 vagas/);
     await expect(page.locator("#view .donut-legend .legend-item")).toHaveCount(5);
     // Clicar filtra (re-render pelo Preact no lugar) e o resumo do filtro aparece; clicar de novo limpa.
     await sourceBar.click();
     await expect(sourceBar).toHaveAttribute("aria-pressed", "true");
-    await expect(page.locator("#view .chart-filter-summary")).toContainText("Filtro: fixture · 2 de 2 vagas");
+    await expect(page.locator("#view .chart-filter-summary")).toContainText("Filtro: fixture · 3 de 3 vagas");
     await page.locator("#view [data-clear-chart-filter]").click();
     await expect(page.locator("#view .chart-filter-summary")).toHaveCount(0);
     await expect(sourceBar).toHaveAttribute("aria-pressed", "false");
@@ -207,7 +294,7 @@ test.describe("smoke de UI", () => {
 
     // Filtro visual: re-render no lugar troca só os marcadores (mesma instância, sem segundo mapa).
     await page.locator('#view .location-row[data-chart-filter-value="Recife, PE"]').click();
-    await expect(page.locator("#view .chart-filter-summary").first()).toContainText("Filtro: Recife, PE · 1 de 2 vagas");
+    await expect(page.locator("#view .chart-filter-summary").first()).toContainText("Filtro: Recife, PE · 1 de 3 vagas");
     await expect(map.locator(".leaflet-interactive")).toHaveCount(1);
     await expect(page.locator("#view .leaflet-container")).toHaveCount(1);
     expect(await map.evaluate((element) => (element as unknown as { _leaflet_id: number })._leaflet_id)).toBe(leafletId);
@@ -288,6 +375,214 @@ test.describe("smoke de UI", () => {
     await expect(column("Em revisão").locator(".job-card", { hasText: "Engenharia de dados" })).toBeVisible();
     await expect.poll(jobStatus).toBe("review");
     await expect(page.locator("#view .column-drop.drop-valid, #view .column-drop.drop-invalid, #view .column-drop.drag-over")).toHaveCount(0);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Candidaturas: tabela com estado, modo e etapa; Abrir mostra o detalhe da vaga", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/candidaturas");
+    const row = page.locator("#view table.data-table tbody tr", { hasText: "Analista de candidaturas smoke" });
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('[data-label="Estado"]')).toHaveText("Na fila");
+    await expect(row.locator('[data-label="Modo"]')).toHaveText("Manual");
+    await expect(row.locator('[data-label="Autorização"]')).toHaveText("—");
+    await expect(row.locator('[data-label="Etapa"]')).toHaveText("Etapa smoke");
+    await row.getByRole("button", { name: "Abrir Analista de candidaturas smoke" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: painel de automação com limites e fila de confirmação final", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="automation-title"]');
+    await expect(panel.getByRole("heading", { name: "Automação de candidaturas" })).toBeVisible();
+    await expect(panel.getByText("Kill-switch")).toBeVisible();
+    await expect(panel.getByText("Envios de hoje")).toBeVisible();
+    const daily = panel.getByLabel("Limite diário (todos os ATS)");
+    await expect(daily).toBeVisible();
+    await expect(daily).toHaveValue(/^\d+$/u);
+    await expect(panel.getByLabel("Limite diário por ATS")).toBeVisible();
+    await expect(panel.getByLabel("ATS permitidos (um domínio por linha)")).not.toHaveValue("");
+    await expect(panel.getByRole("button", { name: "Salvar limites e ATS" })).toBeVisible();
+    const queue = page.locator('#view section[aria-labelledby="final-confirmation-title"]');
+    await expect(queue.getByRole("heading", { name: "Aguardando confirmação final" })).toBeVisible();
+    await expect(queue).toContainText("Nada aguardando");
+    await expect(page.locator("#view")).toContainText("Possíveis duplicatas");
+    await expect(page.locator("#view")).toContainText("Perguntas para você");
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="automation-title"]');
+    const pause = panel.getByRole("button", { name: "Pausar automação" });
+    await expect(pause).toBeVisible();
+    const dialog = page.locator("#dialog-root form.dialog");
+
+    // Cancelar a confirmação não chama a API nem muda o estado.
+    const puts: string[] = [];
+    page.on("request", (request) => { if (request.method() === "PUT" && request.url().endsWith("/api/settings/automation")) puts.push(request.postData() ?? ""); });
+    await pause.click();
+    await expect(dialog.getByRole("heading", { name: "Pausar a candidatura automática?" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(puts, "cancelar não pode chamar a API").toEqual([]);
+    await expect(pause).toBeVisible();
+
+    // Confirmar pausa: PUT { enabled: false } e o botão vira "Religar automação".
+    await pause.click();
+    await expect(dialog.getByRole("heading", { name: "Pausar a candidatura automática?" })).toBeVisible();
+    const paused = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/api/settings/automation"));
+    await dialog.getByRole("button", { name: "Pausar", exact: true }).click();
+    expect((await paused).ok()).toBeTruthy();
+    expect(JSON.parse(puts.at(-1) ?? "{}")).toEqual({ enabled: false });
+    await expect(panel.getByText("Pausada (kill-switch)")).toBeVisible();
+
+    // Restaura: religar não pede confirmação e manda { enabled: true }.
+    const resume = panel.getByRole("button", { name: "Religar automação" });
+    const resumed = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/api/settings/automation"));
+    await resume.click();
+    expect((await resumed).ok()).toBeTruthy();
+    expect(JSON.parse(puts.at(-1) ?? "{}")).toEqual({ enabled: true });
+    await expect(pause).toBeVisible();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: confirmação final mostra a captura e só envia com ENVIAR", async ({ page }) => {
+    const errors = watchConsole(page);
+    // Fila simulada no bootstrap (o fluxo real depende do executor): nada sai para a rede.
+    const applicationId = "app-ui-smoke-final";
+    await page.route("**/api/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const job = body.jobs[0];
+      body.automation.final_confirmations = [{
+        application_id: applicationId, job_id: job.id, requested_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        claimed_by: "executor-smoke", evidence_id: "ev-smoke", observed_url: "https://jobs.example.test/ui-smoke/1/apply",
+        fields_summary: [{ label: "Nome", value: "Pessoa Smoke" }, { label: "E-mail", value: "" }], created_at: new Date().toISOString()
+      }];
+      await route.fulfill({ response, json: body });
+    });
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+    await page.route(`**/api/applications/${applicationId}/evidence/ev-smoke`, (route) => route.fulfill({ contentType: "image/png", body: png }));
+    const confirms: string[] = [];
+    await page.route(`**/api/applications/${applicationId}/confirm-final`, (route) => {
+      confirms.push(route.request().postData() ?? "");
+      return route.fulfill({ json: { ok: true } });
+    });
+    await login(page);
+    await page.goto("#/saude");
+    const queue = page.locator('#view section[aria-labelledby="final-confirmation-title"]');
+    const card = queue.locator("article.final-confirmation");
+    await expect(card).toHaveCount(1);
+    await expect(card.locator("dl.final-fields")).toContainText("Pessoa Smoke");
+    await expect(card.locator("dl.final-fields dd").nth(1)).toHaveText("—");
+    const shot = card.locator("img.final-shot");
+    await expect(shot).toHaveAttribute("src", `/api/applications/${applicationId}/evidence/ev-smoke`);
+    await expect(shot).toHaveAttribute("alt", /^Captura da tela antes do envio: /u);
+    const axe = await new AxeBuilder({ page }).include("#view").analyze();
+    expect(axe.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact ?? "")).map((violation) => violation.id), "axe com a fila preenchida").toEqual([]);
+
+    const dialog = page.locator("#dialog-root form.dialog");
+    await card.getByRole("button", { name: "Enviar agora" }).click();
+    await expect(dialog.getByRole("heading", { name: "Enviar candidatura agora?" })).toBeVisible();
+    // Texto errado não envia: o formulário exige ENVIAR em maiúsculas.
+    await dialog.getByLabel("Digite ENVIAR para confirmar").fill("enviar");
+    await dialog.getByRole("button", { name: "Enviar agora" }).click();
+    await expect(dialog).toBeVisible();
+    expect(confirms, "sem ENVIAR não pode chamar a API").toEqual([]);
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(confirms).toEqual([]);
+
+    await card.getByRole("button", { name: "Enviar agora" }).click();
+    await dialog.getByLabel("Digite ENVIAR para confirmar").fill("ENVIAR");
+    await dialog.getByRole("button", { name: "Enviar agora" }).click();
+    await expect.poll(() => confirms.length).toBe(1);
+    expect(JSON.parse(confirms[0]!)).toEqual({ confirmation: "ENVIAR" });
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Empresas: cartões das empresas semeadas com vagas e salário médio", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/empresas");
+    const card = (name: string) => page.locator("#view .company-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+    await expect(card("Empresa Exemplo").locator(".chip")).toHaveText("1 vaga");
+    await expect(card("Empresa Exemplo").locator(".company-stat strong").first()).toContainText("/mês");
+    await expect(card("Empresa Exemplo")).toContainText("estimado em 1 vaga");
+    await expect(card("Outra Empresa").locator(".company-stat strong").first()).toHaveText("Não informado");
+    await expect(card("Outra Empresa").locator(".tag")).toHaveText(["fixture"]);
+    // Recarregar os dados re-renderiza no lugar sem duplicar cartões.
+    const total = await page.locator("#view .company-card").count();
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(page.locator("#view .company-card")).toHaveCount(total);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Configurações: interruptor de privacidade, re-render e painel de conectores", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/configuracoes");
+    const mapToggle = page.locator('#view input[data-pref="map"]');
+    await expect(mapToggle).not.toBeChecked();
+    // Recarrega os dados antes: o Preact mantém o mesmo input; o aviso deve sair uma vez só.
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await mapToggle.check();
+    await expect(page.locator("#toast-root .toast", { hasText: "Mapa ligado." })).toHaveCount(1);
+    expect(await page.evaluate(() => localStorage.getItem("radar-map-consent"))).toBe("1");
+    await page.reload();
+    await expect(page.locator("#page-heading")).toHaveText("Configurações");
+    await expect(mapToggle).toBeChecked();
+    await mapToggle.uncheck();
+    await expect(page.locator("#toast-root .toast", { hasText: "Mapa desligado." })).toHaveCount(1);
+    expect(await page.evaluate(() => localStorage.getItem("radar-map-consent"))).toBe("0");
+
+    // Ações delegadas continuam funcionando: + Fonte abre o modal.
+    await page.getByRole("button", { name: "Fonte", exact: true }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+
+    // Painel de conectores: carrega, adiciona, pausa e remove uma empresa pela API.
+    const panel = page.locator("#view [data-connector-panel]");
+    await expect(panel).not.toHaveAttribute("aria-busy");
+    await panel.locator("#connector-id").selectOption("lever");
+    await expect(panel.locator("#connector-slug-hint")).toHaveText("empresa: jobs.lever.co/<empresa>");
+    await panel.locator("#connector-slug").fill("ui-smoke-co");
+    await panel.locator("#connector-name").fill("Empresa Conector Smoke");
+    const created = page.waitForResponse((response) => response.url().endsWith("/api/connectors/companies") && response.request().method() === "POST");
+    await panel.getByRole("button", { name: "Adicionar empresa" }).click();
+    expect((await created).status()).toBe(201);
+    const row = panel.locator("tbody tr", { hasText: "Empresa Conector Smoke" });
+    await expect(row).toContainText("Lever · ui-smoke-co");
+    await expect(page.locator("#toast-root .toast", { hasText: "Empresa adicionada à coleta automática." })).toHaveCount(1);
+    await expect(panel.locator("#connector-slug")).toHaveValue("");
+    await expect(row.locator(".status-pill").last()).toHaveText("Ativa");
+    await row.getByRole("button", { name: "Pausar" }).click();
+    await expect(row.locator(".status-pill").last()).toHaveText("Pausada");
+    await expect(row.getByRole("button", { name: "Ativar" })).toBeEnabled();
+    // Re-render da página (recarga de dados) não apaga nem duplica o painel.
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(page.locator("#view [data-connector-panel]")).toHaveCount(1);
+    await expect(row).toHaveCount(1);
+    await expect(panel.getByText("Carregando…")).toHaveCount(0);
+    await row.getByRole("button", { name: "Remover" }).click();
+    await page.getByRole("alertdialog", { name: "Remover empresa?" }).getByRole("button", { name: "Remover" }).click();
+    await expect(row).toHaveCount(0);
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact ?? "")).map((violation) => violation.id), "violações sérias/críticas do axe com o painel carregado").toEqual([]);
     expect(errors, "erros de console").toEqual([]);
   });
 });
