@@ -2,6 +2,7 @@ import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
 import { AnalyticsPage } from "./ui/pages/analytics-page.js";
+import { BoardPage } from "./ui/pages/board-page.js";
 import { OverviewPage } from "./ui/pages/overview-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
@@ -231,7 +232,6 @@ const state = {
   jobsLimit: 50,
   visualFilter: null as VisualFilter | null,
   selectedJobId: null as string | null,
-  dragJobId: null as string | null,
   mapExpanded: false,
   mapEnabled: readPref("radar-map-consent", false),
   browserAiTools: readPref("radar-browser-ai-tools", false),
@@ -383,11 +383,6 @@ function repostText(job: Job) {
   const count = job.repost_count ?? 0;
   if (count < 1) return "";
   return `Repostada ${count} ${count === 1 ? "vez" : "vezes"}${job.first_seen_at ? ` desde ${formatNumericDate(job.first_seen_at)}` : ""}`;
-}
-
-function repostBadge(job: Job) {
-  const text = repostText(job);
-  return text ? `<span class="chip orange" title="Mesma empresa, título e descrição de vaga anterior">${escapeHtml(text)}</span>` : "";
 }
 
 function livenessSummary(job: Job) {
@@ -567,23 +562,6 @@ function allowedMoves(job: Job) {
   return Object.keys(kanbanMoves[job.status] ?? {});
 }
 
-function moveSelect(job: Job) {
-  const moves = allowedMoves(job);
-  if (!moves.length) return "";
-  return `<label class="move-field"><span class="visually-hidden">Mover ${escapeHtml(job.title)} para outra etapa</span><select class="move-select" data-move-id="${escapeHtml(job.id)}"><option value="">Mover para…</option>${moves.map((status) => `<option value="${status}">${escapeHtml(statusColumns.find((column) => column.target === status)?.title ?? statusLabels[status] ?? status)}</option>`).join("")}</select></label>`;
-}
-
-function jobCard(job: Job) {
-  const draggable = allowedMoves(job).length > 0;
-  return `<article class="job-card ${draggable ? "is-draggable" : ""}" ${draggable ? `draggable="true" data-drag-id="${escapeHtml(job.id)}"` : ""} data-detail-id="${escapeHtml(job.id)}">
-    <div class="job-card-top"><h3><button type="button" class="card-title-button" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button></h3>${scoreBadge(job.match_score)}</div>
-    <p><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.location)}</p>
-    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span>${job.insecure_url ? `<span class="chip" title="O link da vaga usa http:// (sem criptografia)">Link não seguro</span>` : ""}${repostBadge(job)}</div>
-    <div class="card-footer"><span>${escapeHtml(salaryLabel(job))}</span><span>${escapeHtml(deadlineText(job))}</span></div>
-    ${moveSelect(job)}
-  </article>`;
-}
-
 /* ------------------------------------------------------------------ */
 /* Mapa (opt-in: os tiles vêm de um servidor de terceiros)             */
 /* ------------------------------------------------------------------ */
@@ -627,10 +605,7 @@ function currentData() {
 
 // Visão geral: migrada para Preact em public/ui/pages/overview-page.tsx (registro em render()).
 
-function renderBoard(data: Data) {
-  return `${pageHeading(pageMeta.board.label, "Arraste ou use “Mover para…” nas etapas iniciais. Interesse, currículo e candidatura avançam pelo detalhe da vaga.", ADD_JOB_BUTTON)}
-    <div class="board">${statusColumns.map((column) => { const jobs = data.jobs.filter((job) => column.statuses.includes(job.status)); const movable = Boolean(column.target); return `<section class="board-column" aria-labelledby="column-${column.statuses[0]}"><div class="column-head"><h2 class="column-title" id="column-${column.statuses[0]}">${escapeHtml(column.title)}</h2><span class="column-count" aria-label="${jobs.length} vagas">${jobs.length}</span></div><div class="column-drop" ${movable ? `data-drop-status="${escapeHtml(column.target ?? "")}"` : ""}>${jobs.map((job) => jobCard(job)).join("") || `<p class="column-empty">${movable ? "Nenhuma vaga nesta etapa" : "Avança pelo detalhe da vaga"}</p>`}</div></section>`; }).join("")}</div>`;
-}
+// Quadro: migrado para Preact em public/ui/pages/board-page.tsx (registro em render()).
 
 function filterJobs(data: Data) {
   const query = state.filters.query.toLowerCase();
@@ -787,6 +762,19 @@ const overviewPage = preactPage(OverviewPage, () => ({
   deadlineText,
   formatShortDate
 }));
+const boardPage = preactPage(BoardPage, () => ({
+  title: pageMeta.board.label,
+  statusColumns,
+  statusLabels,
+  lifecycleMeta,
+  allowedMoves,
+  salaryLabel,
+  deadlineText,
+  repostText,
+  onMove: async (jobId: string, status: string) => {
+    try { await moveJob(jobId, status); return true; } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); return false; }
+  }
+}));
 const analyticsPage = preactPage(AnalyticsPage, () => ({
   title: pageMeta.analytics.label,
   statusLabels,
@@ -808,7 +796,7 @@ export type { AgentConfig, Data };
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: overviewPage, board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: analyticsPage, operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: overviewPage, board: boardPage, jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: analyticsPage, operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
   if (!pages[state.page]) state.page = "overview";
   // O mapa de Análises vive no componente (criado na montagem, removido ao desmontar).
   mountPage(view(), pages[state.page]);
@@ -1893,33 +1881,6 @@ async function moveJob(jobId: string, status: string) {
   await mutate(`/api/jobs/${encodeURIComponent(jobId)}/transitions`, "POST", { command, expected_version: job.version, data }, `Vaga movida para ${target}.`);
 }
 
-function bindDragEvents() {
-  const clearDropHints = () => document.querySelectorAll(".drop-valid, .drop-invalid, .drag-over").forEach((element) => element.classList.remove("drop-valid", "drop-invalid", "drag-over"));
-  document.querySelectorAll<HTMLElement>("[data-drag-id]").forEach((card) => {
-    card.addEventListener("dragstart", (event) => {
-      const jobId = card.dataset.dragId ?? "";
-      state.dragJobId = jobId;
-      event.dataTransfer?.setData("text/plain", jobId);
-      const job = currentData().jobs.find((item) => item.id === jobId);
-      const allowed = job ? allowedMoves(job) : [];
-      document.querySelectorAll<HTMLElement>(".column-drop").forEach((drop) => drop.classList.add(allowed.includes(drop.dataset.dropStatus ?? "") ? "drop-valid" : "drop-invalid"));
-    });
-    card.addEventListener("dragend", () => { state.dragJobId = null; clearDropHints(); });
-  });
-  document.querySelectorAll<HTMLElement>("[data-drop-status]").forEach((drop) => {
-    drop.addEventListener("dragover", (event) => { if (!drop.classList.contains("drop-valid")) return; event.preventDefault(); drop.classList.add("drag-over"); });
-    drop.addEventListener("dragleave", () => drop.classList.remove("drag-over"));
-    drop.addEventListener("drop", async (event) => {
-      event.preventDefault();
-      const valid = drop.classList.contains("drop-valid");
-      clearDropHints();
-      const jobId = event.dataTransfer?.getData("text/plain") || state.dragJobId;
-      if (!jobId || !valid) return;
-      try { await moveJob(jobId, drop.dataset.dropStatus ?? ""); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); }
-    });
-  });
-}
-
 function activateChartFilter(element: HTMLElement) {
   const type = element.dataset.chartFilterType as VisualFilter["type"] | undefined;
   const value = element.dataset.chartFilterValue;
@@ -2041,10 +2002,6 @@ async function handleAction(target: HTMLElement) {
 
 function bindViewEvents() {
   const root = view();
-  root.querySelectorAll<HTMLSelectElement>("[data-move-id]").forEach((select) => select.addEventListener("change", async () => {
-    select.disabled = true;
-    try { await moveJob(select.dataset.moveId ?? "", select.value); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); select.disabled = false; select.value = ""; }
-  }));
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-filter]").forEach((input) => input.addEventListener(input.dataset.filter === "query" ? "input" : "change", () => {
     const key = input.dataset.filter as keyof typeof state.filters;
     if (key === "minMatch") state.filters.minMatch = Number(input.value) || 0;
@@ -2056,7 +2013,6 @@ function bindViewEvents() {
     if (input.dataset.pref === "map") { state.mapEnabled = input.checked; writePref("radar-map-consent", input.checked); toast(input.checked ? "Mapa ligado." : "Mapa desligado."); }
     if (input.dataset.pref === "browser-ai") { state.browserAiTools = input.checked; writePref("radar-browser-ai-tools", input.checked); registerModelTools(); toast(input.checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
   }));
-  bindDragEvents();
 }
 
 /* Ferramentas para assistentes de IA do navegador: só com consentimento. */

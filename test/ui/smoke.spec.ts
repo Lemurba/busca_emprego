@@ -247,4 +247,47 @@ test.describe("smoke de UI", () => {
     await expect(map.locator(".leaflet-interactive")).toHaveCount(2);
     expect(errors, "erros de console").toEqual([]);
   });
+
+  test("Quadro: vaga semeada na coluna certa; Mover para… e arrastar avançam a etapa pela API", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/quadro");
+    await expect(page.locator("#page-heading")).toHaveText("Quadro");
+    const column = (title: string) => page.locator("#view .board-column").filter({ has: page.locator(".column-title", { hasText: title }) });
+    const card = page.locator("#view .job-card", { hasText: "Engenharia de dados" });
+    const jobStatus = async () => {
+      const bootstrap = await pageApi(page, "GET", "api/bootstrap");
+      return (bootstrap.jobs as { title: string; status: string }[]).find((job) => job.title === "Engenharia de dados")?.status;
+    };
+    // Recém-criada (found): coluna Entrada, arrastável, só a próxima etapa no "Mover para…".
+    await expect(column("Entrada").locator(".job-card", { hasText: "Engenharia de dados" })).toBeVisible();
+    await expect(card).toHaveAttribute("draggable", "true");
+    const select = card.locator("select.move-select");
+    await expect(select.locator("option")).toHaveText(["Mover para…", "Entrada"]);
+
+    // Mover para… (found → validation): fica na mesma coluna, select volta ao início com as novas opções.
+    await select.selectOption("validation");
+    await expect(page.locator("#toast-root")).toContainText("Vaga movida para Entrada.");
+    await expect.poll(jobStatus).toBe("validation");
+    await expect(select.locator("option")).toHaveText(["Mover para…", "Match forte", "Em revisão"]);
+    await expect(select).toHaveValue("");
+    await expect(select).toBeEnabled();
+
+    // Dicas de destino durante o arraste: etapas válidas destacadas, as outras esmaecidas; somem ao soltar.
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    await card.dispatchEvent("dragstart", { dataTransfer });
+    await expect(column("Match forte").locator(".column-drop")).toHaveClass(/drop-valid/);
+    await expect(column("Em revisão").locator(".column-drop")).toHaveClass(/drop-valid/);
+    await expect(column("Entrada").locator(".column-drop")).toHaveClass(/drop-invalid/);
+    await expect(column("Preparar").locator(".column-drop")).toHaveClass(/drop-invalid/);
+    await card.dispatchEvent("dragend", { dataTransfer });
+    await expect(page.locator("#view .column-drop.drop-valid, #view .column-drop.drop-invalid")).toHaveCount(0);
+
+    // Arrastar para "Em revisão" (validation → review): o cartão muda de coluna.
+    await card.dragTo(column("Em revisão").locator(".column-drop"));
+    await expect(column("Em revisão").locator(".job-card", { hasText: "Engenharia de dados" })).toBeVisible();
+    await expect.poll(jobStatus).toBe("review");
+    await expect(page.locator("#view .column-drop.drop-valid, #view .column-drop.drop-invalid, #view .column-drop.drag-over")).toHaveCount(0);
+    expect(errors, "erros de console").toEqual([]);
+  });
 });
