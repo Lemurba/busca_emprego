@@ -14,7 +14,7 @@ const pages = [
   { page: "overview", hash: "painel", label: "Visão geral" },
   { page: "board", hash: "quadro", label: "Quadro" },
   { page: "jobs", hash: "vagas", label: "Vagas", seeded: "Pessoa desenvolvedora TypeScript" },
-  { page: "applications", hash: "candidaturas", label: "Candidaturas" },
+  { page: "applications", hash: "candidaturas", label: "Candidaturas", seeded: "Analista de candidaturas smoke" },
   { page: "resumes", hash: "curriculos", label: "Currículos", seeded: "Currículo smoke" },
   { page: "companies", hash: "empresas", label: "Empresas", seeded: "Outra Empresa" },
   { page: "analytics", hash: "analises", label: "Análises" },
@@ -71,6 +71,15 @@ async function seed(browser: Browser) {
   });
   await api("POST", `api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   await api("POST", "api/resumes", { job_id: job.id, title: "Currículo smoke", content: "RESUMO\nExperiência confirmada com TypeScript." });
+  // Terceira vaga com currículo aprovado (APROVO) e candidatura manual, para a tabela de Candidaturas.
+  const applied = await api("POST", "api/jobs", {
+    title: "Analista de candidaturas smoke", company: "Empresa Candidatura", location: "Curitiba, PR", source: "fixture",
+    source_url: "https://jobs.example.test/ui-smoke/3", application_url: "https://jobs.example.test/ui-smoke/3/apply"
+  });
+  await api("POST", `api/jobs/${applied.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
+  const resume = await api("POST", "api/resumes", { job_id: applied.id, title: "Currículo candidatura smoke", content: "RESUMO\nAnálise de processos." });
+  await api("POST", `api/resumes/${resume.id}/approve`, { confirmation: "APROVO", override_reason: "Currículo semeado pelo smoke de UI." });
+  await api("POST", "api/applications", { job_id: applied.id, resume_id: resume.id, automation_mode: "manual", current_step: "Etapa smoke" });
   await context.close();
 }
 
@@ -218,6 +227,138 @@ test.describe("smoke de UI", () => {
     await page.locator("#refresh-button").click();
     await expect(page.locator("#sync-label")).toContainText("Atualizado");
     await expect(cards).toHaveCount(total);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Candidaturas: tabela com estado, modo e etapa; Abrir mostra o detalhe da vaga", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/candidaturas");
+    const row = page.locator("#view table.data-table tbody tr", { hasText: "Analista de candidaturas smoke" });
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('[data-label="Estado"]')).toHaveText("Na fila");
+    await expect(row.locator('[data-label="Modo"]')).toHaveText("Manual");
+    await expect(row.locator('[data-label="Autorização"]')).toHaveText("—");
+    await expect(row.locator('[data-label="Etapa"]')).toHaveText("Etapa smoke");
+    await row.getByRole("button", { name: "Abrir Analista de candidaturas smoke" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: painel de automação com limites e fila de confirmação final", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="automation-title"]');
+    await expect(panel.getByRole("heading", { name: "Automação de candidaturas" })).toBeVisible();
+    await expect(panel.getByText("Kill-switch")).toBeVisible();
+    await expect(panel.getByText("Envios de hoje")).toBeVisible();
+    const daily = panel.getByLabel("Limite diário (todos os ATS)");
+    await expect(daily).toBeVisible();
+    await expect(daily).toHaveValue(/^\d+$/u);
+    await expect(panel.getByLabel("Limite diário por ATS")).toBeVisible();
+    await expect(panel.getByLabel("ATS permitidos (um domínio por linha)")).not.toHaveValue("");
+    await expect(panel.getByRole("button", { name: "Salvar limites e ATS" })).toBeVisible();
+    const queue = page.locator('#view section[aria-labelledby="final-confirmation-title"]');
+    await expect(queue.getByRole("heading", { name: "Aguardando confirmação final" })).toBeVisible();
+    await expect(queue).toContainText("Nada aguardando");
+    await expect(page.locator("#view")).toContainText("Possíveis duplicatas");
+    await expect(page.locator("#view")).toContainText("Perguntas para você");
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="automation-title"]');
+    const pause = panel.getByRole("button", { name: "Pausar automação" });
+    await expect(pause).toBeVisible();
+    const dialog = page.locator("#dialog-root form.dialog");
+
+    // Cancelar a confirmação não chama a API nem muda o estado.
+    const puts: string[] = [];
+    page.on("request", (request) => { if (request.method() === "PUT" && request.url().endsWith("/api/settings/automation")) puts.push(request.postData() ?? ""); });
+    await pause.click();
+    await expect(dialog.getByRole("heading", { name: "Pausar a candidatura automática?" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(puts, "cancelar não pode chamar a API").toEqual([]);
+    await expect(pause).toBeVisible();
+
+    // Confirmar pausa: PUT { enabled: false } e o botão vira "Religar automação".
+    await pause.click();
+    await expect(dialog.getByRole("heading", { name: "Pausar a candidatura automática?" })).toBeVisible();
+    const paused = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/api/settings/automation"));
+    await dialog.getByRole("button", { name: "Pausar", exact: true }).click();
+    expect((await paused).ok()).toBeTruthy();
+    expect(JSON.parse(puts.at(-1) ?? "{}")).toEqual({ enabled: false });
+    await expect(panel.getByText("Pausada (kill-switch)")).toBeVisible();
+
+    // Restaura: religar não pede confirmação e manda { enabled: true }.
+    const resume = panel.getByRole("button", { name: "Religar automação" });
+    const resumed = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/api/settings/automation"));
+    await resume.click();
+    expect((await resumed).ok()).toBeTruthy();
+    expect(JSON.parse(puts.at(-1) ?? "{}")).toEqual({ enabled: true });
+    await expect(pause).toBeVisible();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: confirmação final mostra a captura e só envia com ENVIAR", async ({ page }) => {
+    const errors = watchConsole(page);
+    // Fila simulada no bootstrap (o fluxo real depende do executor): nada sai para a rede.
+    const applicationId = "app-ui-smoke-final";
+    await page.route("**/api/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const job = body.jobs[0];
+      body.automation.final_confirmations = [{
+        application_id: applicationId, job_id: job.id, requested_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        claimed_by: "executor-smoke", evidence_id: "ev-smoke", observed_url: "https://jobs.example.test/ui-smoke/1/apply",
+        fields_summary: [{ label: "Nome", value: "Pessoa Smoke" }, { label: "E-mail", value: "" }], created_at: new Date().toISOString()
+      }];
+      await route.fulfill({ response, json: body });
+    });
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+    await page.route(`**/api/applications/${applicationId}/evidence/ev-smoke`, (route) => route.fulfill({ contentType: "image/png", body: png }));
+    const confirms: string[] = [];
+    await page.route(`**/api/applications/${applicationId}/confirm-final`, (route) => {
+      confirms.push(route.request().postData() ?? "");
+      return route.fulfill({ json: { ok: true } });
+    });
+    await login(page);
+    await page.goto("#/saude");
+    const queue = page.locator('#view section[aria-labelledby="final-confirmation-title"]');
+    const card = queue.locator("article.final-confirmation");
+    await expect(card).toHaveCount(1);
+    await expect(card.locator("dl.final-fields")).toContainText("Pessoa Smoke");
+    await expect(card.locator("dl.final-fields dd").nth(1)).toHaveText("—");
+    const shot = card.locator("img.final-shot");
+    await expect(shot).toHaveAttribute("src", `/api/applications/${applicationId}/evidence/ev-smoke`);
+    await expect(shot).toHaveAttribute("alt", /^Captura da tela antes do envio: /u);
+    const axe = await new AxeBuilder({ page }).include("#view").analyze();
+    expect(axe.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact ?? "")).map((violation) => violation.id), "axe com a fila preenchida").toEqual([]);
+
+    const dialog = page.locator("#dialog-root form.dialog");
+    await card.getByRole("button", { name: "Enviar agora" }).click();
+    await expect(dialog.getByRole("heading", { name: "Enviar candidatura agora?" })).toBeVisible();
+    // Texto errado não envia: o formulário exige ENVIAR em maiúsculas.
+    await dialog.getByLabel("Digite ENVIAR para confirmar").fill("enviar");
+    await dialog.getByRole("button", { name: "Enviar agora" }).click();
+    await expect(dialog).toBeVisible();
+    expect(confirms, "sem ENVIAR não pode chamar a API").toEqual([]);
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(confirms).toEqual([]);
+
+    await card.getByRole("button", { name: "Enviar agora" }).click();
+    await dialog.getByLabel("Digite ENVIAR para confirmar").fill("ENVIAR");
+    await dialog.getByRole("button", { name: "Enviar agora" }).click();
+    await expect.poll(() => confirms.length).toBe(1);
+    expect(JSON.parse(confirms[0]!)).toEqual({ confirmation: "ENVIAR" });
     expect(errors, "erros de console").toEqual([]);
   });
 
