@@ -1,3 +1,6 @@
+import type { JobRequirements } from "./blockers.js";
+import type { ResumeCoverage } from "./coverage.js";
+
 export type JobStatus =
   | "found"
   | "validation"
@@ -56,6 +59,8 @@ export interface Job {
   role_family?: string | null;
   role_family_confidence?: number | null;
   suppressed?: boolean;
+  /** Exigências explícitas do anúncio (eliminatórios); null quando a vaga não declara nenhuma. */
+  requirements_json?: JobRequirements | null;
   /** Alguma URL da vaga usa http:// (sem TLS); o executor não atua nela. */
   insecure_url?: boolean;
   status: JobStatus;
@@ -133,6 +138,10 @@ export interface Resume {
   gaps?: string[];
   review_status?: "not_run" | "pass" | "fail" | "override";
   review_findings?: string[];
+  /** Cobertura de requisitos determinística (src/coverage.ts). */
+  coverage?: ResumeCoverage | null;
+  /** Resumo do último teste de leitura do PDF (sem o texto extraído). */
+  parse_check?: { ok: boolean; stale: boolean; missing: string[]; checked_at: string; token_ratio: number } | null;
   /** Resumo da checagem de fatos da versão atual (#31): bloqueantes pendentes e avisos. */
   fact_check?: { pending: number; warnings: number };
   created_at: string;

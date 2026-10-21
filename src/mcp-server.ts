@@ -97,6 +97,7 @@ const SAFE_MESSAGES: Record<string, string> = {
   "agent.published_version.required": "O agente não tem versão publicada.",
   "job.salary.invalid": "Faixa salarial inválida.",
   "job.coordinates.invalid": "Coordenadas inválidas.",
+  "job.requirements_json.invalid": "Exigências explícitas inválidas: cada campo precisa do trecho literal do anúncio em evidence.",
   "application.not_found": "Candidatura não encontrada.",
   "application.url.required": "A vaga não tem URL de candidatura.",
   "application.authorization.required": "A candidatura não tem autorização automática (AUTORIZO).",
@@ -318,6 +319,25 @@ function withUntrustedContent(job: unknown) {
 const agentId = z.string().min(1).optional().describe("ID do agente que executa a ação. Em servidor vinculado (RADAR_MCP_AGENT_ID) pode ser omitido; se informado, precisa ser o mesmo.");
 const workerId = z.string().min(1).max(120).describe("Identidade estável do executor que reservou a candidatura.");
 
+/** Exigências explícitas do anúncio (eliminatórios): só com o trecho literal em evidence[campo]. */
+const explicitRequirements = z.object({
+  location: z.string().max(200).optional(),
+  work_model: z.enum(["remote", "hybrid", "onsite"]).optional(),
+  work_authorization: z.object({ countries: z.array(z.string().min(1).max(80)).min(1).max(20), sponsorship: z.boolean().optional() }).optional(),
+  min_years: z.number().min(0).max(60).optional(),
+  evidence: z.record(z.string(), z.string().min(1).max(300)),
+}).describe("Somente exigências EXPLÍCITAS do anúncio; cada campo preenchido exige o trecho literal em evidence[campo]. Na dúvida, omita.");
+
+/** Critério do score: número (legado, tratado como estimado) ou valor com base e evidência. */
+const criterion = z.union([
+  z.number().min(0).max(100).nullable(),
+  z.object({
+    value: z.number().min(0).max(100).nullable(),
+    basis: z.enum(["explicit", "estimated"]).default("estimated").describe("explicit = dado declarado na vaga; estimated = inferência"),
+    evidence: z.string().max(500).optional().describe("Trecho da vaga que sustenta a nota (obrigatório na prática quando explicit)."),
+  }),
+]);
+
 const jobFields = {
   source: z.string().min(1),
   title: z.string().min(1),
@@ -335,6 +355,7 @@ const jobFields = {
   job_url: z.string().url().optional(),
   application_url: z.string().url().optional(),
   posted_at: z.string().optional(),
+  requirements_json: explicitRequirements.optional(),
 };
 
 export { RADAR_MCP_ROLES, RADAR_MCP_TOOLS };
@@ -492,17 +513,17 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_record_score")) server.registerTool("radar_record_score", {
-    description: "Registra a nota de compatibilidade de uma vaga (0–100 por critério; null = sem dado). Escopo jobs.write (avaliador de compatibilidade).",
+    description: "Registra a nota de aderência de uma vaga (0–100 por critério; null = sem dado). Cada critério aceita número ou {value, basis: explicit|estimated, evidence}. Escopo jobs.write (avaliador de compatibilidade).",
     inputSchema: {
       agent_id: agentId,
       job_id: z.string().min(1),
       scores: z.object({
-        role_family: z.number().min(0).max(100).nullable(),
-        skills: z.number().min(0).max(100).nullable(),
-        seniority: z.number().min(0).max(100).nullable(),
-        location_work_model: z.number().min(0).max(100).nullable(),
-        compensation: z.number().min(0).max(100).nullable(),
-        explicit_preferences: z.number().min(0).max(100).nullable(),
+        role_family: criterion,
+        skills: criterion,
+        seniority: criterion,
+        location_work_model: criterion,
+        compensation: criterion,
+        explicit_preferences: criterion,
       }),
       profile_snapshot_id: z.string().optional(),
       round_id: z.string().optional(),

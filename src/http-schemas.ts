@@ -71,6 +71,8 @@ const jobFields = {
   additional_information: optText,
   match_score: optNumber,
   expected_version: optNumber,
+  // Exigências explícitas (eliminatórios); a forma é validada no domínio (src/blockers.ts).
+  requirements_json: z.union([z.record(z.string(), z.unknown()), z.string().max(20_000)]).nullable().optional(),
 };
 
 const agentFields = {

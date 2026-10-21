@@ -14,6 +14,10 @@ import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
 import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
+import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements, parseJobRequirementsColumn } from "./blockers.js";
+import { computeCoverage } from "./coverage.js";
+import { expectedContacts, runResumeParseCheck as runParseCheck } from "./resume-parse-check.js";
+import { mapMatchScoreRow, normalizeCriterionInputs, readResumeParseCheck, resumeParseFindings, resumeScoringFields, storeResumeCoverage, storeResumeParseCheck } from "./db/scoring.js";
 
 export const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 
@@ -92,12 +96,12 @@ function hasInsecureUrl(row: Record<string, unknown>): boolean {
 }
 
 function mapJob(row: Record<string, unknown>): Job {
-  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1, insecure_url: hasInsecureUrl(row) } as Job;
+  return { ...row, latitude: row.latitude == null ? null : Number(row.latitude), longitude: row.longitude == null ? null : Number(row.longitude), salary_min: row.salary_min == null ? null : Number(row.salary_min), salary_max: row.salary_max == null ? null : Number(row.salary_max), match_score: Number(row.match_score ?? 0), version: Number(row.version ?? 0), role_family_confidence: row.role_family_confidence == null ? null : Number(row.role_family_confidence), suppressed: Number(row.suppressed ?? 0) === 1, insecure_url: hasInsecureUrl(row), requirements_json: parseJobRequirementsColumn(row.requirements_json) } as Job;
 }
 
 function mapResume(row: Record<string, unknown>): Resume {
   return {
-    ...row,
+    ...resumeScoringFields(row),
     version: Number(row.version),
     keywords: parseJsonArray(row.keywords),
     changes: parseJsonArray(row.changes),
@@ -262,6 +266,8 @@ export function getBootstrap(projectId = "busca-emprego") {
     if (!applicationByJob.has(application.job_id)) applicationByJob.set(application.job_id, application);
   }
   const currentTime = Date.now();
+  const activeProfile = getActiveProfile(projectId);
+  const profileFacts = activeProfile?.facts ?? [];
   const jobs = listJobs().map((job) => {
     const application = applicationByJob.get(job.id);
     const closedByDeadline = deadlinePassed(job.deadline_at, currentTime);
@@ -269,7 +275,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     const applied = Boolean(application && ["submitted", "accepted", "rejected"].includes(application.status));
     const lifecycle = applied ? "applied" : (isClosed ? "lost" : (job.decision === "not_interested" || job.status === "discarded" ? "not_interested" : (job.opening_status === "unknown" ? "unknown" : "open")));
     const applicationAgeDays = application?.submitted_at ? Math.max(0, Math.floor((currentTime - new Date(application.submitted_at).getTime()) / 86_400_000)) : null;
-    return { ...job, application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open" };
+    return { ...job, application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", blockers: evaluateBlockers(profileFacts, job) };
   });
   const statuses = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.status] = (acc[job.status] ?? 0) + 1; return acc; }, {});
   const sources = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.source] = (acc[job.source] ?? 0) + 1; return acc; }, {});
@@ -284,10 +290,10 @@ export function getBootstrap(projectId = "busca-emprego") {
     preferences: listPreferenceState(projectId),
     humanQuestions: listHumanQuestions(),
     profiles: listProfiles(projectId),
-    activeProfile: getActiveProfile(projectId),
+    activeProfile,
     rounds: listSearchRounds(projectId),
     possibleDuplicates: listPossibleDuplicates(projectId),
-    matchScores: (db.prepare("SELECT job_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,evidence_json,strengths_json,gaps_json FROM match_scores WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[]).map((row) => ({ ...row, criteria: JSON.parse(String(row.criteria_json)), evidence: JSON.parse(String(row.evidence_json)), strengths: JSON.parse(String(row.strengths_json)), gaps: JSON.parse(String(row.gaps_json)) })),
+    matchScores: (db.prepare("SELECT job_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at FROM match_scores WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[]).map(mapMatchScoreRow),
     companies: listCompanies(),
     agentRuns: listAgentRuns(),
     agentConfigs: listAgentConfigs(projectId),
@@ -546,6 +552,11 @@ function validateJobFields(changed: Record<string, unknown>, current: Record<str
   for (const field of ["title", "company"] as const) {
     if (field in changed && !String(changed[field] ?? "").trim()) throw new Error("job.required_fields.invalid");
   }
+  // Exigências explícitas (eliminatórios): validadas e gravadas como JSON canônico.
+  if ("requirements_json" in changed) {
+    const requirements = normalizeJobRequirements(changed.requirements_json);
+    normalized.requirements_json = requirements ? JSON.stringify(requirements) : null;
+  }
   return normalized;
 }
 
@@ -583,6 +594,7 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
     const rawInput = input as unknown as Record<string, unknown>;
     db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
       .run(String(rawInput.project_id ?? currentJob?.project_id ?? "busca-emprego"), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
+    if ("requirements_json" in rawInput) db.prepare("UPDATE jobs SET requirements_json=? WHERE id=?").run((rawInput.requirements_json ?? null) as string | null, id);
     db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?").run(jobDedupKey(job.title, job.company, job.location), jobDescriptionHash(job.description, job.company), id);
     audit("job", id, currentJob ? "updated" : "discovered", { changed_fields: Object.keys(input) });
     applySuppression(id);
@@ -635,7 +647,8 @@ function jobPayloadHash(value: unknown): string {
 const sourceItemFields = new Set([
   "source_id", "source_job_id", "title", "company", "location_text", "work_model", "seniority", "description", "benefits",
   "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period",
-  "posted_at", "deadline_at", "opening_status", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs"
+  "posted_at", "deadline_at", "opening_status", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs",
+  "requirements_json"
 ]);
 
 export function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
@@ -971,7 +984,8 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
     description: item.description == null ? "" : String(item.description), benefits: Array.isArray(item.benefits) ? item.benefits.map(String).join("\n") : String(item.benefits ?? ""),
     requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
     additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
-    application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at)
+    application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at),
+    ...(item.requirements_json == null ? {} : { requirements_json: normalizeJobRequirements(item.requirements_json) })
   };
   // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
   const job = existingJob ?? upsertJob(jobInput);
@@ -1114,10 +1128,12 @@ export function resolvePossibleDuplicate(id: string, status: "merged" | "distinc
   return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
 }
 
-export function recordMatchScore(input: { job_id: string; scores: Record<string, number | null>; profile_snapshot_id?: string | null; round_id?: string | null; evidence?: unknown[]; strengths?: string[]; gaps?: string[]; project_id?: string }) {
+export function recordMatchScore(input: { job_id: string; scores: Record<string, unknown>; profile_snapshot_id?: string | null; round_id?: string | null; evidence?: unknown[]; strengths?: string[]; gaps?: string[]; project_id?: string }) {
   const job = getJob(input.job_id);
   if (!job) throw new Error("job.not_found");
-  const result = calculateMatchScore(input.scores as never);
+  // Critério = número (legado, "estimado") ou {value, basis, evidence}; a conta não muda.
+  const criteria = normalizeCriterionInputs(input.scores);
+  const result = calculateMatchScore(criteria.values as never);
   const values = db.prepare("SELECT facet_key,normalized_value,positive_count,negative_count FROM preference_values WHERE project_id=?").all(input.project_id ?? "busca-emprego") as { facet_key: string; normalized_value: string; positive_count: number; negative_count: number }[];
   const matchingValues = values.filter((value) => {
     const candidate = feedbackFacetValue(job, value.facet_key);
@@ -1127,9 +1143,9 @@ export function recordMatchScore(input: { job_id: string; scores: Record<string,
   // Random row id + upsert on the very target of the UNIQUE constraint: a repeated (even
   // identical) score for the same job/snapshot/round updates the row instead of failing.
   tx(() => {
-    db.prepare(`INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,evidence_json,strengths_json,gaps_json,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,profile_snapshot_id,round_id) DO UPDATE SET project_id=excluded.project_id,score_base=excluded.score_base,coverage_percent=excluded.coverage_percent,band=excluded.band,preference_adjustment=excluded.preference_adjustment,score_final=excluded.score_final,criteria_json=excluded.criteria_json,evidence_json=excluded.evidence_json,strengths_json=excluded.strengths_json,gaps_json=excluded.gaps_json,created_at=excluded.created_at`)
-      .run(randomUUID(), input.project_id ?? "busca-emprego", input.job_id, input.profile_snapshot_id ?? "", input.round_id ?? "", result.scoreBase, result.coveragePercent, result.band, adjusted.preferenceAdjustment, adjusted.scoreFinal, JSON.stringify(result.criteria), json(input.evidence ?? []), json(input.strengths ?? []), json(input.gaps ?? []), now());
+    db.prepare(`INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,profile_snapshot_id,round_id) DO UPDATE SET project_id=excluded.project_id,score_base=excluded.score_base,coverage_percent=excluded.coverage_percent,band=excluded.band,preference_adjustment=excluded.preference_adjustment,score_final=excluded.score_final,criteria_json=excluded.criteria_json,criteria_basis_json=excluded.criteria_basis_json,evidence_json=excluded.evidence_json,strengths_json=excluded.strengths_json,gaps_json=excluded.gaps_json,created_at=excluded.created_at`)
+      .run(randomUUID(), input.project_id ?? "busca-emprego", input.job_id, input.profile_snapshot_id ?? "", input.round_id ?? "", result.scoreBase, result.coveragePercent, result.band, adjusted.preferenceAdjustment, adjusted.scoreFinal, JSON.stringify(result.criteria), JSON.stringify(criteria.basis), json(input.evidence ?? []), json(input.strengths ?? []), json(input.gaps ?? []), now());
     db.prepare("UPDATE jobs SET match_score=?,updated_at=? WHERE id=?").run(Math.round(adjusted.scoreFinal), now(), input.job_id);
   });
   audit("job", input.job_id, "match_scored", { score_base: result.scoreBase, coverage_percent: result.coveragePercent, band: result.band, score_final: adjusted.scoreFinal, profile_snapshot_id: input.profile_snapshot_id ?? null, round_id: input.round_id ?? null });
@@ -1139,10 +1155,10 @@ export function recordMatchScore(input: { job_id: string; scores: Record<string,
 export function getMatchScore(jobId: string, profileSnapshotId?: string | null, roundId?: string | null) {
   const row = db.prepare(`SELECT * FROM match_scores WHERE job_id=? AND profile_snapshot_id=? AND round_id=? ORDER BY created_at DESC LIMIT 1`).get(jobId, profileSnapshotId ?? "", roundId ?? "") as Record<string, unknown> | undefined;
   if (!row) return null;
-  return { ...row, profile_snapshot_id: row.profile_snapshot_id || null, round_id: row.round_id || null, criteria: JSON.parse(String(row.criteria_json)), evidence: JSON.parse(String(row.evidence_json)), strengths: JSON.parse(String(row.strengths_json)), gaps: JSON.parse(String(row.gaps_json)) };
+  return { ...mapMatchScoreRow(row), profile_snapshot_id: row.profile_snapshot_id || null, round_id: row.round_id || null };
 }
 
-const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities", "additional_information", "posted_at"]);
+const editableJobFields = new Set(["title", "company", "location", "latitude", "longitude", "country", "work_model", "seniority", "salary_min", "salary_max", "currency", "salary_period", "salary_source", "salary_source_url", "salary_checked_at", "salary_confidence", "source_url", "linkedin_post_url", "job_url", "application_url", "opening_status", "opening_checked_at", "deadline_at", "closed_at", "description", "benefits", "requirements", "responsibilities", "additional_information", "posted_at", "requirements_json"]);
 /** match_score comes only from recordMatchScore; source is part of the job identity; status only from the workflow. */
 const nonPatchableJobFields = new Set(["match_score", "source"]);
 
@@ -1407,7 +1423,7 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   const profile = getProfile(profileId);
   if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
   const type = String(input.type ?? "").trim();
-  const value = factValue(input.value);
+  const value = normalizeBlockerFact(type, factValue(input.value));
   const origin = String(input.origin ?? "user");
   const state = String(input.state ?? (origin === "user" ? "confirmed" : "proposed"));
   const evidencePage = input.evidence_page == null && input.page == null ? null : Number(input.evidence_page ?? input.page);
@@ -1523,7 +1539,7 @@ export function getLatestProfileSnapshot(profileId?: string, projectId = "busca-
 export function answerProfileInterview(profileId: string, questionKey: string, answer: unknown, actor = "user") {
   const profile = getProfile(profileId);
   if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
-  const normalizedAnswer = factValue(answer);
+  const normalizedAnswer = normalizeBlockerFact(questionKey, factValue(answer));
   if (!questionKey.trim() || normalizedAnswer == null || normalizedAnswer === "" || (Array.isArray(normalizedAnswer) && !normalizedAnswer.length)) throw new Error("profile.interview.invalid");
   const timestamp = now();
   db.prepare(`INSERT INTO profile_interviews (id,profile_id,question_key,question,answer_json,status,asked_at,answered_at)
@@ -1561,6 +1577,7 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
       .run(metadata.profile_snapshot_id == null ? null : String(metadata.profile_snapshot_id), metadata.generation_source === "writer" ? "writer" : "manual", JSON.stringify(metadata.facts_used ?? []), JSON.stringify(metadata.gaps ?? []), id);
     const eventActor = actor ?? (metadata.generation_source === "writer" ? "resume_writer" : "user");
     advanceJobTo(input.job_id, "resume", { actor: eventActor, data: { reason: "resume_draft_created" } });
+    refreshResumeCoverage(id);
     refreshResumeFactChecks(id);
     audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft", actor: eventActor });
   });
@@ -1592,10 +1609,51 @@ export function updateResume(id: string, patch: Partial<Resume>) {
         if (job && ["resume_approved", "ready_to_apply"].includes(job.status)) applyWorkflowCommand(current.job_id, "revise_resume", { actor: "user", data: { reason: "approved_resume_edited", resume_id: id } });
       }
     }
+    refreshResumeCoverage(id);
     refreshResumeFactChecks(id);
     audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
+}
+
+/** Recalcula a cobertura de requisitos (determinística) do currículo contra a vaga. */
+function refreshResumeCoverage(id: string) {
+  const resume = getResume(id);
+  const job = resume ? getJob(resume.job_id) : null;
+  if (!resume || !job) return;
+  const seniority = (getActiveProfile(job.project_id ?? "busca-emprego")?.facts ?? []).find((fact: Record<string, unknown>) => fact.type === "seniority" && fact.state === "confirmed")?.value;
+  storeResumeCoverage(db, id, computeCoverage({ job, resume, profileSeniority: seniority == null ? null : String(seniority) }));
+}
+
+/** Contatos confirmados (snapshot do currículo ou perfil ativo) que o PDF precisa preservar. */
+function resumeContactFacts(resume: Resume): Record<string, unknown>[] {
+  const snapshot = atsSnapshotForResume(resume);
+  if (snapshot) return snapshotFacts(snapshot);
+  return getActiveProfile()?.facts ?? [];
+}
+
+/** Teste de leitura do PDF: gera, extrai e compara; o resultado fica gravado no currículo. */
+export async function runResumeParseCheck(id: string) {
+  const resume = getResume(id);
+  if (!resume) throw new Error("resume.not_found");
+  const check = await runParseCheck(resume, expectedContacts(resume.content, resumeContactFacts(resume)));
+  // O texto pode ter mudado durante a extração: grava só se ainda é a mesma versão.
+  const current = getResume(id);
+  if (current && current.title === resume.title && current.content === resume.content) storeResumeParseCheck(db, id, check);
+  audit("resume", id, "pdf_parse_checked", { ok: check.ok, token_ratio: check.token_ratio, missing_count: check.missing.length });
+  return readResumeParseCheck(db, id) ?? { ...check, stale: true };
+}
+
+/** Roda o teste de leitura só se não houver resultado para o texto atual. */
+export async function ensureResumeParseCheck(id: string) {
+  if (!getResume(id)) return null;
+  const stored = readResumeParseCheck(db, id);
+  return stored && !stored.stale ? stored : runResumeParseCheck(id);
+}
+
+export function getResumeParseCheck(id: string) {
+  if (!getResume(id)) throw new Error("resume.not_found");
+  return readResumeParseCheck(db, id);
 }
 
 function snapshotFacts(snapshot: Record<string, unknown>): Record<string, unknown>[] {
@@ -1776,6 +1834,8 @@ export function reviewResume(id: string, input: Record<string, unknown> = {}, ac
   const reviewerFindings = [...(Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : []), ...(input.verdict === "fail" ? ["reviewer.fail"] : [])];
   return tx(() => {
     const findings = [
+      // Teste de leitura do PDF reprovado é bloqueante (a exceção justificada não o contorna).
+      ...resumeParseFindings(db, id),
       ...contentFindings(resume),
       ...factCheckFindings(resume),
       ...(resume.generation_source === "writer" ? writerFindings(resume) : []),
@@ -1831,6 +1891,7 @@ export function approveResume(id: string, confirmation: string, options: { overr
   // SDD-ATS-003: never approve empty content, and every source (writer or manual) needs an
   // ATS review `pass` for the current version or an explicitly justified human override.
   if (!String(resume.content ?? "").trim()) throw new Error("resume.content.empty");
+  if (resumeParseFindings(db, id).length) throw new Error("resume.pdf_parse_failed");
   const reason = String(options.override_reason ?? "").trim();
   if (resume.review_status !== "pass" && reason.length < 10) throw new Error("ATS_REVIEW_REQUIRED");
   const timestamp = now();

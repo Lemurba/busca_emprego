@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { dbPath } from "./db.js";
@@ -320,11 +320,18 @@ const routes: Route[] = [
     const file = await renderResumeFile(resume, params[1] as ResumeFileFormat);
     attachment(res, file.mimeType, file.fileName, file.data);
   } },
-  { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: ({ actor, res, params, body }) => {
+  // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
+  { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params }) => ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: async ({ actor, res, params, body }) => {
     const input = validateBody(schemas.resumeApprove, body);
+    await ensureResumeParseCheck(params[0]!);
     ok(res, 200, approveResume(params[0]!, String(input.confirmation ?? ""), { override_reason: input.override_reason == null ? undefined : String(input.override_reason), actor }));
   } },
-  { method: "POST", pattern: r("/api/resumes/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewResume(params[0]!, body, actor)) },
+  { method: "POST", pattern: r("/api/resumes/{id}/review"), handler: async ({ actor, res, params, body }) => {
+    await ensureResumeParseCheck(params[0]!);
+    ok(res, 200, reviewResume(params[0]!, body, actor));
+  } },
   // Checagem de fatos (#31): resolver um fato é declaração humana (rota só da sessão, ver isHumanOnlyRequest).
   { method: "GET", pattern: r("/api/resumes/{id}/facts"), handler: ({ res, params }) => ok(res, 200, getResumeFactChecks(params[0]!)) },
   { method: "POST", pattern: r("/api/resumes/{id}/facts/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, resolveResumeFact(params[0]!, params[1]!, validateBody(schemas.resumeFactAction, body), actor, projectId)) },

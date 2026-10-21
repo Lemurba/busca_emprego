@@ -33,6 +33,7 @@ const STATUS_RULES: Array<[RegExp, number]> = [
   [/(?:^|\.)not_found$/u, 404],
   [/version_conflict|\.race$|\.already_active$/u, 409],
   [/^resume\.unverified_facts$/u, 409],
+  [/^resume\.pdf_parse_failed$/u, 409],
   [/^validation\./u, 422],
   [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
   [/^(?:feedback|human_question|preference_rule|workflow|agent|job|round|source|possible_duplicate|application|resume|base_resume|profile|field_conflict|decision)\./u, 422],
@@ -93,6 +94,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
   "resume.fact.already_resolved": "Esse fato já foi resolvido.",
   "resume.fact.approved_locked": "Retorne o currículo aprovado para revisão antes de alterá-lo.",
+  "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: um parser não enxerga parte do currículo. Corrija o conteúdo; a justificativa de exceção não libera esse bloqueio.",
+  "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio em evidence.",
 };
 
 export const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";
