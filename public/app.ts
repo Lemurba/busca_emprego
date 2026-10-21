@@ -1,7 +1,9 @@
 import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
+import { SCORE_BADGE_TITLE, scoreTone } from "./ui/components/job-badges.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
+import { JobsPage } from "./ui/pages/jobs-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
@@ -415,10 +417,9 @@ function lifecycleChip(job: Job, element = "span") {
   return `<${element} class="status-pill ${meta.tone}">${escapeHtml(meta.label)}</${element}>`;
 }
 
-/** Mesmas faixas do domínio (calculateScore): ≥ 80 match forte, ≥ 65 vale olhar. */
+/** Faixas e título compartilhados com o `ScoreBadge` em JSX (ui/components/job-badges.tsx). */
 function scoreBadge(score: number) {
-  const tone = score >= 80 ? "high" : score >= 65 ? "mid" : "low";
-  return `<span class="score ${tone}" title="Aderência: estimativa de quanto a vaga combina com seu perfil (não é nota de ATS)">${escapeHtml(score)}%</span>`;
+  return `<span class="score ${scoreTone(score)}" title="${escapeHtml(SCORE_BADGE_TITLE)}">${escapeHtml(score)}%</span>`;
 }
 
 const SCORE_EXPLANATION = "Estimativa de quanto a vaga combina com seu perfil. Não é a nota de nenhum ATS.";
@@ -433,13 +434,6 @@ const blockerStatusMeta: Record<string, { label: string; tone: string }> = { blo
 
 function blockedBlockers(job: Job) {
   return (job.blockers ?? []).filter((blocker) => blocker.status === "blocked");
-}
-
-/** Selo separado da nota: só aparece quando há eliminatório confirmado dos dois lados. */
-function blockerBadge(job: Job) {
-  const blocked = blockedBlockers(job);
-  if (!blocked.length) return "";
-  return `<span class="status-pill red" title="${escapeHtml(blocked.map((blocker) => blocker.reason).join(" "))}">Eliminatório: ${escapeHtml(blocked[0]!.label)}${blocked.length > 1 ? ` +${blocked.length - 1}` : ""}</span>`;
 }
 
 function blockersSection(job: Job) {
@@ -772,51 +766,7 @@ function renderBoard(data: Data) {
     <div class="board">${statusColumns.map((column) => { const jobs = data.jobs.filter((job) => column.statuses.includes(job.status)); const movable = Boolean(column.target); return `<section class="board-column" aria-labelledby="column-${column.statuses[0]}"><div class="column-head"><h2 class="column-title" id="column-${column.statuses[0]}">${escapeHtml(column.title)}</h2><span class="column-count" aria-label="${jobs.length} vagas">${jobs.length}</span></div><div class="column-drop" ${movable ? `data-drop-status="${escapeHtml(column.target ?? "")}"` : ""}>${jobs.map((job) => jobCard(job)).join("") || `<p class="column-empty">${movable ? "Nenhuma vaga nesta etapa" : "Avança pelo detalhe da vaga"}</p>`}</div></section>`; }).join("")}</div>`;
 }
 
-function filterJobs(data: Data) {
-  const query = state.filters.query.toLowerCase();
-  const filtered = visualFilteredJobs(data).filter((job) => {
-    const textMatch = !query || [job.title, job.company, job.location, job.source].some((value) => String(value ?? "").toLowerCase().includes(query));
-    const sourceMatch = state.filters.source === "all" || job.source === state.filters.source;
-    const lifecycleMatch = state.filters.lifecycle === "all" || job.lifecycle === state.filters.lifecycle;
-    const modelMatch = state.filters.workModel === "all" || job.work_model === state.filters.workModel;
-    return textMatch && sourceMatch && lifecycleMatch && modelMatch && job.match_score >= state.filters.minMatch;
-  });
-  const deadlineValue = (job: Job) => daysUntil(job.deadline_at) ?? Number.POSITIVE_INFINITY;
-  const sorters: Record<SortKey, (a: Job, b: Job) => number> = {
-    match: (a, b) => b.match_score - a.match_score,
-    deadline: (a, b) => deadlineValue(a) - deadlineValue(b),
-    salary: (a, b) => (monthlyRange(b)?.max ?? -1) - (monthlyRange(a)?.max ?? -1),
-    updated: (a, b) => String(b.updated_at).localeCompare(String(a.updated_at))
-  };
-  return filtered.sort(sorters[state.sort]);
-}
-
-function jobTableRows(jobs: Job[]) {
-  if (!jobs.length) return `<tr><td colspan="7"><div class="empty-state"><div><strong>Nenhuma vaga encontrada</strong><span>Altere os filtros ou adicione uma vaga manualmente.</span></div></div></td></tr>`;
-  const rows = jobs.slice(0, state.jobsLimit).map((job) => `<tr><td data-label="Vaga"><button type="button" class="table-link" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button><small>${escapeHtml(job.company)}</small></td><td data-label="Local">${escapeHtml(job.location)}<small>${escapeHtml(job.work_model)}</small></td><td data-label="Salário"><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}</small></td><td data-label="Aderência">${scoreBadge(job.match_score)}${blockerBadge(job)}</td><td data-label="Situação">${lifecycleChip(job)}<small>${escapeHtml(statusLabels[job.status] ?? humanize(job.status))}</small></td><td data-label="Prazo"><span class="deadline-inline ${job.lifecycle === "lost" ? "lost" : ""}">${escapeHtml(deadlineText(job))}</span><small>${escapeHtml(relativeApplication(job))}</small></td><td class="cell-action"><button class="secondary-button" data-detail="${escapeHtml(job.id)}" aria-label="${escapeHtml(`Detalhes de ${job.title}`)}">Detalhes</button></td></tr>`).join("");
-  const more = jobs.length > state.jobsLimit ? `<tr><td colspan="7" class="table-more"><button type="button" class="secondary-button" data-show-more-jobs>Mostrar mais ${Math.min(50, jobs.length - state.jobsLimit)} de ${jobs.length - state.jobsLimit} restantes</button></td></tr>` : "";
-  return rows + more;
-}
-
-function jobsResultsMarkup(data: Data) {
-  const jobs = filterJobs(data);
-  const sortHeader = (key: SortKey, text: string) => `<th aria-sort="${state.sort === key ? (key === "deadline" ? "ascending" : "descending") : "none"}"><button type="button" class="sort-button ${state.sort === key ? "active" : ""}" data-sort="${key}">${escapeHtml(text)}<span aria-hidden="true">${state.sort === key ? (key === "deadline" ? " ↑" : " ↓") : ""}</span></button></th>`;
-  return `<p class="results-count" role="status">${jobs.length} vaga${jobs.length === 1 ? "" : "s"}</p><div class="table-wrap"><table class="data-table responsive-table"><thead><tr><th>Vaga</th><th>Localização</th>${sortHeader("salary", "Faixa salarial")}${sortHeader("match", "Aderência")}<th>Situação</th>${sortHeader("deadline", "Prazo / candidatura")}<th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${jobTableRows(jobs)}</tbody></table></div>`;
-}
-
-function renderJobs(data: Data) {
-  const sources = [...new Set(data.jobs.map((job) => job.source))].sort();
-  const models = [...new Set(data.jobs.map((job) => job.work_model).filter(Boolean))].sort();
-  const option = (value: string, text: string, current: string) => `<option value="${escapeHtml(value)}" ${current === value ? "selected" : ""}>${escapeHtml(text)}</option>`;
-  return `${pageHeading(pageMeta.jobs.label, "Pesquise, compare salários, confirme prazos e escolha quais entram no seu fluxo.", ADD_JOB_BUTTON)}
-    ${visualFilterSummary(data, false)}
-    <div class="filter-bar" role="search"><label class="filter-field grow"><span>Buscar</span><input class="input" type="search" data-filter="query" value="${escapeHtml(state.filters.query)}" placeholder="Cargo, empresa, cidade ou fonte" /></label>
-      <label class="filter-field"><span>Fonte</span><select class="select" data-filter="source">${option("all", "Todas", state.filters.source)}${sources.map((source) => option(source, source, state.filters.source)).join("")}</select></label>
-      <label class="filter-field"><span>Situação</span><select class="select" data-filter="lifecycle">${option("all", "Todas", state.filters.lifecycle)}${lifecycleOrder.map((value) => option(value, lifecycleMeta[value].plural, state.filters.lifecycle)).join("")}</select></label>
-      <label class="filter-field"><span>Modelo</span><select class="select" data-filter="workModel">${option("all", "Todos", state.filters.workModel)}${models.map((model) => option(model, model, state.filters.workModel)).join("")}</select></label>
-      <label class="filter-field"><span>Match mínimo</span><select class="select" data-filter="minMatch">${[0, 50, 70, 80, 90].map((value) => option(String(value), value ? `${value}%` : "Qualquer", String(state.filters.minMatch))).join("")}</select></label></div>
-    <div id="jobs-results">${jobsResultsMarkup(data)}</div>`;
-}
+// Vagas: migrada para Preact em public/ui/pages/jobs-page.tsx (registro em render()).
 
 function renderApplications(data: Data) {
   const byId = new Map(data.jobs.map((job) => [job.id, job]));
@@ -928,14 +878,27 @@ const agentsPage = preactPage(AgentsPage, () => ({
   sourceName: (source: string) => portalNames.get(source) ?? source,
   fieldName: (field: string) => fieldLabels.get(field) ?? field
 }));
+const jobsPage = preactPage(JobsPage, () => ({
+  title: pageMeta.jobs.label,
+  lifecycleMeta,
+  lifecycleOrder,
+  statusLabel: (status: string) => statusLabels[status] ?? humanize(status),
+  salaryLabel,
+  deadlineText,
+  relativeApplication,
+  daysUntil,
+  monthlyMax: (job: Job) => monthlyRange(job)?.max ?? null,
+  visualFilteredJobs: () => visualFilteredJobs(currentData()),
+  onFilter: setJobsFilter
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
-export type { AgentConfig, Data };
+export type { AgentConfig, Data, Job, Lifecycle, SortKey };
 
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: jobsPage, applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
   if (!pages[state.page]) state.page = "overview";
   activeMap?.remove();
   activeMap = null;
@@ -2064,10 +2027,17 @@ function activateChartFilter(element: HTMLElement) {
   view().querySelector<HTMLElement>(`[data-chart-filter-type="${CSS.escape(type)}"][data-chart-filter-value="${CSS.escape(value)}"]`)?.focus({ preventScroll: true });
 }
 
-function refreshJobsResults() {
-  const results = document.getElementById("jobs-results");
-  if (results && state.data) results.innerHTML = jobsResultsMarkup(state.data);
+/** Filtros, ordem e "Mostrar mais" da página Vagas: o Preact atualiza só o que mudou (o campo em foco é preservado). */
+function refreshJobsPage() {
   syncJobsHash();
+  render();
+}
+
+function setJobsFilter(key: keyof typeof state.filters, value: string) {
+  if (key === "minMatch") state.filters.minMatch = Number(value) || 0;
+  else state.filters[key] = value;
+  state.jobsLimit = 50;
+  refreshJobsPage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2085,8 +2055,8 @@ async function handleViewClick(event: MouseEvent) {
   if (target.closest("[data-expand-map]")) { setMapExpanded(!state.mapExpanded); return; }
   if (target.closest("[data-enable-map]")) { state.mapEnabled = true; writePref("radar-map-consent", true); render(); return; }
   const sort = target.closest<HTMLElement>("[data-sort]")?.dataset.sort as SortKey | undefined;
-  if (sort) { state.sort = sort; refreshJobsResults(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
-  if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsResults(); return; }
+  if (sort) { state.sort = sort; refreshJobsPage(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
+  if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsPage(); return; }
   const mapJob = target.closest<HTMLElement>("[data-map-job]")?.dataset.mapJob;
   if (mapJob) { focusMapJob(mapJob); view().querySelectorAll(".map-job").forEach((item) => item.classList.toggle("selected", (item as HTMLElement).dataset.mapJob === mapJob)); return; }
   const detail = target.closest<HTMLElement>("[data-detail]")?.dataset.detail;
@@ -2175,13 +2145,6 @@ function bindViewEvents() {
   root.querySelectorAll<HTMLSelectElement>("[data-move-id]").forEach((select) => select.addEventListener("change", async () => {
     select.disabled = true;
     try { await moveJob(select.dataset.moveId ?? "", select.value); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); select.disabled = false; select.value = ""; }
-  }));
-  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-filter]").forEach((input) => input.addEventListener(input.dataset.filter === "query" ? "input" : "change", () => {
-    const key = input.dataset.filter as keyof typeof state.filters;
-    if (key === "minMatch") state.filters.minMatch = Number(input.value) || 0;
-    else (state.filters as Record<string, string | number>)[key] = input.value;
-    state.jobsLimit = 50;
-    refreshJobsResults();
   }));
   root.querySelectorAll<HTMLInputElement>("[data-pref]").forEach((input) => input.addEventListener("change", () => {
     if (input.dataset.pref === "map") { state.mapEnabled = input.checked; writePref("radar-map-consent", input.checked); toast(input.checked ? "Mapa ligado." : "Mapa desligado."); }

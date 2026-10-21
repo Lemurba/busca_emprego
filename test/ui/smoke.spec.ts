@@ -118,6 +118,49 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("Vagas: digitar no filtro mantém o foco e filtra; Detalhes abre o modal da vaga", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/vagas");
+    const search = page.locator('#view input[data-filter="query"]');
+    const rows = page.locator("#view .data-table tbody tr");
+    await expect(rows.filter({ hasText: "Pessoa desenvolvedora TypeScript" })).toHaveCount(1);
+    await search.click();
+    // Tecla a tecla: cada uma re-renderiza a página (diff do Preact) sem recriar o campo.
+    await search.pressSequentially("Recife", { delay: 20 });
+    await expect(search).toBeFocused();
+    await expect(search).toHaveValue("Recife");
+    await expect(page.locator("#view .results-count")).toHaveText("1 vaga");
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Engenharia de dados");
+    await expect(page).toHaveURL(/#\/vagas\?q=Recife/);
+    await search.press("End");
+    await search.pressSequentially(" sem resultado");
+    await expect(search).toBeFocused();
+    await expect(page.locator("#view .empty-state")).toContainText("Nenhuma vaga encontrada");
+    await search.fill("");
+    await expect(rows.filter({ hasText: "Pessoa desenvolvedora TypeScript" })).toHaveCount(1);
+    // Select de filtro e ordenação continuam funcionando sem perder o elemento.
+    await page.locator('#view select[data-filter="minMatch"]').selectOption("90");
+    await expect(page.locator('#view select[data-filter="minMatch"]')).toHaveValue("90");
+    await page.locator('#view select[data-filter="minMatch"]').selectOption("0");
+    const salarySort = page.locator('#view [data-sort="salary"]');
+    await salarySort.click();
+    await expect(salarySort).toHaveClass(/active/);
+    await expect(salarySort).toBeFocused();
+    await expect(page).toHaveURL(/ordem=salary/);
+    // Detalhe continua sendo o modal legado (showJobDetail), aberto pela delegação do #view.
+    await page.getByRole("button", { name: "Detalhes de Pessoa desenvolvedora TypeScript" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await expect(page.locator("#modal-root .modal")).toContainText("Pessoa desenvolvedora TypeScript");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+    await page.locator("#view .table-link", { hasText: "Engenharia de dados" }).click();
+    await expect(page.locator("#modal-root .modal")).toContainText("Engenharia de dados");
+    await page.keyboard.press("Escape");
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Agentes: cartões, Editar e Novo agente abrem o modal", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);
