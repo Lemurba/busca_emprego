@@ -32,8 +32,6 @@ export type ActionDeps = PanelHelpers & {
   toast: (message: string, error?: boolean) => void;
 };
 
-const authorizationStateLabels: Record<string, string> = { issued: "Emitida", claimed: "Reservada", consumed: "Usada", revoked: "Revogada", expired: "Expirada" };
-
 /** O link é de um ATS em que o envio automático é permitido? (mesma regra do servidor) */
 export function isAutomaticAllowed(automation: AutomationOverview | undefined, url: string | null | undefined) {
   return Boolean(automation && url && atsFamilyFor(url, automation.ats_allowlist));
@@ -41,17 +39,6 @@ export function isAutomaticAllowed(automation: AutomationOverview | undefined, u
 
 export function evidenceUrl(applicationId: string, evidenceId: string) {
   return `/api/applications/${encodeURIComponent(applicationId)}/evidence/${encodeURIComponent(evidenceId)}`;
-}
-
-/** Célula "Autorização" da tabela de candidaturas: estado, validade e quem reservou. */
-export function authorizationCell(automation: AutomationOverview | undefined, applicationId: string, h: PanelHelpers) {
-  const row = automation?.authorizations.find((item) => item.application_id === applicationId);
-  if (!row) return "—";
-  const parts = [authorizationStateLabels[row.state] ?? row.state];
-  if (row.paused_at) parts.push("pausada");
-  if (row.expires_at && ["issued", "claimed"].includes(row.state)) parts.push(`expira em ${h.formatDate(row.expires_at)}`);
-  if (row.claimed_by) parts.push(`por ${row.claimed_by}`);
-  return h.escapeHtml(parts.join(" · "));
 }
 
 function statusPill(automation: AutomationOverview, h: PanelHelpers) {

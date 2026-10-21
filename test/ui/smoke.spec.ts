@@ -14,7 +14,7 @@ const pages = [
   { page: "overview", hash: "painel", label: "Visão geral" },
   { page: "board", hash: "quadro", label: "Quadro" },
   { page: "jobs", hash: "vagas", label: "Vagas", seeded: "Pessoa desenvolvedora TypeScript" },
-  { page: "applications", hash: "candidaturas", label: "Candidaturas" },
+  { page: "applications", hash: "candidaturas", label: "Candidaturas", seeded: "Analista de candidaturas smoke" },
   { page: "resumes", hash: "curriculos", label: "Currículos", seeded: "Currículo smoke" },
   { page: "companies", hash: "empresas", label: "Empresas", seeded: "Outra Empresa" },
   { page: "analytics", hash: "analises", label: "Análises" },
@@ -71,6 +71,15 @@ async function seed(browser: Browser) {
   });
   await api("POST", `api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
   await api("POST", "api/resumes", { job_id: job.id, title: "Currículo smoke", content: "RESUMO\nExperiência confirmada com TypeScript." });
+  // Terceira vaga com currículo aprovado (APROVO) e candidatura manual, para a tabela de Candidaturas.
+  const applied = await api("POST", "api/jobs", {
+    title: "Analista de candidaturas smoke", company: "Empresa Candidatura", location: "Curitiba, PR", source: "fixture",
+    source_url: "https://jobs.example.test/ui-smoke/3", application_url: "https://jobs.example.test/ui-smoke/3/apply"
+  });
+  await api("POST", `api/jobs/${applied.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
+  const resume = await api("POST", "api/resumes", { job_id: applied.id, title: "Currículo candidatura smoke", content: "RESUMO\nAnálise de processos." });
+  await api("POST", `api/resumes/${resume.id}/approve`, { confirmation: "APROVO", override_reason: "Currículo semeado pelo smoke de UI." });
+  await api("POST", "api/applications", { job_id: applied.id, resume_id: resume.id, automation_mode: "manual", current_step: "Etapa smoke" });
   await context.close();
 }
 
@@ -140,6 +149,23 @@ test.describe("smoke de UI", () => {
     await page.locator("#refresh-button").click();
     await expect(page.locator("#sync-label")).toContainText("Atualizado");
     await expect(cards).toHaveCount(total);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Candidaturas: tabela com estado, modo e etapa; Abrir mostra o detalhe da vaga", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/candidaturas");
+    const row = page.locator("#view table.data-table tbody tr", { hasText: "Analista de candidaturas smoke" });
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('[data-label="Estado"]')).toHaveText("Na fila");
+    await expect(row.locator('[data-label="Modo"]')).toHaveText("Manual");
+    await expect(row.locator('[data-label="Autorização"]')).toHaveText("—");
+    await expect(row.locator('[data-label="Etapa"]')).toHaveText("Etapa smoke");
+    await row.getByRole("button", { name: "Abrir Analista de candidaturas smoke" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
     expect(errors, "erros de console").toEqual([]);
   });
 });
