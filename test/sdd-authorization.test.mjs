@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
@@ -18,6 +19,7 @@ function preparedApplication(id, applicationUrl = "") {
   store.reviewResume(resume.id, { verdict: "pass" }, "test-reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
+  markJobOpen(store, job.id);
   return { job, resume, application };
 }
 

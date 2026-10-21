@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, test } from "node:test";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { confirmFinal } from "./helpers/final-confirmation.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 const directory = mkdtempSync(join(tmpdir(), "radar-workflow-"));
@@ -120,6 +121,8 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.throws(() => store.updateApplication(automatic.id, { status: "not_a_status" }), /inválido/i);
     assert.throws(() => store.updateApplication(automatic.id, { status: "in_progress" }), /claim/i);
     assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, ""), /AUTORIZO/);
+    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /job\.liveness\.stale/, "AUTORIZO exige verificação recente de vaga aberta");
+    markJobOpen(store, job.id);
     store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO");
     assert.equal(store.listAuthorizedApplications().length, 1);
     assert.equal(store.listAuthorizedApplications()[0].authorized_resume_version, store.listResumes().find((item) => item.id === draft.id).version);
@@ -150,6 +153,7 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     store.reviewResume(runningResume.id, { verdict: "pass" }, "test-reviewer");
     store.approveResume(runningResume.id, "APROVO");
     const runningApplication = store.createApplication({ job_id: runningJob.id, resume_id: runningResume.id });
+    markJobOpen(store, runningJob.id);
     store.authorizeAutoApplication(runningApplication.id, runningResume.id, "AUTORIZO");
     store.claimAuthorizedApplication(runningApplication.id, "test-worker", store.listAuthorizedApplications().find((item) => item.id === runningApplication.id).nonce);
     assert.throws(() => store.updateResume(runningResume.id, { status: "review" }), /em andamento/i);

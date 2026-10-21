@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { markJobOpen } from "../helpers/liveness.mjs";
 import { confirmFinal } from "../helpers/final-confirmation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -43,6 +44,7 @@ function authorized(label) {
   store.reviewResume(resume.id, { verdict: "pass" }, "test-reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
+  markJobOpen(store, job.id);
   store.authorizeAutoApplication(application.id, resume.id, "AUTORIZO");
   const entry = store.listAuthorizedApplications().find((item) => item.id === application.id);
   assert.ok(entry?.nonce, "autorização não entrou na fila");

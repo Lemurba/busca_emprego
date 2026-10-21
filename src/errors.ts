@@ -77,6 +77,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "job.not_suppressed": "Esta vaga não está oculta.",
   "job.deadline.invalid": "Prazo inválido: use AAAA-MM-DD ou data-hora ISO 8601 com fuso.",
   "job.archive.confirmation_required": "Confirme a exclusão com EXCLUIR.",
+  "job.liveness.stale": "Verifique se a vaga ainda está aberta (Verificar agora) antes de autorizar: a última confirmação tem mais de 24 h ou não indicou vaga aberta.",
+  "job.closed": "Vaga encerrada na fonte: não avalie vagas fechadas.",
   "job.archive.application_in_progress": "A candidatura desta vaga está sendo enviada agora; aguarde antes de excluir.",
   "decision.undo.nothing_to_undo": "Não há decisão para desfazer nesta vaga.",
   "decision.undo.application_locked": "A decisão não pode ser desfeita: a candidatura está em andamento ou já foi enviada.",

@@ -10,6 +10,7 @@ import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./ba
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
 import { projectId } from "./config.js";
+import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { getResumeFactChecks, resolveResumeFact } from "./db.js";
 import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
@@ -94,7 +95,7 @@ function hasSession(req: IncomingMessage) {
 }
 
 function isInternalRequest(method: string | undefined, pathname: string) {
-  return method === "GET" && pathname === "/api/authorized-applications"
+  return method === "GET" && (pathname === "/api/authorized-applications" || pathname === "/api/liveness/due")
     || method === "POST" && (
       pathname === "/api/agent-events"
       || /^\/api\/applications\/[^/]+\/(?:claim|heartbeat|questions|submit|fail|final-confirmation|final-confirmation\/poll)$/u.test(pathname)
@@ -301,6 +302,12 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/jobs/{id}/decision/undo"), handler: ({ actor, res, params, body }) => ok(res, 200, undoJobDecision(params[0]!, validateBody(schemas.jobUndoDecision, body), actor)) },
   { method: "GET", pattern: r("/api/jobs/{id}/history"), handler: ({ res, params }) => ok(res, 200, listJobHistory(params[0]!)) },
   { method: "GET", pattern: r("/api/jobs/{id}/feedback"), handler: ({ res, params }) => ok(res, 200, listJobFeedback(params[0]!)) },
+  // Vaga viva (#33): verificação determinística agora (dashboard) e fila do cron sem LLM (token interno).
+  { method: "POST", pattern: r("/api/jobs/{id}/check-liveness"), handler: async ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, await checkJobLivenessNow(params[0]!)); } },
+  { method: "GET", pattern: r("/api/liveness/due"), handler: ({ req, res }) => {
+    const limit = Number(new URL(req.url ?? "/", "http://radar.invalid").searchParams.get("limit") ?? 50);
+    ok(res, 200, listJobsForLivenessCheck({ limit: Number.isFinite(limit) ? limit : 50, projectId }));
+  } },
   { method: "GET", pattern: r("/api/jobs/{id}"), handler: ({ res, params }) => {
     const job = getJob(params[0]!);
     if (!job) throw notFound("Vaga não encontrada.");

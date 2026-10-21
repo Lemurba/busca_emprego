@@ -11,6 +11,8 @@ import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
+import { assertJobLivenessFresh, insertLivenessCheck, listJobsDueForLiveness, livenessAndRepostSummaries, recordSightingRepost, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
+import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./liveness/index.js";
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
 import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
@@ -266,6 +268,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     if (!applicationByJob.has(application.job_id)) applicationByJob.set(application.job_id, application);
   }
   const currentTime = Date.now();
+  const livenessRepost = livenessAndRepostSummaries(db);
   const activeProfile = getActiveProfile(projectId);
   const profileFacts = activeProfile?.facts ?? [];
   const jobs = listJobs().map((job) => {
@@ -275,7 +278,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     const applied = Boolean(application && ["submitted", "accepted", "rejected"].includes(application.status));
     const lifecycle = applied ? "applied" : (isClosed ? "lost" : (job.decision === "not_interested" || job.status === "discarded" ? "not_interested" : (job.opening_status === "unknown" ? "unknown" : "open")));
     const applicationAgeDays = application?.submitted_at ? Math.max(0, Math.floor((currentTime - new Date(application.submitted_at).getTime()) / 86_400_000)) : null;
-    return { ...job, application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", blockers: evaluateBlockers(profileFacts, job) };
+    return { ...job, repost_count: 0, first_seen_at: null, repost_dates: [], last_liveness_check: null, ...livenessRepost.get(job.id), application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", blockers: evaluateBlockers(profileFacts, job) };
   });
   const statuses = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.status] = (acc[job.status] ?? 0) + 1; return acc; }, {});
   const sources = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.source] = (acc[job.source] ?? 0) + 1; return acc; }, {});
@@ -868,11 +871,11 @@ function findDedupKeyMatch(projectId: string, incoming: { sourceId: string; sour
  * A source reporting the vacancy as closed is authoritative for the opening fields: the job
  * is closed (opening_status/closed_at) and, while no application is under way, expired via the workflow.
  */
-function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, roundId?: string) {
+function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, roundId?: string, confidence = 0.9) {
   const job = getJob(jobId);
   if (!job) return;
   const timestamp = now();
-  const evidence = addEvidence({ projectId: job.project_id ?? "busca-emprego", jobId, field: "opening_status", value: "closed", sourceUrl, confidence: 0.9, origin: "agent", runId: roundId, sourceId });
+  const evidence = addEvidence({ projectId: job.project_id ?? "busca-emprego", jobId, field: "opening_status", value: "closed", sourceUrl, confidence, origin: "agent", runId: roundId, sourceId });
   selectEvidence(jobId, "opening_status", evidence.id, sourceId, evidence.timestamp);
   db.prepare("UPDATE field_conflicts SET status='resolved_candidate',reviewed_by=?,reviewed_at=? WHERE job_id=? AND field_path='opening_status' AND status='pending'").run(`source:${sourceId}`, timestamp, jobId);
   db.prepare("UPDATE jobs SET opening_status='closed',opening_checked_at=?,closed_at=COALESCE(closed_at,?),updated_at=? WHERE id=?").run(timestamp, timestamp, timestamp, jobId);
@@ -881,6 +884,54 @@ function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, 
     expireJob(jobId, "source_closed", true, `source:${sourceId}`);
   }
   audit("job", jobId, "closed_by_source", { source_id: sourceId, round_id: roundId ?? null });
+}
+
+// --- Vaga viva e repostagem (#33): regras em src/liveness/, src/repost.ts e src/db/liveness.ts.
+
+/**
+ * Registra uma verificação determinística. Aberta: marca `open` (nunca reabre vaga fechada).
+ * Fechada: segue o caminho único de fechamento pela fonte. Desconhecida: só fica no histórico
+ * (não renova `opening_checked_at`, que vale como prova para o AUTORIZO).
+ */
+export function recordLivenessCheck(jobId: string, result: LivenessResult, checkedAt = now()) {
+  const job = getJob(jobId);
+  if (!job) throw new Error("job.not_found");
+  const check = tx(() => {
+    const inserted = insertLivenessCheck(db, jobId, result, checkedAt);
+    const alreadyClosed = job.opening_status === "closed" || Boolean(job.closed_at);
+    if (result.status === "open" && !alreadyClosed) {
+      db.prepare("UPDATE jobs SET opening_status='open',opening_checked_at=?,updated_at=? WHERE id=?").run(checkedAt, now(), jobId);
+    } else if (result.status === "closed" && !alreadyClosed) {
+      const evidenceUrl = String(result.evidence?.url ?? "") || job.application_url || job.job_url || job.source_url;
+      closeJobFromSource(jobId, `liveness:${result.method}`, evidenceUrl, undefined, result.confidence);
+    } else if (result.status === "closed") {
+      db.prepare("UPDATE jobs SET opening_checked_at=?,updated_at=? WHERE id=?").run(checkedAt, now(), jobId);
+    }
+    return inserted;
+  });
+  audit("job", jobId, "liveness_checked", { status: result.status, method: result.method, confidence: check.confidence });
+  return { ...check, job: getJob(jobId) };
+}
+
+/** Verifica agora (fetch no servidor, com as travas de src/liveness/http.ts) e registra. */
+export async function checkJobLivenessNow(jobId: string, deps: LivenessDeps = {}) {
+  const job = getJob(jobId);
+  if (!job) throw new Error("job.not_found");
+  return recordLivenessCheck(jobId, await checkJobLiveness(job, deps));
+}
+
+export function listJobsForLivenessCheck(options: { nowMs?: number; limit?: number; projectId?: string } = {}) {
+  return listJobsDueForLiveness(db, options);
+}
+
+/** Impressão digital da descrição + repostagem; chamado uma vez por vaga nova na ingestão. */
+export function detectJobRepost(jobId: string) {
+  return storeFingerprintAndDetectReposts(db, jobId);
+}
+
+/** Vaga revista (dedup exata/multi-chave) com data de publicação bem mais nova: repostagem da mesma vaga. */
+export function detectSightingRepost(jobId: string, postedAt: string | null) {
+  return recordSightingRepost(db, jobId, postedAt);
 }
 
 type FuzzyIndex = Map<string, Array<{ id: string; candidate: FuzzyJobCandidate }>>;
@@ -991,6 +1042,8 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
   const job = existingJob ?? upsertJob(jobInput);
   if (!job) throw new Error("job.persist.failed");
   if (!existingJob) addToFuzzyIndex(ctx.batchFuzzyIndex, job.id, fuzzyFromItem(item));
+  // #33: vaga nova → impressão digital + repostagem contra anteriores; vaga revista com nova data de publicação → repostagem da mesma vaga.
+  if (!existingJob) detectJobRepost(job.id); else detectSightingRepost(job.id, item.posted_at == null ? null : String(item.posted_at));
   // One occurrence per (round, source, item): the same item repeated across batches of a
   // round is the same sighting, so the batch hash is not part of the identity. Fora de
   // rodada (descoberta avulsa por agente), cada vez que a vaga é revista é uma nova ocorrência.
@@ -2022,6 +2075,8 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   if (!isHttpsUrl(applicationUrl)) throw new DomainError("application.url.insecure", 422);
   // #32: envio automático só em ATS de empresa (allowlist); LinkedIn e portais amplos são manuais.
   assertAtsUrl(db, applicationUrl);
+  // #33: domínio e HTTPS são motivos permanentes e baratos; só então exige a verificação recente de vaga aberta.
+  assertJobLivenessFresh(db, job);
   const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
   // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
   const authorizationId = randomBytes(32).toString("hex");
@@ -2416,7 +2471,8 @@ const feedbackDetailByReason: Record<string, Set<string>> = {
   role: new Set(["title", "role_family"]), company: new Set(["company"]), seniority: new Set(["seniority"]),
   skill: new Set(["required_skill"]), salary: new Set(["salary"]), location: new Set(["location"]),
   work_model: new Set(["work_model"]), contract: new Set(["contract"]),
-  schedule_benefits: new Set(["schedule", "benefits"]), responsibility: new Set(["responsibilities"]), other: new Set(["other"])
+  schedule_benefits: new Set(["schedule", "benefits"]), responsibility: new Set(["responsibilities"]), other: new Set(["other"]),
+  repost: new Set(["repost_bucket"])
 };
 
 function normalizedFacet(value: unknown) {
@@ -2435,7 +2491,8 @@ function feedbackFacetValue(job: Job, detailKey: string) {
     salary: job.salary_min == null && job.salary_max == null ? "unknown" : `${job.currency}:${job.salary_min ?? ""}-${job.salary_max ?? ""}`,
     location: job.location, work_model: job.work_model, required_skill: "feedback-specified",
     contract: "unknown", schedule: "feedback-specified", benefits: "feedback-specified",
-    responsibilities: "feedback-specified", other: "feedback-specified"
+    responsibilities: "feedback-specified", other: "feedback-specified",
+    repost_bucket: detailKey === "repost_bucket" ? repostBucketFor(db, job.id) : "unknown"
   };
   return normalizedFacet(values[detailKey]);
 }

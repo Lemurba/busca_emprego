@@ -53,9 +53,15 @@ type Job = {
   application_age_days: number | null;
   lifecycle: Lifecycle;
   is_open: boolean;
+  // #33: repostagem e última verificação de vaga aberta (bootstrap).
+  repost_count?: number;
+  first_seen_at?: string | null;
+  repost_dates?: string[];
+  last_liveness_check?: LivenessCheck | null;
   blockers?: Blocker[];
   requirements_json?: Record<string, unknown> | null;
 };
+type LivenessCheck = { checked_at: string; status: "open" | "closed" | "unknown"; method: string; confidence: number };
 /** Sinais de #34: eliminatórios, cobertura de requisitos e teste de leitura do PDF. */
 type Blocker = { kind: string; label: string; status: "blocked" | "ok" | "unchecked"; reason: string; evidence: string | null; basis: string };
 type CoverageComponent = { key: string; label: string; weight: number; score: number | null; detail: string; basis: "explicit" | "estimated" };
@@ -157,7 +163,7 @@ const decisionLabels: Record<string, string> = { pending: "Pendente", interested
 const feedbackCategories: [string, string, string][] = [
   ["role", "Cargo ou área", "role_family"], ["company", "Empresa", "company"], ["seniority", "Senioridade", "seniority"], ["skill", "Habilidade exigida", "required_skill"],
   ["salary", "Salário", "salary"], ["location", "Localização", "location"], ["work_model", "Modelo de trabalho", "work_model"], ["contract", "Tipo de contrato", "contract"],
-  ["schedule_benefits", "Horário ou benefícios", "schedule"], ["responsibility", "Responsabilidades", "responsibilities"], ["other", "Outro motivo", "other"]
+  ["schedule_benefits", "Horário ou benefícios", "schedule"], ["responsibility", "Responsabilidades", "responsibilities"], ["repost", "Vaga repostada", "repost_bucket"], ["other", "Outro motivo", "other"]
 ];
 const feedbackDetails: Record<string, [string, string][]> = {
   role: [["role_family", "A área ou família do cargo"], ["title", "Este cargo exato"]],
@@ -330,9 +336,64 @@ function daysUntil(value: string | null | undefined) {
   return daysUntilDeadline(value, Date.now(), radarTz());
 }
 
+/* ------------------------------------------------------------------ */
+/* Vaga viva e repostagem (#33)                                        */
+/* ------------------------------------------------------------------ */
+
+const LIVENESS_FRESH_MS = 24 * 3_600_000;
+const livenessStatusLabels: Record<string, string> = { open: "Aberta", closed: "Encerrada", unknown: "Sem confirmação" };
+const livenessMethodLabels: Record<string, string> = {
+  greenhouse_api: "API do Greenhouse", lever_api: "API do Lever", ashby_api: "API do Ashby", http_status: "status da página",
+  json_ld: "dados estruturados da página", closing_marker: "aviso de encerramento na página", redirect: "redirecionamento",
+  conflict: "sinais conflitantes", page: "página sem sinal claro", refused: "endereço recusado por segurança", network_error: "falha de rede", no_url: "vaga sem link"
+};
+
+function livenessMethodLabel(method: string) {
+  const base = method.replace(/^gupy_/u, "");
+  return `${livenessMethodLabels[base] ?? humanize(base)}${method.startsWith("gupy_") ? " (Gupy)" : ""}`;
+}
+
+function formatNumericDate(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+}
+
+/** Horas desde a última confirmação de vaga aberta, ou null quando não há confirmação. */
+function openCheckedHoursAgo(job: Job) {
+  if (job.opening_status !== "open" || !job.opening_checked_at) return null;
+  const age = Date.now() - new Date(job.opening_checked_at).getTime();
+  return Number.isNaN(age) || age < -300_000 ? null : Math.max(0, Math.floor(age / 3_600_000));
+}
+
+function livenessFresh(job: Job) {
+  const hours = openCheckedHoursAgo(job);
+  return hours != null && hours * 3_600_000 < LIVENESS_FRESH_MS;
+}
+
+function repostText(job: Job) {
+  const count = job.repost_count ?? 0;
+  if (count < 1) return "";
+  return `Repostada ${count} ${count === 1 ? "vez" : "vezes"}${job.first_seen_at ? ` desde ${formatNumericDate(job.first_seen_at)}` : ""}`;
+}
+
+function repostBadge(job: Job) {
+  const text = repostText(job);
+  return text ? `<span class="chip orange" title="Mesma empresa, título e descrição de vaga anterior">${escapeHtml(text)}</span>` : "";
+}
+
+function livenessSummary(job: Job) {
+  const check = job.last_liveness_check;
+  if (!check) return { title: "Ainda não verificada", detail: "O Radar confere sozinho a cada 6–48 h." };
+  return { title: label(livenessStatusLabels, check.status), detail: `${livenessMethodLabel(check.method)} · ${formatDate(check.checked_at)}` };
+}
+
 function deadlineText(job: Job) {
   if (job.lifecycle === "lost" || job.opening_status === "closed") return `Fechada ${formatShortDate(job.closed_at || job.deadline_at)}`;
   const days = daysUntil(job.deadline_at);
+  const checkedHours = openCheckedHoursAgo(job);
+  // Confirmação recente de vaga aberta, salvo prazo curto (que é mais urgente).
+  if (checkedHours != null && checkedHours < 48 && (days == null || days > 3)) return checkedHours === 0 ? "Verificada aberta agora há pouco" : `Verificada aberta há ${checkedHours}h`;
   if (days == null) return job.opening_status === "unknown" ? "Abertura não verificada" : "Sem prazo informado";
   if (days < 0) return `Encerrada ${formatShortDate(job.deadline_at)}`;
   if (days === 0) return "Encerra hoje";
@@ -569,7 +630,7 @@ function jobCard(job: Job) {
   return `<article class="job-card ${draggable ? "is-draggable" : ""}" ${draggable ? `draggable="true" data-drag-id="${escapeHtml(job.id)}"` : ""} data-detail-id="${escapeHtml(job.id)}">
     <div class="job-card-top"><h3><button type="button" class="card-title-button" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button></h3>${scoreBadge(job.match_score)}</div>
     <p><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.location)}</p>
-    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span>${job.insecure_url ? `<span class="chip" title="O link da vaga usa http:// (sem criptografia)">Link não seguro</span>` : ""}</div>
+    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span>${job.insecure_url ? `<span class="chip" title="O link da vaga usa http:// (sem criptografia)">Link não seguro</span>` : ""}${repostBadge(job)}</div>
     <div class="card-footer"><span>${escapeHtml(salaryLabel(job))}</span><span>${escapeHtml(deadlineText(job))}</span></div>
     ${moveSelect(job)}
   </article>`;
@@ -1440,7 +1501,7 @@ function showJobDetail(id: string) {
   notice = decisionNotice + insecureNotice + notice;
   const sourceLinks = `${externalLink(job.job_url, "Abrir vaga ↗")}${externalLink(job.application_url, "Página de candidatura ↗")}${externalLink(job.linkedin_post_url, "Post do LinkedIn ↗")}${externalLink(job.salary_source_url, "Fonte do salário ↗")}`;
   const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
-  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score)}</strong><small>${blockedBlockers(job).length ? `${escapeHtml(blockedBlockers(job).length)} eliminatório(s) — fora da nota` : "Estimativa, não é nota de ATS"}</small></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${executing ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
+  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score)}</strong><small>${blockedBlockers(job).length ? `${escapeHtml(blockedBlockers(job).length)} eliminatório(s) — fora da nota` : "Estimativa, não é nota de ATS"}</small></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${livenessBox(job)}${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${executing ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
   const descriptionRoot = modalRoot().querySelector<HTMLElement>(".detail-description");
   if (descriptionRoot) {
     const enrichmentEvents = data.enrichmentEvents.filter((event) => event.job_id === job.id);
@@ -1453,6 +1514,7 @@ function showJobDetail(id: string) {
       section("Requisitos", job.requirements),
       section("Benefícios", job.benefits),
       section("Outras informações", job.additional_information),
+      repostSection(job),
       enrichmentEvents.length ? `<section class="detail-section"><h3>Fontes consultadas pelos agentes</h3>${enrichmentEvents.map((event) => `<p>${externalLink(event.source_url, "Fonte verificada ↗", "") || "Fonte sem link"} · ${escapeHtml(formatDate(event.created_at))}<br><small>${escapeHtml(event.evidence_excerpt || "Campos atualizados pelo agente.")}</small></p>`).join("")}</section>` : ""
     ].join("");
     descriptionRoot.innerHTML = sections || `<p class="muted-text">Sem descrição registrada. Use “Editar vaga” para completar.</p>`;
@@ -1763,15 +1825,63 @@ async function authorizeAutomaticApplication(jobId: string) {
     if (await confirmDialog("Envio automático indisponível para esta vaga", reason, "Enviar manualmente")) await prepareManualApplication(jobId);
     return;
   }
+  let fresh = livenessFresh(job);
   const result = await openDialog({
     title: "Autorizar envio automático",
     confirmLabel: "Autorizar envio",
-    body: `${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
+    validate: () => (fresh ? null : "Confirme que a vaga continua aberta (Verificar agora) antes de autorizar."),
+    onRender: (form) => {
+      const button = form.querySelector<HTMLButtonElement>("[data-dialog-check-liveness]");
+      const status = form.querySelector<HTMLElement>("[data-liveness-status]");
+      button?.addEventListener("click", () => {
+        void runBusy(button, async () => {
+          const check = await checkLivenessNow(jobId, false);
+          fresh = check.status === "open";
+          if (status) status.textContent = fresh ? "Vaga confirmada aberta agora." : `Não foi possível confirmar: ${check.status === "closed" ? "a vaga está encerrada" : livenessMethodLabel(check.method)}.`;
+          if (fresh) button.hidden = true;
+          // Sem sinal determinístico: o usuário pode confirmar manualmente depois de abrir o portal.
+          if (manual) manual.hidden = check.status !== "unknown";
+        }).catch((error) => { if (status) status.textContent = error instanceof Error ? error.message : "Falha ao verificar a vaga."; });
+      });
+      const manual = form.querySelector<HTMLButtonElement>("[data-dialog-confirm-open]");
+      manual?.addEventListener("click", () => {
+        void runBusy(manual, async () => {
+          await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "PATCH", body: JSON.stringify({ opening_status: "open", opening_checked_at: new Date().toISOString() }) });
+          fresh = true;
+          manual.hidden = true;
+          if (button) button.hidden = true;
+          if (status) status.textContent = "Você confirmou que a vaga está aberta.";
+          await loadData();
+        }).catch((error) => { if (status) status.textContent = error instanceof Error ? error.message : "Falha ao registrar a confirmação."; });
+      });
+    },
+    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button> <button type="button" class="text-button" data-dialog-confirm-open hidden>Conferi no portal: está aberta</button></div></div>`}${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
   });
   if (!result) return;
   const application = existing ?? await fetchJson<Application>("/api/applications", { method: "POST", body: JSON.stringify({ job_id: jobId, resume_id: resume.id, automation_mode: "assisted" }) });
   await fetchJson(`/api/applications/${encodeURIComponent(application.id)}/authorize-auto`, { method: "POST", body: JSON.stringify({ resume_id: resume.id, confirmation: "AUTORIZO" }) });
   closeModal(); await loadData(); toast("Envio automático autorizado para esta vaga.");
+}
+
+/** POST /api/jobs/{id}/check-liveness: verificação determinística feita pelo servidor agora. */
+async function checkLivenessNow(jobId: string, announce = true) {
+  const check = await fetchJson<LivenessCheck & { job: Job }>(`/api/jobs/${encodeURIComponent(jobId)}/check-liveness`, { method: "POST", body: "{}" });
+  await loadData();
+  if (announce) toast(check.status === "open" ? "Vaga confirmada aberta." : check.status === "closed" ? "A vaga foi encerrada na fonte." : `Não foi possível confirmar: ${livenessMethodLabel(check.method)}.`, check.status === "closed");
+  return check;
+}
+
+function livenessBox(job: Job) {
+  const summary = livenessSummary(job);
+  const canCheck = job.lifecycle !== "applied" && job.opening_status !== "closed";
+  return `<div class="detail-box"><span>Vaga aberta?</span><strong>${escapeHtml(summary.title)}</strong><small>${escapeHtml(summary.detail)}</small>${canCheck ? `<button class="text-button" data-action="check-liveness" data-job-id="${escapeHtml(job.id)}">Verificar agora</button>` : ""}</div>`;
+}
+
+function repostSection(job: Job) {
+  const dates = job.repost_dates ?? [];
+  if (!(job.repost_count ?? 0)) return "";
+  const list = dates.length ? `<ul>${dates.map((date) => `<li>Publicada antes em ${escapeHtml(formatNumericDate(date))}</li>`).join("")}</ul>` : "";
+  return `<section class="detail-section"><h3>${escapeHtml(repostText(job))}</h3><p class="muted-text">Mesma empresa, título e descrição quase idêntica de vagas anteriores. Isso não reduz a nota sozinho; se você costuma rejeitar vagas repostadas, use o motivo “Vaga repostada”.</p>${list}</section>`;
 }
 
 async function revokeAutomaticApplication(id: string) {
@@ -1782,7 +1892,7 @@ async function revokeAutomaticApplication(id: string) {
 async function markNotInterested(jobId: string) {
   const job = currentData().jobs.find((item) => item.id === jobId);
   if (!job) return;
-  const categoryOptions = feedbackCategories.map(([value, text]) => `<option value="${value}">${escapeHtml(text)}</option>`).join("");
+  const categoryOptions = feedbackCategories.filter(([value]) => value !== "repost" || (job.repost_count ?? 0) > 0).map(([value, text]) => `<option value="${value}">${escapeHtml(text)}</option>`).join("");
   const result = await openDialog({
     title: "Não tenho interesse",
     confirmLabel: "Registrar",
@@ -1990,6 +2100,7 @@ async function handleAction(target: HTMLElement) {
     case "create-resume": await createResume(jobId); return;
     case "prepare-manual": await prepareManualApplication(jobId); return;
     case "authorize-auto": await authorizeAutomaticApplication(jobId); return;
+    case "check-liveness": await checkLivenessNow(jobId); showJobDetail(jobId); return;
     case "revoke-auto": if (action.dataset.applicationId) await revokeAutomaticApplication(action.dataset.applicationId); return;
     case "application-detail": showApplicationModal(jobId); return;
     case "select-base-resume": await fetchJson(`/api/base-resumes/${encodeURIComponent(action.dataset.resumeId ?? "")}/select`, { method: "POST" }); await loadData(); toast("Currículo-base selecionado."); return;

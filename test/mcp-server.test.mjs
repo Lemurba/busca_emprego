@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { FIELDS_SUMMARY, TINY_PNG_BASE64 } from "./helpers/final-confirmation.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-mcp-test-"));
@@ -81,6 +82,7 @@ function preparedApplication(id, applicationUrl) {
   store.reviewResume(resume.id, { verdict: "pass" }, "test-reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
+  markJobOpen(store, job.id);
   store.authorizeAutoApplication(application.id, resume.id, "AUTORIZO");
   return { job, resume, application };
 }

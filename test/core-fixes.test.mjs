@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 
@@ -41,6 +42,7 @@ function approvedJob(overrides = {}, mode = "assisted") {
   store.reviewResume(resume.id, { verdict: "pass" }, "reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id, automation_mode: mode });
+  markJobOpen(store, job.id);
   return { job, resume, application };
 }
 

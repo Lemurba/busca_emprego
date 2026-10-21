@@ -7,6 +7,7 @@ import { after, describe, test } from "node:test";
 import { atsFamilyFor, isAtsUrl, normalizeAtsDomain } from "../src/ats-domains.ts";
 import { automationDayBounds } from "../src/db/settings.ts";
 import { FIELDS_SUMMARY, TINY_PNG_BASE64, atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
 process.env.HERMES_LINKED_RECIPIENT_ID = "telegram-user";
@@ -25,6 +26,8 @@ function prepared(applicationUrl = atsUrl(`vaga-${++counter}`)) {
   store.reviewResume(resume.id, { verdict: "pass" }, "test-reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
+  // #33: o AUTORIZO exige verificação recente de vaga aberta.
+  markJobOpen(store, job.id);
   return { job, resume, application, url: applicationUrl };
 }
 

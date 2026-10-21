@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { markJobOpen } from "./helpers/liveness.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,7 @@ function approved(overrides = {}) {
   store.reviewResume(resume.id, { verdict: "pass" }, "reviewer");
   store.approveResume(resume.id, "APROVO");
   const application = store.createApplication({ job_id: job.id, resume_id: resume.id });
+  markJobOpen(store, job.id);
   return { job, resume, application };
 }
 const thrown = (fn) => { try { fn(); } catch (error) { return error; } assert.fail("deveria lançar"); };

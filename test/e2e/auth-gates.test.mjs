@@ -93,6 +93,8 @@ try {
 
     await refusedToService("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeId, confirmation: "AUTORIZO" });
     assert.equal((await svc("GET", "/api/authorized-applications")).data.length, 0, "sem AUTORIZO humano a fila fica vazia");
+    // #33: AUTORIZO exige a vaga confirmada aberta (aqui, confirmação manual do usuário).
+    assert.equal((await human("PATCH", `/api/jobs/${jobId}`, { opening_status: "open", opening_checked_at: new Date().toISOString() })).status, 200);
     assert.equal((await human("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeId, confirmation: "AUTORIZO" })).status, 200);
     assert.equal((await svc("GET", "/api/authorized-applications")).data.length, 1);
 
