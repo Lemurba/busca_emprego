@@ -2,6 +2,7 @@ import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
+import { CompaniesPage } from "./ui/pages/companies-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
@@ -844,16 +845,7 @@ function renderResumes(data: Data) {
     <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
 }
 
-function companyStats(data: Data) {
-  const byCompany = new Map<string, Job[]>();
-  data.jobs.forEach((job) => byCompany.set(job.company, [...(byCompany.get(job.company) ?? []), job]));
-  return data.companies.map((company) => ({ company, salary: averageMonthlySalary(byCompany.get(company.name) ?? []) }));
-}
-
-function renderCompanies(data: Data) {
-  return `${pageHeading(pageMeta.companies.label, "Compare concentração de vagas, localidades e salários médios registrados.")}
-    <div class="company-grid">${companyStats(data).map(({ company, salary }) => `<article class="company-card"><div class="company-top"><div class="company-logo" aria-hidden="true">${escapeHtml(company.name.slice(0, 1).toUpperCase())}</div><span class="chip">${company.jobs} vaga${company.jobs === 1 ? "" : "s"}</span></div><div><h3>${escapeHtml(company.name)}</h3><p>${escapeHtml(company.locations.join(" · "))}</p></div><div class="company-stat"><div><span>Salário médio</span><strong>${escapeHtml(salary ? `${formatMoney(salary.value, salary.currency)}/mês` : "Não informado")}</strong>${salary ? `<small>estimado em ${salary.count} vaga${salary.count === 1 ? "" : "s"}</small>` : ""}</div><div><span>Fontes</span><strong>${escapeHtml(company.sources.length)}</strong></div></div><div class="tag-list">${company.sources.map((source) => `<span class="tag">${escapeHtml(source)}</span>`).join("")}</div></article>`).join("") || `<div class="empty-state"><div><strong>Nenhuma empresa ainda</strong><span>As empresas aparecem conforme as vagas chegam.</span></div></div>`}</div>`;
-}
+// Empresas: migrada para Preact em public/ui/pages/companies-page.tsx (registro em render()).
 
 function renderAnalytics(data: Data) {
   const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [key, Number(value)]);
@@ -928,6 +920,11 @@ const agentsPage = preactPage(AgentsPage, () => ({
   sourceName: (source: string) => portalNames.get(source) ?? source,
   fieldName: (field: string) => fieldLabels.get(field) ?? field
 }));
+const companiesPage = preactPage(CompaniesPage, () => ({
+  title: pageMeta.companies.label,
+  averageMonthlySalary,
+  formatMoney
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
 export type { AgentConfig, Data };
@@ -935,7 +932,7 @@ export type { AgentConfig, Data };
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: companiesPage, analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
   if (!pages[state.page]) state.page = "overview";
   activeMap?.remove();
   activeMap = null;

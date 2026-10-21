@@ -142,4 +142,22 @@ test.describe("smoke de UI", () => {
     await expect(cards).toHaveCount(total);
     expect(errors, "erros de console").toEqual([]);
   });
+
+  test("Empresas: cartões das empresas semeadas com vagas e salário médio", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/empresas");
+    const card = (name: string) => page.locator("#view .company-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+    await expect(card("Empresa Exemplo").locator(".chip")).toHaveText("1 vaga");
+    await expect(card("Empresa Exemplo").locator(".company-stat strong").first()).toContainText("/mês");
+    await expect(card("Empresa Exemplo")).toContainText("estimado em 1 vaga");
+    await expect(card("Outra Empresa").locator(".company-stat strong").first()).toHaveText("Não informado");
+    await expect(card("Outra Empresa").locator(".tag")).toHaveText(["fixture"]);
+    // Recarregar os dados re-renderiza no lugar sem duplicar cartões.
+    const total = await page.locator("#view .company-card").count();
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(page.locator("#view .company-card")).toHaveCount(total);
+    expect(errors, "erros de console").toEqual([]);
+  });
 });
