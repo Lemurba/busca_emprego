@@ -168,4 +168,119 @@ test.describe("smoke de UI", () => {
     await expect(page.locator("#modal-root .modal")).toBeHidden();
     expect(errors, "erros de console").toEqual([]);
   });
+
+  test("Saúde das buscas: painel de automação com limites e fila de confirmação final", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="automation-title"]');
+    await expect(panel.getByRole("heading", { name: "Automação de candidaturas" })).toBeVisible();
+    await expect(panel.getByText("Kill-switch")).toBeVisible();
+    await expect(panel.getByText("Envios de hoje")).toBeVisible();
+    const daily = panel.getByLabel("Limite diário (todos os ATS)");
+    await expect(daily).toBeVisible();
+    await expect(daily).toHaveValue(/^\d+$/u);
+    await expect(panel.getByLabel("Limite diário por ATS")).toBeVisible();
+    await expect(panel.getByLabel("ATS permitidos (um domínio por linha)")).not.toHaveValue("");
+    await expect(panel.getByRole("button", { name: "Salvar limites e ATS" })).toBeVisible();
+    const queue = page.locator('#view section[aria-labelledby="final-confirmation-title"]');
+    await expect(queue.getByRole("heading", { name: "Aguardando confirmação final" })).toBeVisible();
+    await expect(queue).toContainText("Nada aguardando");
+    await expect(page.locator("#view")).toContainText("Possíveis duplicatas");
+    await expect(page.locator("#view")).toContainText("Perguntas para você");
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="automation-title"]');
+    const pause = panel.getByRole("button", { name: "Pausar automação" });
+    await expect(pause).toBeVisible();
+    const dialog = page.locator("#dialog-root form.dialog");
+
+    // Cancelar a confirmação não chama a API nem muda o estado.
+    const puts: string[] = [];
+    page.on("request", (request) => { if (request.method() === "PUT" && request.url().endsWith("/api/settings/automation")) puts.push(request.postData() ?? ""); });
+    await pause.click();
+    await expect(dialog.getByRole("heading", { name: "Pausar a candidatura automática?" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(puts, "cancelar não pode chamar a API").toEqual([]);
+    await expect(pause).toBeVisible();
+
+    // Confirmar pausa: PUT { enabled: false } e o botão vira "Religar automação".
+    await pause.click();
+    await expect(dialog.getByRole("heading", { name: "Pausar a candidatura automática?" })).toBeVisible();
+    const paused = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/api/settings/automation"));
+    await dialog.getByRole("button", { name: "Pausar", exact: true }).click();
+    expect((await paused).ok()).toBeTruthy();
+    expect(JSON.parse(puts.at(-1) ?? "{}")).toEqual({ enabled: false });
+    await expect(panel.getByText("Pausada (kill-switch)")).toBeVisible();
+
+    // Restaura: religar não pede confirmação e manda { enabled: true }.
+    const resume = panel.getByRole("button", { name: "Religar automação" });
+    const resumed = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith("/api/settings/automation"));
+    await resume.click();
+    expect((await resumed).ok()).toBeTruthy();
+    expect(JSON.parse(puts.at(-1) ?? "{}")).toEqual({ enabled: true });
+    await expect(pause).toBeVisible();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: confirmação final mostra a captura e só envia com ENVIAR", async ({ page }) => {
+    const errors = watchConsole(page);
+    // Fila simulada no bootstrap (o fluxo real depende do executor): nada sai para a rede.
+    const applicationId = "app-ui-smoke-final";
+    await page.route("**/api/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const job = body.jobs[0];
+      body.automation.final_confirmations = [{
+        application_id: applicationId, job_id: job.id, requested_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        claimed_by: "executor-smoke", evidence_id: "ev-smoke", observed_url: "https://jobs.example.test/ui-smoke/1/apply",
+        fields_summary: [{ label: "Nome", value: "Pessoa Smoke" }, { label: "E-mail", value: "" }], created_at: new Date().toISOString()
+      }];
+      await route.fulfill({ response, json: body });
+    });
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+    await page.route(`**/api/applications/${applicationId}/evidence/ev-smoke`, (route) => route.fulfill({ contentType: "image/png", body: png }));
+    const confirms: string[] = [];
+    await page.route(`**/api/applications/${applicationId}/confirm-final`, (route) => {
+      confirms.push(route.request().postData() ?? "");
+      return route.fulfill({ json: { ok: true } });
+    });
+    await login(page);
+    await page.goto("#/saude");
+    const queue = page.locator('#view section[aria-labelledby="final-confirmation-title"]');
+    const card = queue.locator("article.final-confirmation");
+    await expect(card).toHaveCount(1);
+    await expect(card.locator("dl.final-fields")).toContainText("Pessoa Smoke");
+    await expect(card.locator("dl.final-fields dd").nth(1)).toHaveText("—");
+    const shot = card.locator("img.final-shot");
+    await expect(shot).toHaveAttribute("src", `/api/applications/${applicationId}/evidence/ev-smoke`);
+    await expect(shot).toHaveAttribute("alt", /^Captura da tela antes do envio: /u);
+    const axe = await new AxeBuilder({ page }).include("#view").analyze();
+    expect(axe.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact ?? "")).map((violation) => violation.id), "axe com a fila preenchida").toEqual([]);
+
+    const dialog = page.locator("#dialog-root form.dialog");
+    await card.getByRole("button", { name: "Enviar agora" }).click();
+    await expect(dialog.getByRole("heading", { name: "Enviar candidatura agora?" })).toBeVisible();
+    // Texto errado não envia: o formulário exige ENVIAR em maiúsculas.
+    await dialog.getByLabel("Digite ENVIAR para confirmar").fill("enviar");
+    await dialog.getByRole("button", { name: "Enviar agora" }).click();
+    await expect(dialog).toBeVisible();
+    expect(confirms, "sem ENVIAR não pode chamar a API").toEqual([]);
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(confirms).toEqual([]);
+
+    await card.getByRole("button", { name: "Enviar agora" }).click();
+    await dialog.getByLabel("Digite ENVIAR para confirmar").fill("ENVIAR");
+    await dialog.getByRole("button", { name: "Enviar agora" }).click();
+    await expect.poll(() => confirms.length).toBe(1);
+    expect(JSON.parse(confirms[0]!)).toEqual({ confirmation: "ENVIAR" });
+    expect(errors, "erros de console").toEqual([]);
+  });
 });
