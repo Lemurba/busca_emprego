@@ -2,6 +2,7 @@ import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
+import { OverviewPage } from "./ui/pages/overview-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
@@ -541,28 +542,6 @@ function chartBars(entries: [string, number][], type: VisualFilter["type"], colo
   return `<div class="bar-list" role="group" aria-label="${escapeHtml(groupLabel)}">${rows.join("")}</div>`;
 }
 
-function donutChart(data: Data) {
-  const total = Math.max(data.jobs.length, 1);
-  let offset = 0;
-  const counts = new Map(lifecycleOrder.map((value) => [value, data.jobs.filter((job) => job.lifecycle === value).length]));
-  const segments = lifecycleOrder.map((value) => {
-    const meta = lifecycleMeta[value];
-    const count = counts.get(value) ?? 0;
-    const size = count / total * 100;
-    const selected = state.visualFilter?.type === "lifecycle" && state.visualFilter.value === value;
-    const segment = count ? `<circle class="donut-segment ${selected ? "selected" : ""}" cx="50" cy="50" r="42" pathLength="100" fill="none" stroke="var(--tone-${value})" stroke-width="16" stroke-dasharray="${size} ${100 - size}" stroke-dashoffset="${-offset}" aria-hidden="true"><title>${escapeHtml(`${meta.plural}: ${count} (${Math.round(size)}%)`)}</title></circle>` : "";
-    offset += size;
-    return segment;
-  }).join("");
-  const legend = lifecycleOrder.map((value) => {
-    const meta = lifecycleMeta[value];
-    const count = counts.get(value) ?? 0;
-    const selected = state.visualFilter?.type === "lifecycle" && state.visualFilter.value === value;
-    return `<button class="legend-item chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="lifecycle" data-chart-filter-value="${value}" data-chart-filter-label="${escapeHtml(meta.plural)}" aria-pressed="${selected}" aria-label="${escapeHtml(`${meta.plural}: ${count} vaga${count === 1 ? "" : "s"}. Filtrar`)}"><i class="legend-dot tone-dot-${value}" aria-hidden="true"></i><span><strong>${count}</strong>${escapeHtml(meta.plural)}</span></button>`;
-  }).join("");
-  return `<div class="donut-layout"><div class="donut-wrap"><svg class="donut-chart" viewBox="0 0 100 100" role="img" aria-label="Distribuição das ${data.jobs.length} vagas por situação"><circle class="donut-track" cx="50" cy="50" r="42" pathLength="100" fill="none" stroke-width="16"></circle>${segments}<text x="50" y="48" text-anchor="middle" class="donut-total">${data.jobs.length}</text><text x="50" y="60" text-anchor="middle" class="donut-caption">vagas</text></svg></div><div class="donut-legend" role="group" aria-label="Filtrar por situação">${legend}</div></div>`;
-}
-
 function salaryChart(jobs: Job[]) {
   const currency = dominantCurrency(jobs);
   const withSalary = jobs.filter((job) => monthlyRange(job));
@@ -751,21 +730,7 @@ function currentData() {
 /* Páginas                                                             */
 /* ------------------------------------------------------------------ */
 
-function renderOverview(data: Data) {
-  const stats = data.stats;
-  const sourceEntries = Object.entries(stats.sources ?? {}).map(([key, value]) => [key, Number(value)]) as [string, number][];
-  const urgent = data.jobs.filter((job) => job.is_open && !job.application_date && (daysUntil(job.deadline_at) ?? 99) <= 7).sort((a, b) => (daysUntil(a.deadline_at) ?? 99) - (daysUntil(b.deadline_at) ?? 99));
-  return `${pageHeading(pageMeta.overview.label, "Oportunidades, currículos e candidaturas em um só lugar.", ADD_JOB_BUTTON)}
-    <div class="metric-grid">${metric("Vagas abertas", stats.openVacancies ?? 0, "Ainda aceitando candidaturas", "⌕", "teal", true)}${metric("Matches fortes", stats.strongMatches ?? 0, "Aderência de 80% ou mais", "✦", "purple")}${metric("Candidaturas", stats.applied ?? 0, "Envios registrados", "✓", "teal")}${metric("Vagas perdidas", stats.lost ?? 0, "Prazo encerrado sem envio", "!", "red")}</div>
-    <div class="section-head"><div><h2>Panorama</h2><p>Clique numa barra ou na legenda para filtrar as vagas.</p></div><button class="text-button" data-page="analytics">Ver análises →</button></div>
-    ${visualFilterSummary(data)}
-    <div class="dashboard-grid"><section class="panel chart-panel"><div class="section-head flush"><div><h2>Fontes de descoberta</h2><p>De onde vieram as vagas</p></div><span class="chip teal">${data.jobs.length} no total</span></div>${chartBars(sourceEntries, "source", "", {}, "Vagas por fonte")}</section>
-      <section class="panel chart-panel"><div class="section-head flush"><div><h2>Situação das vagas</h2><p>Atualizado a cada sincronização</p></div></div>${donutChart(data)}</section></div>
-    <div class="dashboard-grid equal section-spaced">
-      <section class="panel"><div class="section-head flush"><div><h2>Prazos que merecem atenção</h2><p>Abertas, sem candidatura e encerrando em até 7 dias.</p></div></div>${urgent.length ? `<div class="deadline-list">${urgent.slice(0, 4).map((job) => `<div class="deadline-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · ${escapeHtml(job.location)}</span></div><span class="deadline-tag">${escapeHtml(deadlineText(job))}</span><button class="secondary-button" data-detail="${escapeHtml(job.id)}">Abrir</button></div>`).join("")}</div>` : `<div class="empty-state"><div><strong>Nenhum prazo crítico</strong><span>Nada encerra nos próximos 7 dias.</span></div></div>`}</section>
-      <section class="panel"><div class="section-head flush"><div><h2>Atividade dos agentes</h2><p>Últimas sincronizações recebidas</p></div><button class="text-button" data-page="agents">Ver agentes →</button></div><div class="activity-list">${data.agentRuns.slice(0, 4).map((run) => `<div class="activity-item"><i aria-hidden="true"></i><div><strong>${escapeHtml(run.agent_name)}</strong><span>${escapeHtml(run.message || `${run.found_count} vagas processadas`)}</span></div><time datetime="${escapeHtml(run.finished_at || run.started_at)}">${escapeHtml(formatShortDate(run.finished_at || run.started_at))}</time></div>`).join("") || `<div class="empty-state"><div><strong>Aguardando agentes</strong><span>As buscas do Hermes aparecerão aqui.</span></div></div>`}</div></section>
-    </div>`;
-}
+// Visão geral: migrada para Preact em public/ui/pages/overview-page.tsx (registro em render()).
 
 function renderBoard(data: Data) {
   return `${pageHeading(pageMeta.board.label, "Arraste ou use “Mover para…” nas etapas iniciais. Interesse, currículo e candidatura avançam pelo detalhe da vaga.", ADD_JOB_BUTTON)}
@@ -928,6 +893,15 @@ const agentsPage = preactPage(AgentsPage, () => ({
   sourceName: (source: string) => portalNames.get(source) ?? source,
   fieldName: (field: string) => fieldLabels.get(field) ?? field
 }));
+const overviewPage = preactPage(OverviewPage, () => ({
+  title: pageMeta.overview.label,
+  lifecycleMeta,
+  lifecycleOrder,
+  visualFilteredJobs,
+  daysUntil,
+  deadlineText,
+  formatShortDate
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
 export type { AgentConfig, Data };
@@ -935,7 +909,7 @@ export type { AgentConfig, Data };
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: overviewPage, board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
   if (!pages[state.page]) state.page = "overview";
   activeMap?.remove();
   activeMap = null;

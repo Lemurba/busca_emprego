@@ -142,4 +142,25 @@ test.describe("smoke de UI", () => {
     await expect(cards).toHaveCount(total);
     expect(errors, "erros de console").toEqual([]);
   });
+
+  test("Visão geral: indicadores, gráficos clicáveis e filtro visual", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await expect(page.locator("#view .metric-card")).toHaveCount(4);
+    await expect(page.locator("#view .metric-card").first()).toContainText("Vagas abertas");
+    // Fontes de descoberta: as duas vagas semeadas vêm da fonte "fixture".
+    const sourceBar = page.locator('#view .bar-list [data-chart-filter-type="source"][data-chart-filter-value="fixture"]');
+    await expect(sourceBar).toHaveAttribute("aria-pressed", "false");
+    await expect(sourceBar.locator("strong")).toHaveText("2");
+    await expect(page.locator("#view .donut-chart")).toHaveAttribute("aria-label", /Distribuição das 2 vagas/);
+    await expect(page.locator("#view .donut-legend .legend-item")).toHaveCount(5);
+    // Clicar filtra (re-render pelo Preact no lugar) e o resumo do filtro aparece; clicar de novo limpa.
+    await sourceBar.click();
+    await expect(sourceBar).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#view .chart-filter-summary")).toContainText("Filtro: fixture · 2 de 2 vagas");
+    await page.locator("#view [data-clear-chart-filter]").click();
+    await expect(page.locator("#view .chart-filter-summary")).toHaveCount(0);
+    await expect(sourceBar).toHaveAttribute("aria-pressed", "false");
+    expect(errors, "erros de console").toEqual([]);
+  });
 });
