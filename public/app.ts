@@ -2,9 +2,10 @@ import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
+import { CompaniesPage } from "./ui/pages/companies-page.js";
+import { type SettingsPref, SettingsPage } from "./ui/pages/settings-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
-import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
 import { type AutomationOverview, authorizationCell, automationPanel, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
 
 // Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
@@ -844,16 +845,7 @@ function renderResumes(data: Data) {
     <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
 }
 
-function companyStats(data: Data) {
-  const byCompany = new Map<string, Job[]>();
-  data.jobs.forEach((job) => byCompany.set(job.company, [...(byCompany.get(job.company) ?? []), job]));
-  return data.companies.map((company) => ({ company, salary: averageMonthlySalary(byCompany.get(company.name) ?? []) }));
-}
-
-function renderCompanies(data: Data) {
-  return `${pageHeading(pageMeta.companies.label, "Compare concentração de vagas, localidades e salários médios registrados.")}
-    <div class="company-grid">${companyStats(data).map(({ company, salary }) => `<article class="company-card"><div class="company-top"><div class="company-logo" aria-hidden="true">${escapeHtml(company.name.slice(0, 1).toUpperCase())}</div><span class="chip">${company.jobs} vaga${company.jobs === 1 ? "" : "s"}</span></div><div><h3>${escapeHtml(company.name)}</h3><p>${escapeHtml(company.locations.join(" · "))}</p></div><div class="company-stat"><div><span>Salário médio</span><strong>${escapeHtml(salary ? `${formatMoney(salary.value, salary.currency)}/mês` : "Não informado")}</strong>${salary ? `<small>estimado em ${salary.count} vaga${salary.count === 1 ? "" : "s"}</small>` : ""}</div><div><span>Fontes</span><strong>${escapeHtml(company.sources.length)}</strong></div></div><div class="tag-list">${company.sources.map((source) => `<span class="tag">${escapeHtml(source)}</span>`).join("")}</div></article>`).join("") || `<div class="empty-state"><div><strong>Nenhuma empresa ainda</strong><span>As empresas aparecem conforme as vagas chegam.</span></div></div>`}</div>`;
-}
+// Empresas: migrada para Preact em public/ui/pages/companies-page.tsx (registro em render()).
 
 function renderAnalytics(data: Data) {
   const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [key, Number(value)]);
@@ -910,16 +902,7 @@ function renderOperations(data: Data) {
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Rodadas de busca</h2><p>Cada rodada guarda o perfil usado e o resultado.</p></div></div><div class="table-wrap flat"><table class="data-table responsive-table"><thead><tr><th>Início</th><th>Estado</th><th>Fontes</th><th>Resultado</th></tr></thead><tbody>${rounds || `<tr><td colspan="4">Nenhuma rodada registrada.</td></tr>`}</tbody></table></div></section>`;
 }
 
-function renderSettings(data: Data) {
-  const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(label(sourceTypeLabels, source.source_type))}</td><td>${escapeHtml(label(authLabels, source.auth_strategy))}</td><td><span class="status-pill ${source.enabled ? "teal" : "neutral"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}" aria-label="${escapeHtml(`Editar ${source.name}`)}">Editar</button></td></tr>`).join("");
-  const toggle = (name: string, checked: boolean, title: string, description: string) => `<label class="setting-toggle"><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span><input type="checkbox" data-pref="${name}" ${checked ? "checked" : ""} /></label>`;
-  return `${pageHeading(pageMeta.settings.label, "Fontes de vagas, privacidade e integrações deste navegador.")}
-    <section class="panel"><div class="section-head flush"><div><h2>Fontes e credenciais</h2><p>Senhas e tokens ficam no Hermes; aqui só há referências.</p></div><button class="primary-button" data-action="add-source"><span aria-hidden="true">+</span> Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Acesso</th><th>Estado</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section>
-    ${connectorCompaniesSection()}
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Privacidade neste navegador</h2><p>Estas opções valem só para este navegador.</p></div></div><div class="settings-toggles">${toggle("map", state.mapEnabled, "Mostrar mapa", "Carrega imagens do OpenStreetMap, que recebe seu IP e as regiões exibidas.")}${toggle("browser-ai", state.browserAiTools, "Ferramentas para assistentes de IA do navegador", "Permite que um assistente de IA do navegador liste suas vagas e as mova entre as etapas iniciais.")}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Vagas excluídas</h2><p>Vagas excluídas não aparecem no painel nem voltam pelas buscas. Restaure quando quiser.</p></div></div><div class="ops-list">${(data.archivedJobs ?? []).map((job) => `<article class="ops-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · excluída em ${escapeHtml(formatDate(job.archived_at))}${job.archived_reason ? ` · ${escapeHtml(job.archived_reason)}` : ""}</span></div><button class="secondary-button" data-action="restore-job" data-job-id="${escapeHtml(job.id)}">Restaurar</button></article>`).join("") || `<div class="empty-state compact"><div><strong>Nenhuma vaga excluída</strong></div></div>`}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Agentes e integração com o Hermes</h2><p>Os agentes são criados e editados na página Agentes. A documentação técnica da integração fica em <code>docs/agent-api.md</code>.</p></div><button class="secondary-button" data-page="agents">Abrir agentes</button></div></section>`;
-}
+// Configurações: migrada para Preact em public/ui/pages/settings-page.tsx (registro em render()).
 
 /* Páginas em Preact (public/ui/): props com o vocabulário que continua aqui no app.ts. */
 const agentsPage = preactPage(AgentsPage, () => ({
@@ -928,6 +911,19 @@ const agentsPage = preactPage(AgentsPage, () => ({
   sourceName: (source: string) => portalNames.get(source) ?? source,
   fieldName: (field: string) => fieldLabels.get(field) ?? field
 }));
+const companiesPage = preactPage(CompaniesPage, () => ({
+  title: pageMeta.companies.label,
+  averageMonthlySalary,
+  formatMoney
+}));
+const settingsPage = preactPage(SettingsPage, () => ({
+  title: pageMeta.settings.label,
+  sourceTypeLabel: (type: string) => label(sourceTypeLabels, type),
+  authLabel: (strategy: string) => label(authLabels, strategy),
+  formatDate,
+  onPrefChange: setBrowserPref,
+  connectors: { fetchJson, formatDate, toast, confirm: confirmDialog }
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
 export type { AgentConfig, Data };
@@ -935,7 +931,7 @@ export type { AgentConfig, Data };
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: companiesPage, analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: settingsPage };
   if (!pages[state.page]) state.page = "overview";
   activeMap?.remove();
   activeMap = null;
@@ -961,7 +957,6 @@ function render() {
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
   bindViewEvents();
-  if (state.page === "settings") void mountConnectorPanel(view(), { fetchJson, escapeHtml, formatDate, toast, confirm: confirmDialog });
 }
 
 /* ------------------------------------------------------------------ */
@@ -2183,11 +2178,13 @@ function bindViewEvents() {
     state.jobsLimit = 50;
     refreshJobsResults();
   }));
-  root.querySelectorAll<HTMLInputElement>("[data-pref]").forEach((input) => input.addEventListener("change", () => {
-    if (input.dataset.pref === "map") { state.mapEnabled = input.checked; writePref("radar-map-consent", input.checked); toast(input.checked ? "Mapa ligado." : "Mapa desligado."); }
-    if (input.dataset.pref === "browser-ai") { state.browserAiTools = input.checked; writePref("radar-browser-ai-tools", input.checked); registerModelTools(); toast(input.checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
-  }));
   bindDragEvents();
+}
+
+/** Interruptores de privacidade de Configurações (handler Preact em settings-page.tsx). */
+function setBrowserPref(pref: SettingsPref, checked: boolean) {
+  if (pref === "map") { state.mapEnabled = checked; writePref("radar-map-consent", checked); toast(checked ? "Mapa ligado." : "Mapa desligado."); }
+  if (pref === "browser-ai") { state.browserAiTools = checked; writePref("radar-browser-ai-tools", checked); registerModelTools(); toast(checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
 }
 
 /* Ferramentas para assistentes de IA do navegador: só com consentimento. */

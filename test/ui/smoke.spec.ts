@@ -142,4 +142,80 @@ test.describe("smoke de UI", () => {
     await expect(cards).toHaveCount(total);
     expect(errors, "erros de console").toEqual([]);
   });
+
+  test("Empresas: cartões das empresas semeadas com vagas e salário médio", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/empresas");
+    const card = (name: string) => page.locator("#view .company-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+    await expect(card("Empresa Exemplo").locator(".chip")).toHaveText("1 vaga");
+    await expect(card("Empresa Exemplo").locator(".company-stat strong").first()).toContainText("/mês");
+    await expect(card("Empresa Exemplo")).toContainText("estimado em 1 vaga");
+    await expect(card("Outra Empresa").locator(".company-stat strong").first()).toHaveText("Não informado");
+    await expect(card("Outra Empresa").locator(".tag")).toHaveText(["fixture"]);
+    // Recarregar os dados re-renderiza no lugar sem duplicar cartões.
+    const total = await page.locator("#view .company-card").count();
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(page.locator("#view .company-card")).toHaveCount(total);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Configurações: interruptor de privacidade, re-render e painel de conectores", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/configuracoes");
+    const mapToggle = page.locator('#view input[data-pref="map"]');
+    await expect(mapToggle).not.toBeChecked();
+    // Recarrega os dados antes: o Preact mantém o mesmo input; o aviso deve sair uma vez só.
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await mapToggle.check();
+    await expect(page.locator("#toast-root .toast", { hasText: "Mapa ligado." })).toHaveCount(1);
+    expect(await page.evaluate(() => localStorage.getItem("radar-map-consent"))).toBe("1");
+    await page.reload();
+    await expect(page.locator("#page-heading")).toHaveText("Configurações");
+    await expect(mapToggle).toBeChecked();
+    await mapToggle.uncheck();
+    await expect(page.locator("#toast-root .toast", { hasText: "Mapa desligado." })).toHaveCount(1);
+    expect(await page.evaluate(() => localStorage.getItem("radar-map-consent"))).toBe("0");
+
+    // Ações delegadas continuam funcionando: + Fonte abre o modal.
+    await page.getByRole("button", { name: "Fonte", exact: true }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+
+    // Painel de conectores: carrega, adiciona, pausa e remove uma empresa pela API.
+    const panel = page.locator("#view [data-connector-panel]");
+    await expect(panel).not.toHaveAttribute("aria-busy");
+    await panel.locator("#connector-id").selectOption("lever");
+    await expect(panel.locator("#connector-slug-hint")).toHaveText("empresa: jobs.lever.co/<empresa>");
+    await panel.locator("#connector-slug").fill("ui-smoke-co");
+    await panel.locator("#connector-name").fill("Empresa Conector Smoke");
+    const created = page.waitForResponse((response) => response.url().endsWith("/api/connectors/companies") && response.request().method() === "POST");
+    await panel.getByRole("button", { name: "Adicionar empresa" }).click();
+    expect((await created).status()).toBe(201);
+    const row = panel.locator("tbody tr", { hasText: "Empresa Conector Smoke" });
+    await expect(row).toContainText("Lever · ui-smoke-co");
+    await expect(page.locator("#toast-root .toast", { hasText: "Empresa adicionada à coleta automática." })).toHaveCount(1);
+    await expect(panel.locator("#connector-slug")).toHaveValue("");
+    await expect(row.locator(".status-pill").last()).toHaveText("Ativa");
+    await row.getByRole("button", { name: "Pausar" }).click();
+    await expect(row.locator(".status-pill").last()).toHaveText("Pausada");
+    await expect(row.getByRole("button", { name: "Ativar" })).toBeEnabled();
+    // Re-render da página (recarga de dados) não apaga nem duplica o painel.
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(page.locator("#view [data-connector-panel]")).toHaveCount(1);
+    await expect(row).toHaveCount(1);
+    await expect(panel.getByText("Carregando…")).toHaveCount(0);
+    await row.getByRole("button", { name: "Remover" }).click();
+    await page.getByRole("alertdialog", { name: "Remover empresa?" }).getByRole("button", { name: "Remover" }).click();
+    await expect(row).toHaveCount(0);
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact ?? "")).map((violation) => violation.id), "violações sérias/críticas do axe com o painel carregado").toEqual([]);
+    expect(errors, "erros de console").toEqual([]);
+  });
 });
