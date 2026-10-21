@@ -1,4 +1,7 @@
 import * as LeafletModule from "leaflet";
+import { bindAppState } from "./ui/app-state.js";
+import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
+import { AgentsPage } from "./ui/pages/agents-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
@@ -709,7 +712,7 @@ function mapPanel(data: Data) {
   const locations = Object.entries(filtered.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {})).sort((a, b) => b[1] - a[1]);
   const locationRows = locations.slice(0, 6).map(([location, count]) => { const selected = state.visualFilter?.type === "location" && state.visualFilter.value === location; return `<button class="location-row chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="location" data-chart-filter-value="${escapeHtml(location)}" data-chart-filter-label="${escapeHtml(location)}" aria-pressed="${selected}"><span>${escapeHtml(location)}</span><strong>${count}</strong></button>`; }).join("");
   const jobRows = filtered.slice(0, 6).map((job) => { const noCoords = job.latitude == null || job.longitude == null; return `<button type="button" class="map-job ${state.selectedJobId === job.id ? "selected" : ""}" data-map-job="${escapeHtml(job.id)}" ${noCoords || !state.mapEnabled ? "disabled" : ""} ${noCoords ? `title="Vaga sem coordenadas"` : ""}><span>${escapeHtml(job.title)}</span><small>${escapeHtml(job.company)} · ${escapeHtml(job.location)}${noCoords ? " · sem coordenadas" : ""}</small></button>`; }).join("");
-  return `${visualFilterSummary(data)}<div class="map-wrap">${mapCanvas()}<div class="map-context"><div class="location-list" role="group" aria-label="Filtrar por localização">${locationRows}</div><div class="map-job-list">${jobRows || `<p class="map-caption">Nenhuma vaga corresponde ao filtro.</p>`}</div><p class="map-caption">Selecione uma vaga para centralizar o mapa. Vagas sem latitude e longitude não aparecem.</p></div></div>`;
+  return `${visualFilterSummary(data)}<div class="map-wrap">${mapCanvas()}<div class="map-context"><div class="location-list" role="group" aria-label="Filtrar por localização">${locationRows}</div><div class="map-job-list" role="region" aria-label="Vagas no mapa" tabindex="0">${jobRows || `<p class="map-caption">Nenhuma vaga corresponde ao filtro.</p>`}</div><p class="map-caption">Selecione uma vaga para centralizar o mapa. Vagas sem latitude e longitude não aparecem.</p></div></div>`;
 }
 
 function mapHeader(title: string) {
@@ -863,19 +866,7 @@ function renderAnalytics(data: Data) {
     <div class="analytics-insights" aria-label="Leituras rápidas"><div class="insight"><span class="insight-icon" aria-hidden="true">↗</span><p><strong>${escapeHtml(data.stats.strongMatches ?? 0)} matches fortes</strong> com aderência de 80% ou mais.</p></div><div class="insight"><span class="insight-icon" aria-hidden="true">⌛</span><p><strong>${escapeHtml(data.stats.lost ?? 0)} vagas perdidas</strong> fecharam sem candidatura enviada.</p></div><div class="insight"><span class="insight-icon" aria-hidden="true">◎</span><p><strong>${escapeHtml(data.jobs.filter((job) => monthlyRange(job)).length)} vagas</strong> possuem faixa salarial com fonte.</p></div></div></div>`;
 }
 
-function renderAgents(data: Data) {
-  const cards = data.agentConfigs.map((agent) => `<article class="company-card agent-card">
-    <div class="company-top"><div><h3>${escapeHtml(agent.name)}</h3><p>${escapeHtml(label(roleLabels, agent.role_type))}</p></div><div class="agent-setting-status"><span class="status-pill ${agent.enabled ? "teal" : "neutral"}">${agent.enabled ? "Ativo" : "Pausado"}</span>${agent.draft_version_id ? `<span class="status-pill orange">Alterações não publicadas</span>` : ""}</div></div>
-    ${agent.description ? `<p>${escapeHtml(agent.description)}</p>` : ""}
-    <div class="tag-list">${agent.browser_enabled ? `<span class="tag">Lê páginas no navegador</span>` : ""}${agent.can_create_jobs ? `<span class="tag">Cria vagas</span>` : ""}${agent.can_edit_jobs ? `<span class="tag">Completa dados de vagas</span>` : ""}${agent.memory_enabled ? `<span class="tag">Usa memória</span>` : ""}</div>
-    <p><strong>Fontes:</strong> ${escapeHtml(agent.source_ids.map((source) => portalNames.get(source) ?? source).join(", ") || "Nenhuma")}</p>
-    <p><strong>Campos que pode alterar:</strong> ${escapeHtml(agent.editable_fields.map((field) => fieldLabels.get(field) ?? field).join(", ") || "Nenhum")}</p>
-    <div class="card-footer"><span>Versão ${agent.version}</span><div class="button-row">${agent.draft_version_id ? `<button class="primary-button" data-publish-agent="${escapeHtml(agent.id)}" data-version-id="${escapeHtml(agent.draft_version_id)}">Publicar</button>` : ""}<button class="secondary-button" data-agent-history="${escapeHtml(agent.id)}">Versões</button><button class="secondary-button" data-edit-agent="${escapeHtml(agent.id)}">Editar</button></div></div>
-  </article>`).join("");
-  const active = data.agentConfigs.filter((agent) => agent.enabled).length;
-  return `${pageHeading(pageMeta.agents.label, `${active} de ${data.agentConfigs.length} agentes ativos. Cada agente só faz o que você liberar aqui.`, `<button class="primary-button" data-action="add-agent"><span aria-hidden="true">+</span> Novo agente</button>`)}
-    <div class="company-grid agent-grid">${cards || `<div class="empty-state"><div><strong>Nenhum agente configurado</strong><span>Crie um coletor ou um agente que complete dados de vagas.</span></div></div>`}</div>`;
-}
+// Agentes: migrada para Preact em public/ui/pages/agents-page.tsx (registro em render()).
 
 function describeRule(rule: any) {
   const match = rule?.match_json ?? {};
@@ -930,15 +921,26 @@ function renderSettings(data: Data) {
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Agentes e integração com o Hermes</h2><p>Os agentes são criados e editados na página Agentes. A documentação técnica da integração fica em <code>docs/agent-api.md</code>.</p></div><button class="secondary-button" data-page="agents">Abrir agentes</button></div></section>`;
 }
 
+/* Páginas em Preact (public/ui/): props com o vocabulário que continua aqui no app.ts. */
+const agentsPage = preactPage(AgentsPage, () => ({
+  title: pageMeta.agents.label,
+  roleLabel: (role: string) => label(roleLabels, role),
+  sourceName: (source: string) => portalNames.get(source) ?? source,
+  fieldName: (field: string) => fieldLabels.get(field) ?? field
+}));
+/** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
+export type AppState = typeof state;
+export type { AgentConfig, Data };
+
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, () => string> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: () => renderAgents(data), settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
   if (!pages[state.page]) state.page = "overview";
   activeMap?.remove();
   activeMap = null;
   activeMapMarkers.clear();
-  view().innerHTML = pages[state.page]();
+  mountPage(view(), pages[state.page]);
   const mapShell = view().querySelector<HTMLElement>(".map-shell");
   if (!mapShell || !state.mapEnabled) state.mapExpanded = false;
   mapShell?.classList.toggle("is-expanded", state.mapExpanded);
@@ -1612,7 +1614,7 @@ async function confirmResumeApproval(id: string) {
   const reviewed = await fetchJson<{ review_status?: string; review_findings?: string[]; parse_check?: ParseCheckSummary | null; coverage?: Coverage | null }>(`/api/resumes/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({}) });
   const facts = await fetchJson<FactReport>(`/api/resumes/${encodeURIComponent(id)}/facts`);
   const blocked = facts.pending.length > 0;
-  const otherFindings = (reviewed.review_findings ?? []).filter((finding) => !finding.startsWith("facts.unverified"));
+  const otherFindings = (reviewed.review_findings ?? []).filter((finding) => !finding.startsWith("facts.unverified") && finding !== "pdf.parse_failed");
   const failed = Boolean(reviewed.review_status && reviewed.review_status !== "pass");
   const findings = otherFindings.map((finding) => `<li>${escapeHtml(reviewFindingLabel(finding))}</li>`).join("");
   // Teste de leitura do PDF reprovado bloqueia a aprovação: a justificativa não libera.
@@ -2215,6 +2217,7 @@ function closeMobileMore() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  bindAppState(() => state);
   setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
   document.getElementById("theme-toggle")?.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => navigate(element.dataset.page ?? "overview")));

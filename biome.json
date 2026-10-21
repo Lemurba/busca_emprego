@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**", "public/**/*.ts", "public/**/*.js", "scripts/**", "test/**", "hermes/**/*.mjs", "hermes/**/*.js", "!!**/dist"]
+    "includes": ["src/**", "public/**/*.ts", "public/**/*.tsx", "public/**/*.js", "scripts/**", "test/**", "hermes/**/*.mjs", "hermes/**/*.js", "!!**/dist"]
   },
   "formatter": {
     "enabled": false
