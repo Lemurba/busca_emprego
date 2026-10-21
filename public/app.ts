@@ -1,12 +1,16 @@
 import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
+import { SCORE_BADGE_TITLE, scoreTone } from "./ui/components/job-badges.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
 import { ApplicationsPage } from "./ui/pages/applications-page.js";
 import { OperationsPage } from "./ui/pages/operations-page.js";
+import { JobsPage } from "./ui/pages/jobs-page.js";
+import { ResumesPage } from "./ui/pages/resumes-page.js";
+import { CompaniesPage } from "./ui/pages/companies-page.js";
+import { type SettingsPref, SettingsPage } from "./ui/pages/settings-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
-import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
 import { type AutomationOverview, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
 
 // Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
@@ -417,10 +421,9 @@ function lifecycleChip(job: Job, element = "span") {
   return `<${element} class="status-pill ${meta.tone}">${escapeHtml(meta.label)}</${element}>`;
 }
 
-/** Mesmas faixas do domínio (calculateScore): ≥ 80 match forte, ≥ 65 vale olhar. */
+/** Faixas e título compartilhados com o `ScoreBadge` em JSX (ui/components/job-badges.tsx). */
 function scoreBadge(score: number) {
-  const tone = score >= 80 ? "high" : score >= 65 ? "mid" : "low";
-  return `<span class="score ${tone}" title="Aderência: estimativa de quanto a vaga combina com seu perfil (não é nota de ATS)">${escapeHtml(score)}%</span>`;
+  return `<span class="score ${scoreTone(score)}" title="${escapeHtml(SCORE_BADGE_TITLE)}">${escapeHtml(score)}%</span>`;
 }
 
 const SCORE_EXPLANATION = "Estimativa de quanto a vaga combina com seu perfil. Não é a nota de nenhum ATS.";
@@ -435,13 +438,6 @@ const blockerStatusMeta: Record<string, { label: string; tone: string }> = { blo
 
 function blockedBlockers(job: Job) {
   return (job.blockers ?? []).filter((blocker) => blocker.status === "blocked");
-}
-
-/** Selo separado da nota: só aparece quando há eliminatório confirmado dos dois lados. */
-function blockerBadge(job: Job) {
-  const blocked = blockedBlockers(job);
-  if (!blocked.length) return "";
-  return `<span class="status-pill red" title="${escapeHtml(blocked.map((blocker) => blocker.reason).join(" "))}">Eliminatório: ${escapeHtml(blocked[0]!.label)}${blocked.length > 1 ? ` +${blocked.length - 1}` : ""}</span>`;
 }
 
 function blockersSection(job: Job) {
@@ -469,11 +465,6 @@ function coverageBlock(coverage: Coverage | null | undefined) {
   const rows = coverage.components.map((item) => `<tr><td>${escapeHtml(item.label)}<small>${escapeHtml(item.detail)}</small></td><td class="num">${escapeHtml(item.weight)}</td><td class="num">${item.score == null ? "—" : `${escapeHtml(Math.round(item.score))}%`}</td><td>${escapeHtml(basisLabels[item.basis] ?? item.basis)}</td></tr>`).join("");
   const missing = coverage.missing_keywords.length ? `<p><strong>Faltam no currículo:</strong> ${coverage.missing_keywords.map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join(" ")}</p>` : `<p>Todos os termos identificados na vaga aparecem no currículo.</p>`;
   return `<p><strong>Cobertura de requisitos: ${escapeHtml(coverage.total)}%</strong> — conta determinística, sem IA; não é a nota de nenhum ATS.</p><div class="table-wrap flat"><table class="signal-table"><thead><tr><th>Componente</th><th class="num">Peso</th><th class="num">Valor</th><th>Base</th></tr></thead><tbody>${rows}</tbody></table></div>${missing}`;
-}
-
-function parseCheckPill(check: ParseCheckSummary | null | undefined) {
-  if (!check || check.stale) return `<span class="status-pill neutral">Leitura do PDF não testada</span>`;
-  return check.ok ? `<span class="status-pill teal">Leitura do PDF ok</span>` : `<span class="status-pill red">Leitura do PDF falhou</span>`;
 }
 
 function renderParseCheck(root: HTMLElement, check: ParseCheck | null) {
@@ -772,75 +763,13 @@ function renderBoard(data: Data) {
     <div class="board">${statusColumns.map((column) => { const jobs = data.jobs.filter((job) => column.statuses.includes(job.status)); const movable = Boolean(column.target); return `<section class="board-column" aria-labelledby="column-${column.statuses[0]}"><div class="column-head"><h2 class="column-title" id="column-${column.statuses[0]}">${escapeHtml(column.title)}</h2><span class="column-count" aria-label="${jobs.length} vagas">${jobs.length}</span></div><div class="column-drop" ${movable ? `data-drop-status="${escapeHtml(column.target ?? "")}"` : ""}>${jobs.map((job) => jobCard(job)).join("") || `<p class="column-empty">${movable ? "Nenhuma vaga nesta etapa" : "Avança pelo detalhe da vaga"}</p>`}</div></section>`; }).join("")}</div>`;
 }
 
-function filterJobs(data: Data) {
-  const query = state.filters.query.toLowerCase();
-  const filtered = visualFilteredJobs(data).filter((job) => {
-    const textMatch = !query || [job.title, job.company, job.location, job.source].some((value) => String(value ?? "").toLowerCase().includes(query));
-    const sourceMatch = state.filters.source === "all" || job.source === state.filters.source;
-    const lifecycleMatch = state.filters.lifecycle === "all" || job.lifecycle === state.filters.lifecycle;
-    const modelMatch = state.filters.workModel === "all" || job.work_model === state.filters.workModel;
-    return textMatch && sourceMatch && lifecycleMatch && modelMatch && job.match_score >= state.filters.minMatch;
-  });
-  const deadlineValue = (job: Job) => daysUntil(job.deadline_at) ?? Number.POSITIVE_INFINITY;
-  const sorters: Record<SortKey, (a: Job, b: Job) => number> = {
-    match: (a, b) => b.match_score - a.match_score,
-    deadline: (a, b) => deadlineValue(a) - deadlineValue(b),
-    salary: (a, b) => (monthlyRange(b)?.max ?? -1) - (monthlyRange(a)?.max ?? -1),
-    updated: (a, b) => String(b.updated_at).localeCompare(String(a.updated_at))
-  };
-  return filtered.sort(sorters[state.sort]);
-}
-
-function jobTableRows(jobs: Job[]) {
-  if (!jobs.length) return `<tr><td colspan="7"><div class="empty-state"><div><strong>Nenhuma vaga encontrada</strong><span>Altere os filtros ou adicione uma vaga manualmente.</span></div></div></td></tr>`;
-  const rows = jobs.slice(0, state.jobsLimit).map((job) => `<tr><td data-label="Vaga"><button type="button" class="table-link" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button><small>${escapeHtml(job.company)}</small></td><td data-label="Local">${escapeHtml(job.location)}<small>${escapeHtml(job.work_model)}</small></td><td data-label="Salário"><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}</small></td><td data-label="Aderência">${scoreBadge(job.match_score)}${blockerBadge(job)}</td><td data-label="Situação">${lifecycleChip(job)}<small>${escapeHtml(statusLabels[job.status] ?? humanize(job.status))}</small></td><td data-label="Prazo"><span class="deadline-inline ${job.lifecycle === "lost" ? "lost" : ""}">${escapeHtml(deadlineText(job))}</span><small>${escapeHtml(relativeApplication(job))}</small></td><td class="cell-action"><button class="secondary-button" data-detail="${escapeHtml(job.id)}" aria-label="${escapeHtml(`Detalhes de ${job.title}`)}">Detalhes</button></td></tr>`).join("");
-  const more = jobs.length > state.jobsLimit ? `<tr><td colspan="7" class="table-more"><button type="button" class="secondary-button" data-show-more-jobs>Mostrar mais ${Math.min(50, jobs.length - state.jobsLimit)} de ${jobs.length - state.jobsLimit} restantes</button></td></tr>` : "";
-  return rows + more;
-}
-
-function jobsResultsMarkup(data: Data) {
-  const jobs = filterJobs(data);
-  const sortHeader = (key: SortKey, text: string) => `<th aria-sort="${state.sort === key ? (key === "deadline" ? "ascending" : "descending") : "none"}"><button type="button" class="sort-button ${state.sort === key ? "active" : ""}" data-sort="${key}">${escapeHtml(text)}<span aria-hidden="true">${state.sort === key ? (key === "deadline" ? " ↑" : " ↓") : ""}</span></button></th>`;
-  return `<p class="results-count" role="status">${jobs.length} vaga${jobs.length === 1 ? "" : "s"}</p><div class="table-wrap"><table class="data-table responsive-table"><thead><tr><th>Vaga</th><th>Localização</th>${sortHeader("salary", "Faixa salarial")}${sortHeader("match", "Aderência")}<th>Situação</th>${sortHeader("deadline", "Prazo / candidatura")}<th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${jobTableRows(jobs)}</tbody></table></div>`;
-}
-
-function renderJobs(data: Data) {
-  const sources = [...new Set(data.jobs.map((job) => job.source))].sort();
-  const models = [...new Set(data.jobs.map((job) => job.work_model).filter(Boolean))].sort();
-  const option = (value: string, text: string, current: string) => `<option value="${escapeHtml(value)}" ${current === value ? "selected" : ""}>${escapeHtml(text)}</option>`;
-  return `${pageHeading(pageMeta.jobs.label, "Pesquise, compare salários, confirme prazos e escolha quais entram no seu fluxo.", ADD_JOB_BUTTON)}
-    ${visualFilterSummary(data, false)}
-    <div class="filter-bar" role="search"><label class="filter-field grow"><span>Buscar</span><input class="input" type="search" data-filter="query" value="${escapeHtml(state.filters.query)}" placeholder="Cargo, empresa, cidade ou fonte" /></label>
-      <label class="filter-field"><span>Fonte</span><select class="select" data-filter="source">${option("all", "Todas", state.filters.source)}${sources.map((source) => option(source, source, state.filters.source)).join("")}</select></label>
-      <label class="filter-field"><span>Situação</span><select class="select" data-filter="lifecycle">${option("all", "Todas", state.filters.lifecycle)}${lifecycleOrder.map((value) => option(value, lifecycleMeta[value].plural, state.filters.lifecycle)).join("")}</select></label>
-      <label class="filter-field"><span>Modelo</span><select class="select" data-filter="workModel">${option("all", "Todos", state.filters.workModel)}${models.map((model) => option(model, model, state.filters.workModel)).join("")}</select></label>
-      <label class="filter-field"><span>Match mínimo</span><select class="select" data-filter="minMatch">${[0, 50, 70, 80, 90].map((value) => option(String(value), value ? `${value}%` : "Qualquer", String(state.filters.minMatch))).join("")}</select></label></div>
-    <div id="jobs-results">${jobsResultsMarkup(data)}</div>`;
-}
+// Vagas: migrada para Preact em public/ui/pages/jobs-page.tsx (registro em render()).
 
 // Candidaturas: migrada para Preact em public/ui/pages/applications-page.tsx (registro em render()).
 
-function renderResumes(data: Data) {
-  const jobs = new Map(data.jobs.map((job) => [job.id, job]));
-  return `${pageHeading(pageMeta.resumes.label, "Revise o currículo adaptado a cada vaga e aprove antes de qualquer envio. A aprovação não envia nada sozinha.")}
-    <section class="panel"><div class="section-head flush"><div><h2>Currículos-base</h2><p>Envie PDFs, escolha qual será usado nas próximas adaptações e baixe uma cópia.</p></div></div>
-      <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
-      <form data-form="json-resume-import" class="base-resume-form"><div class="form-field"><span>Já tem um currículo em JSON Resume?</span><small>Vira um novo perfil em rascunho; revise e confirme as informações antes de usar.</small></div><div class="form-field"><label for="json-resume-file">Arquivo JSON Resume (máx. 1 MB)</label><input class="input" id="json-resume-file" name="file" type="file" accept="application/json,.json" required /></div><button class="secondary-button" type="submit">Importar JSON Resume</button></form>
-      <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
-    <div class="section-head"><div><h2>Currículos por vaga</h2><p>Cada um nasce quando você marca interesse numa vaga.</p></div></div>
-    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
-}
+// Currículos: migrada para Preact em public/ui/pages/resumes-page.tsx (registro em render()).
 
-function companyStats(data: Data) {
-  const byCompany = new Map<string, Job[]>();
-  data.jobs.forEach((job) => byCompany.set(job.company, [...(byCompany.get(job.company) ?? []), job]));
-  return data.companies.map((company) => ({ company, salary: averageMonthlySalary(byCompany.get(company.name) ?? []) }));
-}
-
-function renderCompanies(data: Data) {
-  return `${pageHeading(pageMeta.companies.label, "Compare concentração de vagas, localidades e salários médios registrados.")}
-    <div class="company-grid">${companyStats(data).map(({ company, salary }) => `<article class="company-card"><div class="company-top"><div class="company-logo" aria-hidden="true">${escapeHtml(company.name.slice(0, 1).toUpperCase())}</div><span class="chip">${company.jobs} vaga${company.jobs === 1 ? "" : "s"}</span></div><div><h3>${escapeHtml(company.name)}</h3><p>${escapeHtml(company.locations.join(" · "))}</p></div><div class="company-stat"><div><span>Salário médio</span><strong>${escapeHtml(salary ? `${formatMoney(salary.value, salary.currency)}/mês` : "Não informado")}</strong>${salary ? `<small>estimado em ${salary.count} vaga${salary.count === 1 ? "" : "s"}</small>` : ""}</div><div><span>Fontes</span><strong>${escapeHtml(company.sources.length)}</strong></div></div><div class="tag-list">${company.sources.map((source) => `<span class="tag">${escapeHtml(source)}</span>`).join("")}</div></article>`).join("") || `<div class="empty-state"><div><strong>Nenhuma empresa ainda</strong><span>As empresas aparecem conforme as vagas chegam.</span></div></div>`}</div>`;
-}
+// Empresas: migrada para Preact em public/ui/pages/companies-page.tsx (registro em render()).
 
 function renderAnalytics(data: Data) {
   const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [key, Number(value)]);
@@ -868,16 +797,7 @@ function describeRule(rule: any) {
 
 // Saúde das buscas: migrada para Preact em public/ui/pages/operations-page.tsx (registro em render()).
 
-function renderSettings(data: Data) {
-  const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(label(sourceTypeLabels, source.source_type))}</td><td>${escapeHtml(label(authLabels, source.auth_strategy))}</td><td><span class="status-pill ${source.enabled ? "teal" : "neutral"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}" aria-label="${escapeHtml(`Editar ${source.name}`)}">Editar</button></td></tr>`).join("");
-  const toggle = (name: string, checked: boolean, title: string, description: string) => `<label class="setting-toggle"><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span><input type="checkbox" data-pref="${name}" ${checked ? "checked" : ""} /></label>`;
-  return `${pageHeading(pageMeta.settings.label, "Fontes de vagas, privacidade e integrações deste navegador.")}
-    <section class="panel"><div class="section-head flush"><div><h2>Fontes e credenciais</h2><p>Senhas e tokens ficam no Hermes; aqui só há referências.</p></div><button class="primary-button" data-action="add-source"><span aria-hidden="true">+</span> Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Acesso</th><th>Estado</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section>
-    ${connectorCompaniesSection()}
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Privacidade neste navegador</h2><p>Estas opções valem só para este navegador.</p></div></div><div class="settings-toggles">${toggle("map", state.mapEnabled, "Mostrar mapa", "Carrega imagens do OpenStreetMap, que recebe seu IP e as regiões exibidas.")}${toggle("browser-ai", state.browserAiTools, "Ferramentas para assistentes de IA do navegador", "Permite que um assistente de IA do navegador liste suas vagas e as mova entre as etapas iniciais.")}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Vagas excluídas</h2><p>Vagas excluídas não aparecem no painel nem voltam pelas buscas. Restaure quando quiser.</p></div></div><div class="ops-list">${(data.archivedJobs ?? []).map((job) => `<article class="ops-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · excluída em ${escapeHtml(formatDate(job.archived_at))}${job.archived_reason ? ` · ${escapeHtml(job.archived_reason)}` : ""}</span></div><button class="secondary-button" data-action="restore-job" data-job-id="${escapeHtml(job.id)}">Restaurar</button></article>`).join("") || `<div class="empty-state compact"><div><strong>Nenhuma vaga excluída</strong></div></div>`}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Agentes e integração com o Hermes</h2><p>Os agentes são criados e editados na página Agentes. A documentação técnica da integração fica em <code>docs/agent-api.md</code>.</p></div><button class="secondary-button" data-page="agents">Abrir agentes</button></div></section>`;
-}
+// Configurações: migrada para Preact em public/ui/pages/settings-page.tsx (registro em render()).
 
 /* Páginas em Preact (public/ui/): props com o vocabulário que continua aqui no app.ts. */
 const agentsPage = preactPage(AgentsPage, () => ({
@@ -911,14 +831,41 @@ const operationsPage = preactPage(OperationsPage, () => ({
   describeRule,
   missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type))
 }));
+const jobsPage = preactPage(JobsPage, () => ({
+  title: pageMeta.jobs.label,
+  lifecycleMeta,
+  lifecycleOrder,
+  statusLabel: (status: string) => statusLabels[status] ?? humanize(status),
+  salaryLabel,
+  deadlineText,
+  relativeApplication,
+  daysUntil,
+  monthlyMax: (job: Job) => monthlyRange(job)?.max ?? null,
+  visualFilteredJobs: () => visualFilteredJobs(currentData()),
+  onFilter: setJobsFilter
+}));
+const resumesPage = preactPage(ResumesPage, () => ({ title: pageMeta.resumes.label }));
+const companiesPage = preactPage(CompaniesPage, () => ({
+  title: pageMeta.companies.label,
+  averageMonthlySalary,
+  formatMoney
+}));
+const settingsPage = preactPage(SettingsPage, () => ({
+  title: pageMeta.settings.label,
+  sourceTypeLabel: (type: string) => label(sourceTypeLabels, type),
+  authLabel: (strategy: string) => label(authLabels, strategy),
+  formatDate,
+  onPrefChange: setBrowserPref,
+  connectors: { fetchJson, formatDate, toast, confirm: confirmDialog }
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
-export type { AgentConfig, Data };
+export type { AgentConfig, BaseResume, Data, Job, Lifecycle, ParseCheckSummary, Resume, SortKey };
 
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: applicationsPage, resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: operationsPage, agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: jobsPage, applications: applicationsPage, resumes: resumesPage, companies: companiesPage, analytics: () => renderAnalytics(data), operations: operationsPage, agents: agentsPage, settings: settingsPage };
   if (!pages[state.page]) state.page = "overview";
   activeMap?.remove();
   activeMap = null;
@@ -944,7 +891,6 @@ function render() {
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
   bindViewEvents();
-  if (state.page === "settings") void mountConnectorPanel(view(), { fetchJson, escapeHtml, formatDate, toast, confirm: confirmDialog });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1704,7 +1650,8 @@ async function handleForm(form: HTMLFormElement) {
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) throw new Error("Envie um arquivo PDF.");
     if (file.size > 5 * 1024 * 1024) throw new Error("O PDF deve ter no máximo 5 MB.");
     await fetchJson("/api/base-resumes", { method: "POST", body: JSON.stringify({ title: get("title") || file.name, file_name: file.name, file_data: await fileToBase64(file) }) });
-    await loadData(); toast("PDF salvo na biblioteca."); return;
+    // A página é Preact: o diff mantém o mesmo <form>, então os campos são limpos aqui.
+    form.reset(); await loadData(); toast("PDF salvo na biblioteca."); return;
   }
   if (form.dataset.form === "json-resume-import") {
     const file = formData.get("file");
@@ -2047,10 +1994,17 @@ function activateChartFilter(element: HTMLElement) {
   view().querySelector<HTMLElement>(`[data-chart-filter-type="${CSS.escape(type)}"][data-chart-filter-value="${CSS.escape(value)}"]`)?.focus({ preventScroll: true });
 }
 
-function refreshJobsResults() {
-  const results = document.getElementById("jobs-results");
-  if (results && state.data) results.innerHTML = jobsResultsMarkup(state.data);
+/** Filtros, ordem e "Mostrar mais" da página Vagas: o Preact atualiza só o que mudou (o campo em foco é preservado). */
+function refreshJobsPage() {
   syncJobsHash();
+  render();
+}
+
+function setJobsFilter(key: keyof typeof state.filters, value: string) {
+  if (key === "minMatch") state.filters.minMatch = Number(value) || 0;
+  else state.filters[key] = value;
+  state.jobsLimit = 50;
+  refreshJobsPage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2068,8 +2022,8 @@ async function handleViewClick(event: MouseEvent) {
   if (target.closest("[data-expand-map]")) { setMapExpanded(!state.mapExpanded); return; }
   if (target.closest("[data-enable-map]")) { state.mapEnabled = true; writePref("radar-map-consent", true); render(); return; }
   const sort = target.closest<HTMLElement>("[data-sort]")?.dataset.sort as SortKey | undefined;
-  if (sort) { state.sort = sort; refreshJobsResults(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
-  if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsResults(); return; }
+  if (sort) { state.sort = sort; refreshJobsPage(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
+  if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsPage(); return; }
   const mapJob = target.closest<HTMLElement>("[data-map-job]")?.dataset.mapJob;
   if (mapJob) { focusMapJob(mapJob); view().querySelectorAll(".map-job").forEach((item) => item.classList.toggle("selected", (item as HTMLElement).dataset.mapJob === mapJob)); return; }
   const detail = target.closest<HTMLElement>("[data-detail]")?.dataset.detail;
@@ -2159,18 +2113,13 @@ function bindViewEvents() {
     select.disabled = true;
     try { await moveJob(select.dataset.moveId ?? "", select.value); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); select.disabled = false; select.value = ""; }
   }));
-  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-filter]").forEach((input) => input.addEventListener(input.dataset.filter === "query" ? "input" : "change", () => {
-    const key = input.dataset.filter as keyof typeof state.filters;
-    if (key === "minMatch") state.filters.minMatch = Number(input.value) || 0;
-    else (state.filters as Record<string, string | number>)[key] = input.value;
-    state.jobsLimit = 50;
-    refreshJobsResults();
-  }));
-  root.querySelectorAll<HTMLInputElement>("[data-pref]").forEach((input) => input.addEventListener("change", () => {
-    if (input.dataset.pref === "map") { state.mapEnabled = input.checked; writePref("radar-map-consent", input.checked); toast(input.checked ? "Mapa ligado." : "Mapa desligado."); }
-    if (input.dataset.pref === "browser-ai") { state.browserAiTools = input.checked; writePref("radar-browser-ai-tools", input.checked); registerModelTools(); toast(input.checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
-  }));
   bindDragEvents();
+}
+
+/** Interruptores de privacidade de Configurações (handler Preact em settings-page.tsx). */
+function setBrowserPref(pref: SettingsPref, checked: boolean) {
+  if (pref === "map") { state.mapEnabled = checked; writePref("radar-map-consent", checked); toast(checked ? "Mapa ligado." : "Mapa desligado."); }
+  if (pref === "browser-ai") { state.browserAiTools = checked; writePref("radar-browser-ai-tools", checked); registerModelTools(); toast(checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
 }
 
 /* Ferramentas para assistentes de IA do navegador: só com consentimento. */
