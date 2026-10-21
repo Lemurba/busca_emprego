@@ -161,6 +161,41 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("Currículos: cartão semeado, links de download e formulários de envio/importação", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    const bootstrap = await (await page.request.get("api/bootstrap")).json();
+    const resume = bootstrap.resumes.find((item: { title: string }) => item.title === "Currículo smoke");
+    expect(resume, "currículo semeado no bootstrap").toBeTruthy();
+    await page.goto("#/curriculos");
+    const card = page.locator("#view .resume-card", { hasText: "Currículo smoke" });
+    await expect(card).toHaveCount(1);
+    await expect(card).toContainText("Empresa Exemplo · versão 1");
+    await expect(card).toContainText("Cobertura de requisitos:");
+    await expect(card.locator(".status-pill").first()).toBeVisible();
+    const base = `api/resumes/${encodeURIComponent(resume.id)}/files`;
+    await expect(card.getByRole("link", { name: "Baixar PDF" })).toHaveAttribute("href", `${base}/pdf`);
+    await expect(card.getByRole("link", { name: "Baixar DOCX" })).toHaveAttribute("href", `${base}/docx`);
+    await expect(card.getByRole("link", { name: "JSON Resume" })).toHaveAttribute("href", `${base}/json`);
+    const download = await page.request.get(`${base}/json`);
+    expect(download.ok(), "download JSON Resume do currículo semeado").toBeTruthy();
+    // Envio do PDF-base e importação do JSON Resume (#35) lado a lado.
+    await expect(page.locator('#view form[data-form="base-resume"] input[type="file"]#base-resume-file')).toHaveAttribute("accept", "application/pdf,.pdf");
+    const importInput = page.locator('#view form[data-form="json-resume-import"] input[type="file"]#json-resume-file');
+    await expect(importInput).toHaveAttribute("accept", "application/json,.json");
+    // O submit continua delegado no #view (handleForm): arquivo inválido é recusado no navegador, sem criar perfil.
+    await importInput.setInputFiles({ name: "curriculo.json", mimeType: "application/json", buffer: Buffer.from("não é json") });
+    await page.getByRole("button", { name: "Importar JSON Resume" }).click();
+    await expect(page.locator("#toast-root .toast.error")).toContainText("O arquivo não é um JSON válido.");
+    // Editar continua abrindo o editor legado (modal).
+    await card.getByRole("button", { name: "Editar →" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await expect(page.locator("#modal-root #resume-title")).toHaveValue("Currículo smoke");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#modal-root .modal")).toBeHidden();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Agentes: cartões, Editar e Novo agente abrem o modal", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);
