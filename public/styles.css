@@ -684,3 +684,13 @@ body.auth-required .app-shell, body.auth-required .mobile-tabbar { display: none
 @media (hover: none) {
   .chart-control[data-tooltip]::after { display: none; }
 }
+
+/* #32 — confirmação final da candidatura automática (captura + resumo dos campos). */
+.final-confirmation { display: block; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.final-confirmation:last-child { border-bottom: 0; }
+.final-confirmation h3 { margin: 0; font-size: var(--type-md, 1rem); }
+.final-confirmation-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 14px; align-items: start; margin-top: 10px; }
+.final-shot { display: block; width: 100%; max-height: 420px; object-fit: contain; object-position: top; border: 1px solid var(--line); border-radius: var(--radius); background: var(--neutral-bg); }
+.final-fields div { grid-template-columns: minmax(90px, 40%) 1fr; }
+[data-automation-form] textarea { min-height: 110px; font-family: inherit; }
+@media (max-width: 760px) { .final-confirmation-body { grid-template-columns: 1fr; } }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, test } from "node:test";
+import { confirmFinal } from "./helpers/final-confirmation.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
 const directory = mkdtempSync(join(tmpdir(), "radar-workflow-"));
 const dbPath = join(directory, "legacy.sqlite");
@@ -92,7 +93,7 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(store.getBaseResumeFile(uploaded.id).data.subarray(0, 5).toString("ascii"), "%PDF-");
     const baseAudit = store.db.prepare("SELECT payload FROM audit_events WHERE entity_id = ? AND event_type = 'uploaded'").get(uploaded.id).payload;
     assert.equal(baseAudit.includes("base.pdf"), false, "audit events do not store the uploaded file name");
-    const job = store.upsertJob({ id: "new-job", title: "Analyst", company: "Example Co", source: "Test", source_url: "https://example.test/job", application_url: "https://example.test/job/apply" });
+    const job = store.upsertJob({ id: "new-job", title: "Analyst", company: "Example Co", source: "Test", source_url: "https://example.test/job", application_url: "https://boards.greenhouse.io/exemplo/jobs/analyst" });
     assert.equal(job.status, "found");
     assert.equal(job.decision, "pending");
     const jobAudit = store.db.prepare("SELECT payload FROM audit_events WHERE entity_id = ? AND event_type = 'discovered'").get(job.id).payload;
@@ -143,7 +144,7 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
   });
 
   test("candidatura autorizada em andamento só é concluída pela rota interna", () => {
-    const runningJob = store.upsertJob({ id: "running-job", title: "Coordinator", company: "Example Co", source: "Test", source_url: "https://example.test/running", application_url: "https://example.test/running/apply" });
+    const runningJob = store.upsertJob({ id: "running-job", title: "Coordinator", company: "Example Co", source: "Test", source_url: "https://example.test/running", application_url: "https://boards.greenhouse.io/exemplo/jobs/running" });
     store.recordJobDecision(runningJob.id, "interested", "TENHO INTERESSE");
     const runningResume = store.createResume({ job_id: runningJob.id, title: "Running ATS", content: "Experiência confirmada" });
     store.reviewResume(runningResume.id, { verdict: "pass" }, "test-reviewer");
@@ -157,7 +158,9 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.throws(() => store.updateApplication(runningApplication.id, { status: "queued" }), /recolocada na fila/i);
     // C1: an authorized submission is only recorded by the claiming worker through the internal route.
     assert.throws(() => store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp, evidence_ref: "portal:confirmation:running" }), /application\.internal_route_required/);
-    store.submitAuthorizedApplication(runningApplication.id, { worker_id: "test-worker", evidence_ref: "portal:confirmation:running" });
+    const observedUrl = "https://boards.greenhouse.io/exemplo/jobs/running";
+    const submitToken = confirmFinal(store, runningApplication.id, "test-worker", observedUrl);
+    store.submitAuthorizedApplication(runningApplication.id, { worker_id: "test-worker", evidence_ref: "portal:confirmation:running", observed_url: observedUrl, submit_token: submitToken });
     assert.equal(store.getJob(runningJob.id).decision, "applied", "an authorized in-progress application can record a confirmed submission");
   });
 

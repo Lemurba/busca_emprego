@@ -12,7 +12,8 @@
  *   6. Aprendiz de preferências: perfil, entrevista, revisão de fato, confirmação (snapshot).
  *   7. Redator de currículo: geração ATS a partir de fatos confirmados.
  *   8. Revisor ATS: aprovação independente e detecção de conteúdo inventado.
- *   9. Assistente de candidatura: autorização explícita, fila, claim, pergunta humana, envio.
+ *   9. Assistente de candidatura: autorização explícita (sessão do dashboard), fila, claim,
+ *      pergunta humana, dry-run com 2ª confirmação (ENVIAR) e envio com token de uso único.
  *  10. Rodada de busca: prontidão de fonte, ingestão idempotente, conclusão.
  *  11. Endurecimento: token interno obrigatório, automação desligada por padrão.
  *  12. Ponte Telegram: entrega de pergunta humana pela capability vinculada.
@@ -38,6 +39,8 @@ const SMOKE_CHAT = "smoke-chat-42";
 const token = `smoke-token-${randomUUID()}`;
 const dashboardToken = `smoke-dashboard-${randomUUID()}`;
 const sessionCookies = new Map();
+// PNG 1×1 (captura do passo de dry-run).
+const SMOKE_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const startedAt = new Date().toISOString();
 
 if (!existsSync(join(repoRoot, "dist/src/server.js"))) {
@@ -107,6 +110,15 @@ const api = async (method, path, body, extraHeaders = {}) => {
   try { data = await res.json(); } catch {}
   return { status: res.status, data };
 };
+/** Decisões humanas (AUTORIZO, ENVIAR, kill-switch) só passam com a sessão do dashboard (#32). */
+const login = async () => {
+  const res = await fetch(`${base}/auth?token=${encodeURIComponent(dashboardToken)}`, { redirect: "manual", headers: { "x-forwarded-proto": "https" } });
+  const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0];
+  if (res.status !== 303 || !cookie) throw new Error(`login do dashboard falhou: HTTP ${res.status}`);
+  return cookie;
+};
+let sessionCookie = "";
+const human = (method, path, body) => api(method, path, body, { "x-radar-service-token": "", cookie: sessionCookie });
 const expect = (label, res, ...codes) => {
   if (!codes.includes(res.status)) throw new Error(`${label}: esperava ${codes.join("/")}, veio ${res.status} — ${JSON.stringify(res.data)?.slice(0, 220)}`);
   return res.data;
@@ -157,6 +169,7 @@ try {
   section("infra");
   serverA = await startServer({ dbPath, automation: "true" });
   base = serverA.baseUrl;
+  sessionCookie = await login();
   console.log(`  instância isolada pronta em ${base} (db: ${dbPath})`);
 
   // ---------- 1. catálogo ----------
@@ -466,12 +479,17 @@ try {
     assert.equal(application.status, "queued");
   });
   await t("autorização automática sem AUTORIZO é recusada", async () => {
-    const r = await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "sim" });
+    const r = await human("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "sim" });
     expect("autorizar inválido", r, 400);
     assert.match(`${r.data?.error ?? ""} ${r.data?.message ?? ""}`, /AUTORIZO/);
   });
+  await t("autorização pelo token de serviço é recusada (decisão humana só pela sessão)", async () => {
+    const r = await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" }, { cookie: "" });
+    expect("autorizar com token de serviço", r, 403);
+    assert.equal(r.data?.error, "human_session_required");
+  });
   await t("autorização explícita AUTORIZO entra na fila", async () => {
-    expect("autorizar", await api("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" }), 200);
+    expect("autorizar", await human("POST", `/api/applications/${applicationId}/authorize-auto`, { resume_id: resumeA, confirmation: "AUTORIZO" }), 200);
     const queue = expect("fila", await api("GET", "/api/authorized-applications"), 200);
     const item = queue.find((a) => a.id === applicationId);
     assert.ok(item, "candidatura fora da fila autorizada");
@@ -588,11 +606,29 @@ try {
     assert.equal(await applicationStatus(), "in_progress", "candidatura deveria retomar após a resposta");
   });
 
+  let submitToken = "";
+  await t("dry-run: executor para antes do envio e o usuário confirma com ENVIAR no painel", async () => {
+    const authorizedUrl = expect("job", await api("GET", `/api/jobs/${job0}`), 200).application_url;
+    const early = await api("POST", `/api/applications/${applicationId}/submit`, { worker_id: "smoke-worker", evidence_ref: "portal:smoke:confirmation", observed_url: authorizedUrl, submit_token: "chute" });
+    expect("envio sem confirmação final", early, 422);
+    assert.equal(early.data?.error, "application.final_confirmation_required");
+    const requested = expect("pedido de confirmação", await api("POST", `/api/applications/${applicationId}/final-confirmation`, {
+      worker_id: "smoke-worker", observed_url: authorizedUrl, screenshot_base64: SMOKE_PNG,
+      fields_summary: [{ label: "Nome", value: "Pessoa Smoke" }, { label: "CNH", value: "Sim, categoria B" }],
+    }), 200);
+    assert.equal(requested.application.status, "awaiting_final_confirmation");
+    expect("confirmação pelo token de serviço", await api("POST", `/api/applications/${applicationId}/confirm-final`, { confirmation: "ENVIAR" }, { cookie: "" }), 403);
+    expect("ENVIAR", await human("POST", `/api/applications/${applicationId}/confirm-final`, { confirmation: "ENVIAR" }), 200);
+    const polled = expect("token", await api("POST", `/api/applications/${applicationId}/final-confirmation/poll`, { worker_id: "smoke-worker" }), 200);
+    assert.equal(polled.status, "confirmed");
+    submitToken = polled.submit_token;
+    assert.ok(submitToken, "token de envio não entregue");
+  });
   await t("envio registrado com evidência e vaga marcada como candidatada", async () => {
-    // C1: envio autorizado só pela rota interna, com o worker do claim e a URL observada.
+    // C1: envio autorizado só pela rota interna, com o worker do claim, a URL observada e o token.
     const authorizedUrl = expect("job", await api("GET", `/api/jobs/${job0}`), 200).application_url;
     const r = await api("POST", `/api/applications/${applicationId}/submit`, {
-      worker_id: "smoke-worker", evidence_ref: "portal:smoke:confirmation", observed_url: authorizedUrl,
+      worker_id: "smoke-worker", evidence_ref: "portal:smoke:confirmation", observed_url: authorizedUrl, submit_token: submitToken,
     });
     const application = expect("enviar", r, 200);
     assert.equal(application.status, "submitted");
@@ -657,16 +693,19 @@ try {
   await t("automação desligada: fila e autorização respondem AUTOMATION_DISABLED (403)", async () => {
     serverB = await startServer({ dbPath: join(directory, "disabled.sqlite"), automation: "false" });
     const previousBase = base;
+    const previousCookie = sessionCookie;
     base = serverB.baseUrl;
     try {
+      sessionCookie = await login();
       const r1 = await api("GET", "/api/authorized-applications");
       expect("fila off", r1, 403);
       assert.equal(r1.data?.error, "AUTOMATION_DISABLED");
-      const r2 = await api("POST", "/api/applications/x/authorize-auto", { resume_id: "y", confirmation: "AUTORIZO" });
+      const r2 = await human("POST", "/api/applications/x/authorize-auto", { resume_id: "y", confirmation: "AUTORIZO" });
       expect("autorizar off", r2, 403);
       assert.equal(r2.data?.error, "AUTOMATION_DISABLED");
     } finally {
       base = previousBase;
+      sessionCookie = previousCookie;
       await serverB.stop();
       serverB = undefined;
     }

@@ -31,6 +31,10 @@ const identity = z.union([z.string().max(300), z.number().finite()]);
 /** Prazo ISO 8601: `AAAA-MM-DD` ou data-hora com offset; outro formato → 422 (#22). */
 const optDeadline = z.string().max(64).refine((value) => value === "" || isIsoDeadline(value), { message: "deadline.format.invalid" }).nullable().optional();
 const optUrl = z.string().max(4_000).refine((value) => value === "" || isHttpUrl(value), { message: "url.scheme.invalid" }).nullable().optional();
+/** URL obrigatória http(s). */
+const reqUrl = z.string().min(1).max(4_000).refine((value) => isHttpUrl(value), { message: "url.scheme.invalid" });
+/** Captura PNG de até 2 MB decodificados (base64 ≈ 4/3), opcionalmente com prefixo data:. */
+const SCREENSHOT_BASE64_MAX = Math.ceil((2 * 1024 * 1024) / 3) * 4 + 64;
 
 const jobFields = {
   id: optId,
@@ -132,7 +136,22 @@ export const schemas = {
   applicationPatch: z.strictObject({ resume_id: optId, automation_mode: optShort, status: optShort, current_step: optShort, submitted_at: optShort, notes: optText, evidence_ref: optShort }),
   applicationAuthorize: z.strictObject({ resume_id: z.string().max(300).optional(), confirmation: shortText.optional() }),
   applicationClaim: z.strictObject({ worker_id: z.string().max(300).optional(), nonce: z.string().max(300).optional() }),
-  applicationSubmit: z.strictObject({ worker_id: id, evidence_ref: z.string().min(1).max(2_000), observed_url: optUrl }),
+  // #32: URL observada obrigatória e token de envio de uso único (entregue após a confirmação final).
+  applicationSubmit: z.strictObject({ worker_id: id, evidence_ref: z.string().min(1).max(2_000), observed_url: reqUrl, submit_token: z.string().min(1).max(200).optional() }),
+  applicationFinalConfirmation: z.strictObject({
+    worker_id: id,
+    observed_url: reqUrl,
+    fields_summary: z.array(z.strictObject({ label: z.string().min(1).max(200), value: z.union([z.string().max(500), z.number().finite(), z.boolean()]).optional() })).max(100),
+    screenshot_base64: z.string().min(1).max(SCREENSHOT_BASE64_MAX),
+  }),
+  applicationFinalPoll: z.strictObject({ worker_id: id }),
+  applicationConfirmFinal: z.strictObject({ confirmation: shortText }),
+  automationSettings: z.strictObject({
+    enabled: z.boolean().optional(),
+    daily_limit: z.number().int().min(0).max(100).optional(),
+    per_ats_limit: z.number().int().min(0).max(100).nullable().optional(),
+    ats_allowlist: z.array(z.string().min(1).max(253)).max(100).optional(),
+  }),
   applicationFail: z.strictObject({ worker_id: id, reason: z.string().min(1).max(2_000) }),
   applicationHeartbeat: z.strictObject({ worker_id: id }),
   humanAnswer: z.strictObject({

@@ -11,6 +11,7 @@ import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
+import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
 import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
 
@@ -295,6 +296,8 @@ export function getBootstrap(projectId = "busca-emprego") {
     archivedJobs: listArchivedJobs(projectId),
     suppressedJobs,
     timezone: radarTimeZone(),
+    // #32: kill-switch, limite diário, allowlist de ATS e confirmações finais pendentes.
+    automation: executor.automationOverview(),
     stats: {
       total: jobs.length,
       suppressed: suppressedJobs.length,
@@ -1197,11 +1200,11 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
       }
     }
     if (entries.some(([field]) => ["application_url", "job_url", "source_url"].includes(field))) {
-      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
+      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress','awaiting_final_confirmation')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
       db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,
         authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,
         current_step='Autorização revogada: URL da vaga alterada',updated_at=?
-        WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress')`).run(now(), id);
+        WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress','awaiting_final_confirmation')`).run(now(), id);
       abortApplyingJob(id, "job_url_changed", options.actor ?? "system");
     }
     audit("job", id, "updated", { changed_fields: Object.keys(requested), ...(options.actor ? { actor: options.actor } : {}) });
@@ -1265,7 +1268,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
   if (!job) throw new Error("Vaga não encontrada.");
   if (decision === "interested" && ["discarded", "expired", "completed"].includes(job.status)) throw new Error("Reabra a vaga com motivo antes de registrar novo interesse.");
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
-  if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
+  if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
     throw new Error("A decisão não pode ser alterada enquanto a candidatura está em andamento ou já foi enviada.");
   }
   const timestamp = now();
@@ -1573,7 +1576,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
   if (!entries.length) return listResumes().find((resume) => resume.id === id) ?? null;
   const current = listResumes().find((resume) => resume.id === id);
   if (current?.status === "approved" && patch.status !== "review") throw new Error("Retorne o currículo aprovado para revisão antes de alterá-lo.");
-  if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status = 'in_progress' LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
+  if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
   if (patch.status !== undefined && !["draft", "review"].includes(String(patch.status))) throw new Error("resume.status.invalid");
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
   tx(() => {
@@ -1956,6 +1959,8 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   if (!job?.application_url?.trim()) throw new Error("application.url.required");
   const applicationUrl = canonicalizeJobUrl(job.application_url);
   if (!isHttpsUrl(applicationUrl)) throw new DomainError("application.url.insecure", 422);
+  // #32: envio automático só em ATS de empresa (allowlist); LinkedIn e portais amplos são manuais.
+  assertAtsUrl(db, applicationUrl);
   const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
   // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
   const authorizationId = randomBytes(32).toString("hex");
@@ -1967,6 +1972,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   });
   db.exec("BEGIN IMMEDIATE");
   try {
+    assertAutomationActive(db);
     const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL AND status IN ('queued','needs_review','failed')").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
     if (!update.changes) throw new Error("application.authorization.race");
     db.prepare(`INSERT INTO application_authorizations
@@ -1997,6 +2003,7 @@ export function revokeAutoApplication(id: string, actor = "user") {
 
 export function listAuthorizedApplications() {
   expireAuthorizations();
+  assertAutomationActive(db);
   return db.prepare(`SELECT applications.*, jobs.title AS job_title, jobs.company AS job_company,
       jobs.application_url, jobs.source_url, auth.application_url_hash,auth.redirect_chain_hash,auth.nonce,auth.state AS authorization_state,
       auth.issued_at,auth.expires_at,resumes.title AS resume_title,resumes.version AS resume_version
@@ -2020,6 +2027,13 @@ export function listAuthorizedApplications() {
 const LEASE_EXPIRED_STEP = "Resultado desconhecido — verificar no portal";
 /** Pergunta humana ativa pausa a execução: o lease não vence enquanto o executor espera a resposta. */
 const NO_ACTIVE_QUESTION = "NOT EXISTS (SELECT 1 FROM human_questions q WHERE q.application_id=auth.application_id AND q.status IN ('pending','delivered','delivery_failed'))";
+/**
+ * #32 — espera humana do executor: confirmação final pendente no painel ou automação pausada
+ * pelo kill-switch. Nesse intervalo o lease sozinho não derruba a reserva (o usuário pode
+ * demorar): ela vale até o mais tardio entre o lease e o TTL da emissão (`expires_at`). A
+ * confirmação, a retomada e cada consulta do worker reiniciam o lease.
+ */
+const HUMAN_WAIT = "(auth.paused_at IS NOT NULL OR EXISTS (SELECT 1 FROM applications a WHERE a.authorization_id=auth.id AND a.status='awaiting_final_confirmation'))";
 
 /**
  * Expira autorizações vencidas:
@@ -2030,7 +2044,8 @@ const NO_ACTIVE_QUESTION = "NOT EXISTS (SELECT 1 FROM human_questions q WHERE q.
 export function expireAuthorizations() {
   const timestamp = now();
   const pending = db.prepare(`SELECT 1 FROM application_authorizations auth WHERE (auth.state='issued' AND auth.expires_at <= ?)
-    OR (auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}) LIMIT 1`).get(timestamp, timestamp);
+    OR (auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION} AND NOT ${HUMAN_WAIT})
+    OR (auth.state='claimed' AND MAX(auth.expires_at, COALESCE(auth.lease_expires_at, auth.expires_at)) <= ? AND ${HUMAN_WAIT}) LIMIT 1`).get(timestamp, timestamp, timestamp);
   if (pending) tx(() => {
     const issued = db.prepare("SELECT id FROM application_authorizations WHERE state='issued' AND expires_at <= ?").all(timestamp) as { id: string }[];
     for (const authorization of issued) {
@@ -2042,7 +2057,7 @@ export function expireAuthorizations() {
       for (const application of affected) abortApplyingJob(application.job_id, "authorization_expired", "system:authorization");
     }
     const leases = db.prepare(`SELECT auth.id,auth.application_id,auth.job_id,auth.claimed_by,COALESCE(auth.lease_expires_at, auth.expires_at) AS lease_expires_at
-      FROM application_authorizations auth WHERE auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION}`).all(timestamp) as Record<string, string>[];
+      FROM application_authorizations auth WHERE auth.state='claimed' AND COALESCE(auth.lease_expires_at, auth.expires_at) <= ? AND ${NO_ACTIVE_QUESTION} AND NOT ${HUMAN_WAIT}`).all(timestamp) as Record<string, string>[];
     for (const lease of leases) {
       db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='lease_expired' WHERE id=? AND state='claimed'").run(timestamp, lease.id);
       const updated = db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
@@ -2053,6 +2068,17 @@ export function expireAuthorizations() {
         authorization_id: lease.id, worker_id: lease.claimed_by, lease_expires_at: lease.lease_expires_at, message: "resultado desconhecido — verificar no portal",
       });
       abortApplyingJob(String(lease.job_id), "lease_expired_unknown_result", "system:authorization");
+    }
+    // #32: espera humana além do TTL da emissão — nada foi enviado (o clique final exige o token).
+    const waiting = db.prepare(`SELECT auth.id,auth.application_id,auth.job_id,auth.claimed_by FROM application_authorizations auth
+      WHERE auth.state='claimed' AND MAX(auth.expires_at, COALESCE(auth.lease_expires_at, auth.expires_at)) <= ? AND ${HUMAN_WAIT}`).all(timestamp) as Record<string, string>[];
+    for (const row of waiting) {
+      db.prepare("UPDATE application_authorizations SET state='expired',revoked_at=?,revocation_reason='expired_waiting_human' WHERE id=? AND state='claimed'").run(timestamp, row.id);
+      db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorization_id=NULL,expires_at=NULL,
+        claimed_by=NULL,claimed_at=NULL,current_step='Autorização expirada aguardando sua confirmação final',updated_at=?
+        WHERE authorization_id=? AND status IN ('in_progress','needs_review','awaiting_final_confirmation')`).run(timestamp, row.id);
+      audit("application", String(row.application_id), "authorization_expired_waiting_human", { authorization_id: row.id, worker_id: row.claimed_by });
+      abortApplyingJob(String(row.job_id), "authorization_expired", "system:authorization");
     }
   });
   recoverStuckApplications();
@@ -2068,7 +2094,7 @@ export function recoverStuckApplications(): number {
     FROM applications
     JOIN jobs ON jobs.id=applications.job_id
     LEFT JOIN application_authorizations auth ON auth.id=applications.authorization_id
-    WHERE jobs.status='applying' AND applications.status IN ('in_progress','needs_review') AND applications.claimed_by IS NOT NULL
+    WHERE jobs.status='applying' AND applications.status IN ('in_progress','needs_review','awaiting_final_confirmation') AND applications.claimed_by IS NOT NULL
       AND (auth.id IS NULL OR auth.state<>'claimed' OR applications.automation_mode<>'authorized_auto')`).all() as Record<string, string | null>[];
   if (!find().length) return 0;
   return tx(() => {
@@ -2107,9 +2133,19 @@ function currentAuthorization(applicationId: string) {
     WHERE applications.id=?`).get(applicationId) as Record<string, unknown> | undefined;
 }
 
-/** #18: `issued` vale pelo TTL da emissão; `claimed`, pelo lease renovado no heartbeat. */
+/**
+ * #18: `issued` vale pelo TTL da emissão; `claimed`, pelo lease renovado no heartbeat.
+ * #32: em espera humana (confirmação final pendente ou kill-switch) vale o mais tardio entre o
+ * lease e o TTL da emissão: a demora do usuário não derruba a reserva antes do TTL.
+ */
 function authorizationValidUntil(value: Record<string, unknown>) {
-  return String(value.state === "claimed" ? (value.lease_expires_at ?? value.expires_at) : value.expires_at);
+  if (value.state !== "claimed") return String(value.expires_at);
+  if (value.paused_at || value.application_status === "awaiting_final_confirmation") {
+    const lease = String(value.lease_expires_at ?? value.expires_at);
+    const ttl = String(value.expires_at);
+    return lease > ttl ? lease : ttl;
+  }
+  return String(value.lease_expires_at ?? value.expires_at);
 }
 
 function assertCurrentAuthorization(value: Record<string, unknown> | undefined, expectedState: "issued" | "claimed", timestamp = now()) {
@@ -2136,10 +2172,12 @@ export function claimAuthorizedApplication(applicationId: string, workerId: stri
   const lease = leaseExpiresAt();
   db.exec("BEGIN IMMEDIATE");
   try {
+    assertAutomationActive(db);
     const authorization = assertCurrentAuthorization(currentAuthorization(applicationId), "issued", timestamp);
     if (authorization.nonce !== nonce) throw new Error("application.authorization.unavailable");
     // #10: só vale autorização emitida pelo dashboard (assinatura HMAC com o segredo do processo).
     if (!hasValidAuthorizationSignature(authorization)) throw new Error("application.authorization.unavailable");
+    assertAtsUrl(db, authorization.application_url);
     if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     // Vaga excluída nunca é enviada, mesmo que uma autorização tenha escapado da revogação.
     assertJobNotArchived(String(authorization.job_id));
@@ -2166,10 +2204,11 @@ export function heartbeatAuthorizedApplication(id: string, workerId: string) {
   return tx(() => {
     const timestamp = now();
     const { authorization, worker } = claimedAuthorizationFor(id, workerId);
-    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     const lease = leaseExpiresAt();
+    // A validade (lease, ou TTL durante a espera humana do #32) já foi conferida acima.
     const renewed = db.prepare(`UPDATE application_authorizations SET lease_expires_at=?,heartbeat_at=?
-      WHERE id=? AND state='claimed' AND claimed_by=? AND COALESCE(lease_expires_at, expires_at) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
+      WHERE id=? AND state='claimed' AND claimed_by=? AND MAX(expires_at, COALESCE(lease_expires_at, expires_at)) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
     if (!renewed.changes) throw new Error("application.authorization.unavailable");
     return { application_id: id, authorization_valid: true, lease_expires_at: lease, heartbeat_at: timestamp };
   });
@@ -2237,27 +2276,29 @@ function claimedAuthorizationFor(id: string, workerId: string) {
 
 /**
  * C1 — confirms an authorized automatic submission. Only the worker holding the claim may
- * call it, with observable evidence; an observed URL must canonicalize to the authorized one.
+ * call it, with observable evidence and the observed URL (same canonical hash as the
+ * authorized one, on an allowlisted ATS). #32: it also needs the single-use `submit_token`
+ * delivered after the human final confirmation, the kill-switch on and the daily limit free.
  */
-export function submitAuthorizedApplication(id: string, input: { worker_id: string; evidence_ref: string; observed_url?: string | null }) {
+export function submitAuthorizedApplication(id: string, input: { worker_id: string; evidence_ref: string; observed_url?: string | null; submit_token?: string | null }) {
   expireAuthorizations();
   const evidenceRef = String(input?.evidence_ref ?? "").trim();
   const timestamp = now();
-  tx(() => {
+  const limited = tx(() => {
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
     if (authorization.application_status !== "in_progress") throw new Error("application.authorization.unavailable");
     if (!evidenceRef) throw new Error("SUBMISSION_EVIDENCE_REQUIRED");
-    if (input.observed_url != null && String(input.observed_url).trim() !== "") {
-      let observedHash = "";
-      try { observedHash = createHash("sha256").update(canonicalizeJobUrl(String(input.observed_url))).digest("hex"); } catch { throw new Error("application.url_mismatch"); }
-      if (observedHash !== authorization.application_url_hash) throw new Error("application.url_mismatch");
-    }
-    const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=? WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
+    const hit = executor.checkFinalSubmit(id, authorization, input ?? {}, worker, timestamp);
+    if (hit) return hit;
+    const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=?,submit_token_hash=NULL WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
     if (!consumed.changes) throw new Error("application.authorization.unavailable");
     db.prepare("UPDATE applications SET status='submitted',submitted_at=?,evidence_ref=?,current_step='Envio confirmado pelo portal',updated_at=? WHERE id=? AND status='in_progress'").run(timestamp, evidenceRef.slice(0, 500), timestamp, id);
     markJobApplied(String(authorization.job_id), timestamp, `worker:${worker}`, evidenceRef.slice(0, 500));
-    audit("application", id, "submitted_authorized", { worker_id: worker, authorization_id: authorization.id });
+    audit("application", id, "submitted_authorized", { worker_id: worker, authorization_id: authorization.id, final_confirmation_by: authorization.final_confirmation_by ?? null });
+    return null;
   });
+  // O limite revoga a autorização (gravado acima); só então o envio é recusado.
+  if (limited) throw new Error("application.daily_limit_reached");
   return listApplications().find((item) => item.id === id) ?? null;
 }
 
@@ -2268,7 +2309,7 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
   const timestamp = now();
   tx(() => {
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
-    if (!["in_progress", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
     revokeAuthorizationRows(id, `execution_failed:${reason}`);
     db.prepare(`UPDATE applications SET status='failed',automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,
       authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=?`).run(`Falha no envio autorizado: ${reason}`, timestamp, id);
@@ -2278,6 +2319,10 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
   });
   return listApplications().find((item) => item.id === id) ?? null;
 }
+
+// #32 — dry-run com segunda confirmação humana, limite diário e kill-switch (src/db/applications.ts).
+const executor = createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, listApplications, leaseExpiresAt });
+export const { requestFinalConfirmation, confirmFinalSubmission, cancelFinalConfirmation, pollFinalConfirmation, getApplicationEvidence, automationOverview, updateAutomationSettings } = executor;
 
 export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }) {
   // A random id never collides between runs started in the same millisecond; an explicit id
@@ -2350,7 +2395,7 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   const job = getJob(jobId);
   if (!job) throw new Error("job.not_found");
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(jobId) as { status: string } | undefined;
-  if (activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new Error("A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.");
+  if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new Error("A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.");
   const timestamp = now();
   const id = idFor(`feedback|${jobId}|${timestamp}|${mode}|${reasonCode}|${detailKey}`);
   const cycle = Number((db.prepare("SELECT COALESCE(MAX(cycle),0)+1 AS cycle FROM job_feedback_events WHERE job_id = ?").get(jobId) as { cycle: number }).cycle);
@@ -2453,7 +2498,7 @@ export function archiveJob(id: string, input: { reason?: unknown; confirmation?:
   const job = getJob(id);
   if (!job) throw new Error("job.not_found");
   if ((job as Job & { archived_at?: string | null }).archived_at) throw new Error("job.archived");
-  const executing = db.prepare("SELECT id FROM applications WHERE job_id=? AND status='in_progress' LIMIT 1").get(id);
+  const executing = db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id);
   if (executing || job.status === "applying") throw new Error("job.archive.application_in_progress");
   const reason = String(input.reason ?? "").trim().slice(0, 500);
   const timestamp = now();
@@ -2524,7 +2569,7 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   const projectId = job.project_id ?? "busca-emprego";
   const timestamp = now();
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
-  const locked = activeApplication && ["in_progress", "submitted", "accepted", "rejected"].includes(activeApplication.status);
+  const locked = activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status);
   type FeedbackRow = { id: string; project_id: string; mode: string; detail_key: string | null; job_id: string; facet_value: string | null };
 
   if (input.feedback_id) {

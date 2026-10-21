@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { confirmFinal } from "../helpers/final-confirmation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const directory = mkdtempSync(join(tmpdir(), "radar-executor-lease-"));
@@ -35,7 +36,7 @@ function authorized(label) {
   const id = `${label}-${++sequence}`;
   const job = store.upsertJob({
     id: `job-${id}`, title: `Vaga ${id}`, company: "Exemplo", source: "fixture",
-    source_url: `https://jobs.example.test/${id}`, application_url: `https://jobs.example.test/${id}/apply`,
+    source_url: `https://jobs.example.test/${id}`, application_url: `https://boards.greenhouse.io/exemplo/jobs/${id}`,
   });
   store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
   const resume = store.createResume({ job_id: job.id, title: `CV ${id}`, content: "Experiência confirmada" });
@@ -123,7 +124,10 @@ try {
     assert.equal(authRow(application.id).state, "claimed");
     const beat = store.heartbeatAuthorizedApplication(application.id, "worker-a");
     assert.equal(beat.authorization_valid, true);
-    store.submitAuthorizedApplication(application.id, { worker_id: "worker-a", evidence_ref: "portal:confirmation:ttl-after" });
+    // #32: o envio passa pela confirmação final humana (dry-run) e usa o token de uso único.
+    const observedUrl = store.getJob(job.id).application_url;
+    const submitToken = confirmFinal(store, application.id, "worker-a", observedUrl);
+    store.submitAuthorizedApplication(application.id, { worker_id: "worker-a", evidence_ref: "portal:confirmation:ttl-after", observed_url: observedUrl, submit_token: submitToken });
     assert.equal(applicationRow(application.id).status, "submitted");
     assert.equal(jobStatus(job.id), "applied");
   });

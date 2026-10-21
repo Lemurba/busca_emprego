@@ -157,7 +157,7 @@ export interface Application {
   id: string;
   job_id: string;
   resume_id: string | null;
-  status: "queued" | "in_progress" | "needs_review" | "submitted" | "accepted" | "rejected" | "failed";
+  status: "queued" | "in_progress" | "awaiting_final_confirmation" | "needs_review" | "submitted" | "accepted" | "rejected" | "failed";
   automation_mode: "manual" | "assisted" | "authorized_auto";
   auto_authorized_at: string | null;
   authorized_resume_id: string | null;
