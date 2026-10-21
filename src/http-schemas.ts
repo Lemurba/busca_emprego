@@ -149,6 +149,7 @@ export const schemas = {
   resumeCreate: z.strictObject(resumeFields),
   resumePatch: z.strictObject(resumeFields),
   resumeApprove: z.strictObject({ confirmation: shortText.optional(), override_reason: optShort }),
+  resumeFactAction: z.strictObject({ action: z.enum(["confirm", "correct", "remove"]), replacement: z.string().max(500).nullable().optional() }),
   baseResumeUpload: z.strictObject({ title: optShort, file_name: z.string().max(500).optional(), file_data: z.string().max(UPLOAD_BASE64_MAX).optional() }),
   empty: z.strictObject({}),
   fieldConflictResolve: z.strictObject({ choice: shortText.optional() }),

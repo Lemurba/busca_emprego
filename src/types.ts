@@ -133,6 +133,8 @@ export interface Resume {
   gaps?: string[];
   review_status?: "not_run" | "pass" | "fail" | "override";
   review_findings?: string[];
+  /** Resumo da checagem de fatos da versão atual (#31): bloqueantes pendentes e avisos. */
+  fact_check?: { pending: number; warnings: number };
   created_at: string;
   updated_at: string;
 }

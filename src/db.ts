@@ -11,6 +11,8 @@ import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
+import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
+import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
 
 export const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
 
@@ -275,7 +277,7 @@ export function getBootstrap(projectId = "busca-emprego") {
   const suppressedJobs = listSuppressedJobs(projectId);
   return {
     jobs,
-    resumes: listResumes(),
+    resumes: listResumes().map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
     baseResumes: listBaseResumes(),
     applications,
     preferences: listPreferenceState(projectId),
@@ -1487,16 +1489,15 @@ export function confirmProfessionalProfile(id: string, actor = "user", projectId
   if (!facts.some((fact) => fact.state === "confirmed") && !Object.keys(profile.context).length) throw new Error("PROFILE_EMPTY");
   const contextJson = profileContext(profile, facts);
   const timestamp = now();
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  // tx (e não BEGIN cru) para poder rodar aninhada: a confirmação de fato do currículo (#31) cria a versão N+1 numa só transação.
+  tx(() => {
     db.prepare("UPDATE professional_profiles SET status='retired',updated_at=? WHERE project_id=? AND status='confirmed'").run(timestamp, projectId);
     db.prepare("UPDATE professional_profiles SET status='confirmed',context_json=?,confirmed_at=?,confirmed_by=?,updated_at=? WHERE id=? AND project_id=?").run(contextJson, timestamp, actor, timestamp, id, projectId);
     const snapshotId = idFor(`profile-snapshot|${id}|${profile.version}|${contextJson}`);
     db.prepare(`INSERT OR IGNORE INTO profile_snapshots (id,profile_id,profile_version,context_json,facts_json,created_at) VALUES (?,?,?,?,?,?)`)
       .run(snapshotId, id, profile.version, contextJson, JSON.stringify(facts.filter((fact) => fact.state === "confirmed")), timestamp);
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  audit("profile", id, "confirmed", { actor, version: profile.version });
+    audit("profile", id, "confirmed", { actor, version: profile.version });
+  });
   return { ...getProfile(id, projectId), facts: listProfileFacts(id), snapshot: getLatestProfileSnapshot(id) };
 }
 
@@ -1557,6 +1558,7 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
       .run(metadata.profile_snapshot_id == null ? null : String(metadata.profile_snapshot_id), metadata.generation_source === "writer" ? "writer" : "manual", JSON.stringify(metadata.facts_used ?? []), JSON.stringify(metadata.gaps ?? []), id);
     const eventActor = actor ?? (metadata.generation_source === "writer" ? "resume_writer" : "user");
     advanceJobTo(input.job_id, "resume", { actor: eventActor, data: { reason: "resume_draft_created" } });
+    refreshResumeFactChecks(id);
     audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft", actor: eventActor });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
@@ -1587,6 +1589,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
         if (job && ["resume_approved", "ready_to_apply"].includes(job.status)) applyWorkflowCommand(current.job_id, "revise_resume", { actor: "user", data: { reason: "approved_resume_edited", resume_id: id } });
       }
     }
+    refreshResumeFactChecks(id);
     audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
   });
   return listResumes().find((resume) => resume.id === id) ?? null;
@@ -1614,32 +1617,172 @@ function atsSnapshotForResume(resume: Resume) {
   return db.prepare("SELECT * FROM profile_snapshots WHERE id=?").get(resume.profile_snapshot_id) as Record<string, unknown> | undefined ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// Checagem de fatos do currículo (#31): toda afirmação bloqueante (número, data, empresa,
+// cargo, título acadêmico, certificação) precisa de fato confirmado no perfil, ou de
+// confirmação/correção/remoção humana, antes do APROVO. Tecnologia nova é só aviso.
+// ---------------------------------------------------------------------------
+
+/** Snapshot usado na checagem: o do currículo ou, se ele não tiver, o do perfil ativo. */
+function factCheckSnapshot(resume: Resume, projectId = "busca-emprego") {
+  return atsSnapshotForResume(resume) ?? (db.prepare(`SELECT s.* FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id
+    WHERE p.project_id=? AND p.status='confirmed' ORDER BY s.profile_version DESC, s.created_at DESC LIMIT 1`).get(projectId) as Record<string, unknown> | undefined) ?? null;
+}
+
+function factCorpusValues(resume: Resume): unknown[] {
+  const snapshot = factCheckSnapshot(resume);
+  return snapshot ? snapshotFacts(snapshot).filter((fact) => fact.state === "confirmed").map((fact) => fact.value) : [];
+}
+
+/** Recalcula e grava a checagem da versão atual (chamar dentro da transação que alterou o currículo). */
+function refreshResumeFactChecks(id: string): FactCheckRow[] {
+  const resume = getResume(id);
+  return resume ? recomputeFactChecks(db, resume, factCorpusValues(resume)) : [];
+}
+
+/** Linhas gravadas da versão atual; bancos anteriores à 0002 calculam em memória, sem escrever. */
+function currentFactChecks(resume: Resume): FactCheckRow[] {
+  const stored = storedFactChecks(db, resume.id, resume.version);
+  return stored.length ? stored : computeFactChecks(db, resume, factCorpusValues(resume));
+}
+
+function resumeFactSummary(resume: Resume) {
+  return summarizeFactChecks(currentFactChecks(resume));
+}
+
+export function getResumeFactChecks(id: string): FactCheckReport {
+  const resume = getResume(id);
+  if (!resume) throw new Error("resume.not_found");
+  return factCheckReport(db, resume, currentFactChecks(resume));
+}
+
+/** Tipo do fato de perfil criado quando a pessoa confirma uma afirmação do currículo. */
+const CLAIM_FACT_TYPES: Record<string, string> = {
+  company: "experience", role: "experience", date: "experience", number: "achievement",
+  certification: "certifications", degree: "education", technology: "skills",
+};
+
+/**
+ * Perfil N+1 = cópia do perfil confirmado atual + o fato novo (origem user, confirmado), já
+ * confirmado com snapshot próprio. Tudo numa transação: falhou, nada muda.
+ * Devolve o mapa id antigo → id novo dos fatos copiados (para remapear `facts_used`).
+ */
+function createProfileVersionWithFact(fact: { type: string; value: string; evidence_excerpt: string }, actor: string, projectId: string) {
+  return tx(() => {
+    const active = getActiveProfile(projectId);
+    const idMap = new Map<string, string>();
+    const context = { ...(active?.context ?? {}) } as Record<string, unknown>;
+    delete context.confirmed_facts; // recalculado na confirmação
+    const draft = createProfessionalProfile({ base_resume_id: active?.base_resume_id ?? null, context }, actor, projectId) as { id: string; version: number };
+    if (active) {
+      const copy = db.prepare(`INSERT INTO profile_facts (id,profile_id,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,updated_at)
+        SELECT ?,?,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,? FROM profile_facts WHERE id=?`);
+      for (const item of listProfileFacts(active.id)) {
+        const newId = idFor(`profile-fact|${draft.id}|${item.id}`);
+        copy.run(newId, draft.id, now(), item.id);
+        idMap.set(String(item.id), newId);
+      }
+    }
+    const added = addProfileFact(draft.id, { type: fact.type, value: fact.value, origin: "user", state: "confirmed", evidence_excerpt: fact.evidence_excerpt }, actor);
+    const confirmed = confirmProfessionalProfile(draft.id, actor, projectId);
+    audit("profile", draft.id, "version_from_resume_fact", { actor, from_profile_id: active?.id ?? null, version: draft.version, fact_id: added.id });
+    return { profile: confirmed, fact: added, snapshotId: String(confirmed.snapshot?.id ?? ""), idMap };
+  });
+}
+
+export type ResumeFactAction = { action: "confirm" | "correct" | "remove"; replacement?: string | null };
+
+/** Resolve uma afirmação da versão atual: confirmar (perfil N+1), corrigir ou remover o trecho. */
+export function resolveResumeFact(resumeId: string, claimId: string, input: ResumeFactAction, actor = "user", projectId = "busca-emprego") {
+  const resume = getResume(resumeId);
+  if (!resume) throw new Error("resume.not_found");
+  if (resume.status === "approved") throw new Error("resume.fact.approved_locked");
+  if (!["confirm", "correct", "remove"].includes(String(input.action))) throw new Error("resume.fact.action.invalid");
+  const rows = tx(() => refreshResumeFactChecks(resume.id));
+  const row = rows.find((item) => item.claim_id === claimId);
+  if (!row) throw new Error("resume.fact.not_found");
+  if (input.action === "confirm") {
+    if (!["pending", "warning"].includes(row.status)) throw new Error("resume.fact.already_resolved");
+    tx(() => {
+      const created = createProfileVersionWithFact({
+        type: CLAIM_FACT_TYPES[row.claim_kind] ?? "experience",
+        value: row.claim_text,
+        evidence_excerpt: `Declaração humana na checagem de fatos do currículo (versão ${resume.version}): ${row.claim_text}`.slice(0, 500),
+      }, actor, projectId);
+      const factsUsed = (resume.facts_used ?? []).map((factId) => created.idMap.get(factId) ?? factId);
+      db.prepare("UPDATE resumes SET profile_snapshot_id=?,facts_used=?,review_status='not_run',review_findings='[]',updated_at=? WHERE id=?")
+        .run(created.snapshotId, JSON.stringify(factsUsed), now(), resume.id);
+      resolveFactCheck(db, resume.id, resume.version, claimId, "confirmed", actor, String(created.fact.id));
+      refreshResumeFactChecks(resume.id);
+      audit("resume", resume.id, "fact_confirmed", { actor, claim_id: claimId, claim_kind: row.claim_kind, profile_id: created.profile.id, profile_version: created.profile.version, profile_snapshot_id: created.snapshotId, profile_fact_id: created.fact.id });
+    });
+  } else {
+    // O trecho gravado precisa bater com o conteúdo atual (ninguém editou no meio).
+    if (row.spans.some(([start, end]) => resume.content.slice(start, end) !== row.claim_text)) throw new Error("resume.fact.stale");
+    const replacement = String(input.replacement ?? "").trim();
+    if (input.action === "correct" && (!replacement || replacement.length > 500)) throw new Error("resume.fact.replacement_required");
+    const content = input.action === "correct" ? replaceSpans(resume.content, row.spans, replacement) : removeSpans(resume.content, row.spans);
+    tx(() => {
+      resolveFactCheck(db, resume.id, resume.version, claimId, input.action === "correct" ? "corrected" : "removed", actor);
+      updateResume(resume.id, { content });
+      audit("resume", resume.id, input.action === "correct" ? "fact_corrected" : "fact_removed", { actor, claim_id: claimId, claim_kind: row.claim_kind, from_version: resume.version });
+    });
+  }
+  return { resume: getResume(resume.id), fact_check: getResumeFactChecks(resume.id) };
+}
+
+// Achados da revisão ATS, um helper por regra; cada um devolve códigos estáveis.
+function contentFindings(resume: Resume): string[] {
+  const content = resume.content.trim();
+  if (!content) return ["content.empty"];
+  return content === RESUME_PLACEHOLDER_CONTENT ? ["content.placeholder"] : [];
+}
+
+function factCheckFindings(resume: Resume): string[] {
+  const pending = refreshResumeFactChecks(resume.id).filter((row) => row.status === "pending").length;
+  return pending ? [`facts.unverified:${pending}`] : [];
+}
+
+function writerFindings(resume: Resume): string[] {
+  const findings: string[] = [];
+  const content = resume.content.trim();
+  if (!resume.base_resume_id) findings.push("base_resume.required");
+  else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
+  const snapshot = atsSnapshotForResume(resume);
+  const facts = snapshot ? snapshotFacts(snapshot) : [];
+  const byId = new Map(facts.filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
+  const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
+  if (!snapshot) findings.push("profile_snapshot.required");
+  if (!(resume.facts_used?.length) || used.length !== resume.facts_used.length) findings.push("facts.unconfirmed_or_missing");
+  if (used.length && content !== factualAtsContent(used)) findings.push("content.unsupported_or_modified");
+  const supported = normalizeComparableText(used.map((fact) => printableFactValue(fact.value)).join(" "));
+  if (resume.keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) findings.push("keyword.unsupported");
+  return findings;
+}
+
+/**
+ * Revisão ATS. O veredito é sempre calculado aqui pelas checagens reais (conteúdo, fatos e,
+ * para o redator, aderência estrita aos fatos usados): `verdict: "pass"` do cliente é ignorado.
+ * O revisor só pode endurecer: `verdict: "fail"` e `findings` extras viram achados.
+ * Conteúdo sem nenhuma afirmação verificável passa (salvo o rascunho-padrão do painel).
+ */
 export function reviewResume(id: string, input: Record<string, unknown> = {}, actor = "reviewer") {
   const resume = getResume(id);
   if (!resume) throw new Error("resume.not_found");
-  const findings = Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : [];
-  const content = resume.content.trim();
-  const verdict = String(input.verdict ?? (content ? "pass" : "fail"));
-  if (!["pass", "fail"].includes(verdict)) throw new Error("resume.review.verdict.invalid");
-  if (!content) findings.push("content.empty");
-  if (resume.generation_source === "writer") {
-    if (!resume.base_resume_id) findings.push("base_resume.required");
-    else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
-    const snapshot = atsSnapshotForResume(resume);
-    const facts = snapshot ? snapshotFacts(snapshot) : [];
-    const byId = new Map(facts.filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
-    const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
-    if (!snapshot) findings.push("profile_snapshot.required");
-    if (!(resume.facts_used?.length) || used.length !== resume.facts_used.length) findings.push("facts.unconfirmed_or_missing");
-    if (used.length && content !== factualAtsContent(used)) findings.push("content.unsupported_or_modified");
-    const supported = normalizeComparableText(used.map((fact) => printableFactValue(fact.value)).join(" "));
-    if (resume.keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) findings.push("keyword.unsupported");
-  }
-  const finalVerdict = findings.length ? "fail" : verdict;
-  const timestamp = now();
-  db.prepare("UPDATE resumes SET review_status=?,review_findings=?,updated_at=? WHERE id=?").run(finalVerdict, JSON.stringify([...new Set(findings)].slice(0, 10)), timestamp, id);
-  audit("resume", id, "ats_reviewed", { actor, verdict: finalVerdict, findings_count: findings.length });
-  return getResume(id);
+  if (input.verdict != null && !["pass", "fail"].includes(String(input.verdict))) throw new Error("resume.review.verdict.invalid");
+  const reviewerFindings = [...(Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : []), ...(input.verdict === "fail" ? ["reviewer.fail"] : [])];
+  return tx(() => {
+    const findings = [
+      ...contentFindings(resume),
+      ...factCheckFindings(resume),
+      ...(resume.generation_source === "writer" ? writerFindings(resume) : []),
+      ...reviewerFindings,
+    ];
+    const finalVerdict = findings.length ? "fail" : "pass";
+    db.prepare("UPDATE resumes SET review_status=?,review_findings=?,updated_at=? WHERE id=?").run(finalVerdict, JSON.stringify([...new Set(findings)].slice(0, 10)), now(), id);
+    audit("resume", id, "ats_reviewed", { actor, verdict: finalVerdict, findings_count: findings.length });
+    return getResume(id);
+  });
 }
 
 export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = "busca-emprego") {
@@ -1677,6 +1820,8 @@ export function approveResume(id: string, confirmation: string, options: { overr
   if (confirmation !== "APROVO") throw new Error("Digite APROVO para confirmar a revisão deste currículo.");
   const resume = listResumes().find((item) => item.id === id);
   if (!resume) throw new Error("Currículo não encontrado.");
+  // #31: afirmação sem fato confirmado bloqueia sempre; override_reason não vale para esta regra.
+  if (resume.status !== "approved" && tx(() => refreshResumeFactChecks(id)).some((row) => row.status === "pending")) throw new Error("resume.unverified_facts");
   const job = getJob(resume.job_id);
   if (!job || job.decision !== "interested") throw new Error("A vaga precisa estar marcada como de interesse antes da aprovação.");
   if (resume.status === "approved") throw new Error("Este currículo já foi aprovado.");

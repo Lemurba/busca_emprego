@@ -147,6 +147,12 @@ try {
     store.recordJobDecision(jobId, "interested", "TENHO INTERESSE");
     const resume = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV Produto", content: "Experiência confirmada" });
     assert.ok(resume.resume.id);
+    assert.deepEqual(resume.fact_check, { pending: [], warnings: [] });
+    // #31: fatos inventados voltam para o agente como pendências que bloqueiam o APROVO.
+    const invented = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV inventado", content: "Aumentei as vendas em 40% na Google usando Elixir." });
+    assert.deepEqual(invented.fact_check.pending.map((item) => [item.kind, item.text]), [["number", "40%"], ["company", "Google"]]);
+    assert.deepEqual(invented.fact_check.warnings.map((item) => item.text), ["Elixir"]);
+    assert.match(invented.next_step, /fact_check\.pending/u);
     const scored = await ok("radar_record_score", {
       agent_id: matcher.id, job_id: jobId,
       scores: { role_family: 80, skills: 70, seniority: null, location_work_model: 90, compensation: null, explicit_preferences: 60 },

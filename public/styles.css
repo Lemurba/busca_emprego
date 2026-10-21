@@ -261,6 +261,17 @@ h3 { margin-bottom: 4px; color: var(--heading); font-size: var(--type-body); }
 .notice strong { color: inherit; }
 .notice ul { margin: 6px 0; padding-left: 18px; }
 .notice.warning { border-color: var(--orange-line); color: var(--orange-fg); background: var(--orange-bg); }
+/* Checagem de fatos do currículo (#31) */
+.fact-preview { max-height: 260px; overflow: auto; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-sm); line-height: 1.6; }
+.fact-mark { padding: 0 2px; border-radius: 4px; color: inherit; }
+.fact-mark.pending { background: var(--red-bg); box-shadow: inset 0 -2px 0 var(--red-fg); }
+.fact-mark.warning { background: var(--orange-bg); }
+.fact-mark.covered { background: var(--teal-bg); }
+.fact-list { margin: 14px 0; }
+.fact-list h3 { margin: 0 0 6px; font-size: var(--type-body); }
+.fact-list ul { margin: 0; padding: 0; list-style: none; }
+.fact-item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.fact-item .button-row { margin: 0; }
 .modal-alert { padding: 11px 12px; margin-bottom: 13px; border-radius: var(--radius); color: var(--orange-fg); background: var(--orange-bg); font-size: var(--type-sm); }
 
 /* ------------------------------------------------------------------ */
