@@ -98,6 +98,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "resume.fact.approved_locked": "Retorne o currículo aprovado para revisão antes de alterá-lo.",
   "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: um parser não enxerga parte do currículo. Corrija o conteúdo; a justificativa de exceção não libera esse bloqueio.",
   "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio em evidence.",
+  "profile.import.invalid": "O arquivo não é um JSON Resume válido.",
+  "profile.import.empty": "O JSON Resume não tem nenhuma informação que o Radar saiba importar.",
 };
 
 export const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";

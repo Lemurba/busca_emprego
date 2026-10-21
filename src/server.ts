@@ -4,16 +4,17 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
 import { projectId } from "./config.js";
+import { renderResumeFile, safeName, type ResumeFileFormat } from "./resume-files.js";
+import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { getResumeFactChecks, resolveResumeFact } from "./db.js";
-import { renderResumeFile, type ResumeFileFormat } from "./resume-files.js";
 import { connectorRoutes } from "./connectors/routes.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -218,6 +219,19 @@ const routes: Route[] = [
   // Perfis
   { method: "GET", pattern: r("/api/profiles"), handler: ({ res }) => ok(res, 200, listProfiles(projectId)) },
   { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => ok(res, 201, createProfessionalProfile(body, actor, projectId)) },
+  // JSON Resume: o corpo é o próprio documento (limite padrão de 1 MB); vira um perfil novo em rascunho.
+  { method: "POST", pattern: r("/api/profiles/import/json-resume"), handler: ({ actor, res, body }) => {
+    const result = validateJsonResume(body);
+    if (!result.ok) {
+      const first = result.issues[0];
+      throw new HttpError(422, "profile.import.invalid", `JSON Resume inválido em ${first?.path ?? "/"} (${first?.code ?? "invalid"}).`, result.issues.map(({ path, code }) => ({ path, code })));
+    }
+    ok(res, 201, importJsonResumeProfile(result.data, actor, projectId));
+  } },
+  { method: "GET", pattern: r("/api/profiles/{id}/export/json-resume"), handler: ({ res, params }) => {
+    const { profile, document } = exportProfileJsonResume(params[0]!, projectId);
+    attachment(res, "application/json; charset=utf-8", `perfil-v${profile.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
+  } },
   { method: "GET", pattern: r("/api/profile/active"), handler: ({ res }) => ok(res, 200, getProfile(listProfiles(projectId).find((profile) => profile.status === "confirmed")?.id ?? "", projectId)) },
   { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor, params[0]!)) },
   { method: "GET", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params }) => ok(res, 200, listProfileFacts(params[0]!)) },
@@ -326,6 +340,11 @@ const routes: Route[] = [
     if (!resume) throw notFound("Currículo não encontrado.");
     const file = await renderResumeFile(resume, params[1] as ResumeFileFormat);
     attachment(res, file.mimeType, file.fileName, file.data);
+  } },
+  { method: "GET", pattern: r("/api/resumes/{id}/files/json"), handler: ({ res, params }) => {
+    if (!getResume(params[0]!)) throw notFound("Currículo não encontrado.");
+    const { resume, document } = exportResumeJsonResume(params[0]!, projectId);
+    attachment(res, "application/json; charset=utf-8", `${safeName(resume.title)}-v${resume.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
   } },
   // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
   { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },

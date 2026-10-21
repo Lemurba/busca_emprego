@@ -4,7 +4,7 @@ import type { Resume } from "./types.js";
 
 export type ResumeFileFormat = "pdf" | "docx";
 
-function safeName(value: string) {
+export function safeName(value: string) {
   return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "curriculo";
 }
 

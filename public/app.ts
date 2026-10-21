@@ -132,14 +132,20 @@ const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Blo
 const readinessTone: Record<string, string> = { ready: "teal", blocked: "red" };
 const profileStatusLabels: Record<string, string> = { confirmed: "Confirmado", draft: "Rascunho", needs_review: "Em revisão" };
 const factTypeLabels: Record<string, string> = {
-  contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link profissional", summary: "Resumo", skills: "Habilidades", skill: "Habilidade",
+  name: "Nome", contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link profissional", summary: "Resumo", skills: "Habilidades", skill: "Habilidade",
   experience: "Experiência", education: "Formação", languages: "Idiomas", certifications: "Certificações", projects: "Projetos", role: "Cargo", seniority: "Senioridade", location: "Localização",
   accepted_locations: "Locais aceitos", work_models: "Modelos de trabalho aceitos", work_authorization: "Autorização de trabalho", years_experience: "Anos de experiência"
 };
 /** Fatos do perfil usados pelos eliminatórios (perguntas da entrevista do Hermes). */
 const blockerFactTypes = ["accepted_locations", "work_models", "work_authorization", "years_experience"];
 const workModelLabels: Record<string, string> = { remote: "Remoto", hybrid: "Híbrido", onsite: "Presencial" };
-const originLabels: Record<string, string> = { pdf: "extraído do PDF", human: "informado por você", user: "informado por você", agent: "informado por agente", system: "calculado pelo sistema", legacy: "importado" };
+const originLabels: Record<string, string> = { pdf: "extraído do PDF", human: "informado por você", user: "informado por você", agent: "informado por agente", system: "calculado pelo sistema", legacy: "importado", import: "importado do JSON Resume" };
+/** Valor de um fato em texto: listas separadas por vírgula; objetos (fatos importados) como "chave: valor". */
+function factText(value: unknown): string {
+  if (Array.isArray(value)) return value.map(factText).filter(Boolean).join(", ");
+  if (value && typeof value === "object") return Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, factText(item)]).filter(([, item]) => item).map(([key, item]) => `${key}: ${item}`).join(" · ");
+  return value == null ? "" : String(value);
+}
 const historyEventLabels: Record<string, string> = {
   "job.decision": "Decisão registrada", "job.decision_undone": "Decisão desfeita", "job.created_by_agent": "Vaga registrada", "job.enriched_by_agent": "Vaga enriquecida",
   "job.updated": "Vaga editada", "job.archived": "Vaga excluída", "job.restored": "Vaga restaurada", "resume.created": "Currículo criado", "resume.approved": "Currículo aprovado (APROVO)",
@@ -493,9 +499,7 @@ function factDisplay(fact: { type: string; value: unknown }) {
     const auth = value as { countries?: unknown; needs_sponsorship?: unknown };
     return `${Array.isArray(auth.countries) ? auth.countries.join(", ") : "—"}${auth.needs_sponsorship ? " · precisa de patrocínio" : " · sem patrocínio"}`;
   }
-  if (Array.isArray(value)) return value.join(", ");
-  if (value && typeof value === "object") return Object.entries(value as Record<string, unknown>).map(([key, item]) => `${key}: ${String(item)}`).join("; ");
-  return String(value ?? "");
+  return factText(value);
 }
 
 /** Eliminatórios que o perfil ainda não responde: sem eles a vaga fica "não verificado". */
@@ -606,7 +610,7 @@ function metric(text: string, value: string | number, note: string, icon: string
 
 function resumeDownloadLinks(resume: Resume) {
   const base = `api/resumes/${encodeURIComponent(resume.id)}/files`;
-  return `<a class="secondary-button" href="${base}/pdf">Baixar PDF</a><a class="secondary-button" href="${base}/docx">Baixar DOCX</a>`;
+  return `<a class="secondary-button" href="${base}/pdf">Baixar PDF</a><a class="secondary-button" href="${base}/docx">Baixar DOCX</a><a class="secondary-button" href="${base}/json" title="Formato padrão aberto (jsonresume.org)">JSON Resume</a>`;
 }
 
 const ADD_JOB_BUTTON = `<button class="primary-button" data-action="add-job"><span aria-hidden="true">+</span> Nova vaga</button>`;
@@ -831,6 +835,7 @@ function renderResumes(data: Data) {
   return `${pageHeading(pageMeta.resumes.label, "Revise o currículo adaptado a cada vaga e aprove antes de qualquer envio. A aprovação não envia nada sozinha.")}
     <section class="panel"><div class="section-head flush"><div><h2>Currículos-base</h2><p>Envie PDFs, escolha qual será usado nas próximas adaptações e baixe uma cópia.</p></div></div>
       <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
+      <form data-form="json-resume-import" class="base-resume-form"><div class="form-field"><span>Já tem um currículo em JSON Resume?</span><small>Vira um novo perfil em rascunho; revise e confirme as informações antes de usar.</small></div><div class="form-field"><label for="json-resume-file">Arquivo JSON Resume (máx. 1 MB)</label><input class="input" id="json-resume-file" name="file" type="file" accept="application/json,.json" required /></div><button class="secondary-button" type="submit">Importar JSON Resume</button></form>
       <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
     <div class="section-head"><div><h2>Currículos por vaga</h2><p>Cada um nasce quando você marca interesse numa vaga.</p></div></div>
     <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
@@ -906,7 +911,7 @@ function renderOperations(data: Data) {
   return `${pageHeading(pageMeta.operations.label, "Perfil confirmado, rodadas de busca e decisões que dependem de você.", `<button class="secondary-button" data-page="agents">Ver agentes</button>`)}
     <div class="metric-grid">${metric("Perfil ativo", profile ? `v${profile.version}` : "—", profile ? `${facts.length} informações confirmadas` : "Confirmação necessária", "◎", "teal")}${metric("Rodadas", data.rounds.length, `${data.rounds.filter((round) => round.status === "running").length} em execução`, "↻", "purple")}${metric("Duplicatas", data.possibleDuplicates.length, "aguardando sua decisão", "≋", "orange")}${metric("Perguntas", openQuestions.length, "esperando resposta no Telegram", "?", "red")}</div>
     ${automationPanel(data.automation, (applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || ""), { escapeHtml, formatDate })}
-    <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>${profile ? `<span class="status-pill teal">${escapeHtml(label(profileStatusLabels, profile.status))}</span>` : `<span class="status-pill red">Ausente</span>`}</div><div class="ops-list">${facts.map((fact: any) => `<article class="ops-item"><div><strong>${escapeHtml(label(factTypeLabels, fact.type))}</strong><span>${escapeHtml(factDisplay(fact))} · ${escapeHtml(label(originLabels, fact.origin))}${fact.evidence_page ? ` · página ${escapeHtml(fact.evidence_page)}` : ""}</span></div><span class="status-pill ${fact.state === "confirmed" ? "teal" : "orange"}">${fact.state === "confirmed" ? "Confirmado" : "A revisar"}</span></article>`).join("") || `<div class="empty-state"><div><strong>Nenhum perfil confirmado</strong><span>Crie o perfil a partir do currículo-base antes da busca.</span></div></div>`}</div>${profile ? missingBlockerFacts(facts) : ""}</section>
+    <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>${profile ? `<div class="button-row"><a class="secondary-button" href="api/profiles/${encodeURIComponent(profile.id)}/export/json-resume">Exportar JSON Resume</a><span class="status-pill teal">${escapeHtml(label(profileStatusLabels, profile.status))}</span></div>` : `<span class="status-pill red">Ausente</span>`}</div><div class="ops-list">${facts.map((fact: any) => `<article class="ops-item"><div><strong>${escapeHtml(label(factTypeLabels, fact.type))}</strong><span>${escapeHtml(factDisplay(fact))} · ${escapeHtml(label(originLabels, fact.origin))}${fact.evidence_page ? ` · página ${escapeHtml(fact.evidence_page)}` : ""}</span></div><span class="status-pill ${fact.state === "confirmed" ? "teal" : "orange"}">${fact.state === "confirmed" ? "Confirmado" : "A revisar"}</span></article>`).join("") || `<div class="empty-state"><div><strong>Nenhum perfil confirmado</strong><span>Crie o perfil a partir do currículo-base antes da busca.</span></div></div>`}</div>${profile ? missingBlockerFacts(facts) : ""}</section>
     <section class="panel"><div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta no Telegram.</p></div></div><div class="ops-list">${questions || `<div class="empty-state"><div><strong>Nenhuma pergunta pendente</strong><span>Nenhuma automação está esperando por você.</span></div></div>`}</div></section></div>
     <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Quando há dúvida, você decide.</p></div></div><div class="ops-list">${duplicates || `<div class="empty-state"><div><strong>Fila limpa</strong><span>Nenhuma possível duplicata pendente.</span></div></div>`}</div></section><section class="panel"><div class="section-head flush"><div><h2>Preferências aprendidas</h2><p>Criadas pelo seu “Não tenho interesse”. Pausar não apaga o histórico.</p></div></div><div class="ops-list">${rules || `<div class="empty-state"><div><strong>Sem regras</strong><span>Seus motivos de descarte viram regras aqui.</span></div></div>`}</div></section></div>
     <section class="panel section-spaced"><div class="section-head flush"><div><h2>Ocultadas (${escapeHtml((data.suppressedJobs ?? []).length)})</h2><p>Vagas novas que batem com uma regra “Não tenho interesse” ficam fora do painel. Reexiba se a regra errou.</p></div></div><div class="ops-list">${suppressedJobs || `<div class="empty-state compact"><div><strong>Nenhuma vaga oculta</strong></div></div>`}</div></section>
@@ -1715,6 +1720,16 @@ async function handleForm(form: HTMLFormElement) {
     if (file.size > 5 * 1024 * 1024) throw new Error("O PDF deve ter no máximo 5 MB.");
     await fetchJson("/api/base-resumes", { method: "POST", body: JSON.stringify({ title: get("title") || file.name, file_name: file.name, file_data: await fileToBase64(file) }) });
     await loadData(); toast("PDF salvo na biblioteca."); return;
+  }
+  if (form.dataset.form === "json-resume-import") {
+    const file = formData.get("file");
+    if (!(file instanceof File) || !file.size) throw new Error("Selecione um arquivo JSON Resume.");
+    if (file.size > 1024 * 1024) throw new Error("O arquivo JSON Resume deve ter no máximo 1 MB.");
+    const text = await file.text();
+    try { JSON.parse(text); } catch { throw new Error("O arquivo não é um JSON válido."); }
+    const profile = await fetchJson<{ version: number; facts?: unknown[] }>("/api/profiles/import/json-resume", { method: "POST", body: text });
+    form.reset(); await loadData();
+    toast(`Perfil v${profile.version} criado em rascunho com ${profile.facts?.length ?? 0} informações para revisar.`); return;
   }
   if (form.dataset.form === "job") {
     const jobId = form.dataset.jobId;

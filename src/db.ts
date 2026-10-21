@@ -11,6 +11,7 @@ import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
+import { buildProfileJsonResume, buildResumeJsonResume, jsonResumeImportFacts } from "./db/profile-import.js";
 import { assertJobLivenessFresh, insertLivenessCheck, listJobsDueForLiveness, livenessAndRepostSummaries, recordSightingRepost, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
 import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./liveness/index.js";
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
@@ -1483,8 +1484,10 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   const evidenceExcerpt = String(input.evidence_excerpt ?? input.excerpt ?? (origin === "user" ? `Declaração humana: ${String(value).slice(0, 200)}` : "")).trim().slice(0, 500);
   const confidence = Number(input.confidence ?? (origin === "user" ? 1 : 0.8));
   if (!type || type.length > 80 || value == null || value === "" || (Array.isArray(value) && value.length === 0)) throw new Error("profile.fact.invalid");
-  if (!["pdf", "user", "derived"].includes(origin) || !["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
+  if (!["pdf", "user", "derived", "import"].includes(origin) || !["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
   if (state === "confirmed" && origin !== "user" && !evidenceExcerpt && evidencePage == null) throw new Error("profile.fact.evidence.required");
+  // Fato importado (JSON Resume) tem como evidência o JSON Pointer do trecho de origem ("/work/0").
+  if (origin === "import" && !evidenceExcerpt.startsWith("/")) throw new Error("profile.fact.evidence.required");
   if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error("profile.fact.confidence.invalid");
   const id = String(input.id ?? idFor(`profile-fact|${profileId}|${type}|${JSON.stringify(value)}|${Date.now()}|${Math.random()}`));
   const timestamp = now();
@@ -1507,9 +1510,12 @@ export function reviewProfileFact(id: string, state: string, actor = "user", pro
   return mapProfileFact(db.prepare("SELECT * FROM profile_facts WHERE id=?").get(id) as Record<string, unknown>);
 }
 
-export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): any {
+/** `options.source` não vem do corpo da requisição: só o import de JSON Resume cria perfis `json_resume`. */
+export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego", options: { source?: string } = {}): any {
   const baseResumeId = input.base_resume_id == null || input.base_resume_id === "" ? null : String(input.base_resume_id);
   if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new Error("base_resume.not_found");
+  const source = options.source ?? "pdf";
+  if (!["pdf", "json_resume"].includes(source)) throw new Error("profile.source.invalid");
   const context = parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
   const facts = Array.isArray(input.facts) ? input.facts : [];
@@ -1519,10 +1525,10 @@ export function createProfessionalProfile(input: Record<string, unknown>, actor 
     const version = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM professional_profiles WHERE project_id=?").get(projectId) as { version: number }).version);
     const profileId = String(input.id ?? idFor(`profile|${projectId}|${version}|${randomUUID()}`));
     db.prepare(`INSERT INTO professional_profiles
-      (id,project_id,version,status,base_resume_id,context_json,created_at,updated_at)
-      VALUES (?,?,?,'draft',?,?,?,?)`).run(profileId, projectId, version, baseResumeId, contextJson, timestamp, timestamp);
+      (id,project_id,version,status,base_resume_id,context_json,source,created_at,updated_at)
+      VALUES (?,?,?,'draft',?,?,?,?,?)`).run(profileId, projectId, version, baseResumeId, contextJson, source, timestamp, timestamp);
     for (const fact of facts) addProfileFact(profileId, fact as Record<string, unknown>, actor);
-    audit("profile", profileId, "draft_created", { project_id: projectId, version, base_resume_id: baseResumeId, fact_count: facts.length, actor });
+    audit("profile", profileId, "draft_created", { project_id: projectId, version, base_resume_id: baseResumeId, source, fact_count: facts.length, actor });
     return profileId;
   });
   return { ...getProfile(id, projectId), facts: listProfileFacts(id) };
@@ -1534,6 +1540,32 @@ export function createProfileFromBaseResume(baseResumeId: string, actor = "user"
   const facts = proposeBaseResumeFacts(baseResumeId);
   for (const fact of facts) addProfileFact(profile.id, fact as unknown as Record<string, unknown>, actor);
   return { ...getProfile(profile.id, projectId), facts: listProfileFacts(profile.id), extraction_status: base.extraction_status };
+}
+
+/**
+ * Importa um documento JSON Resume como NOVA versão de perfil em rascunho (`source: json_resume`,
+ * sem PDF-base). Cada trecho vira um fato `origin: "import"`, `state: "proposed"`, com o JSON
+ * Pointer de origem como evidência; o usuário revisa e confirma pelo fluxo normal (snapshot).
+ */
+export function importJsonResumeProfile(doc: unknown, actor = "user", projectId = "busca-emprego"): any {
+  const facts = jsonResumeImportFacts(doc);
+  const profile = createProfessionalProfile({ facts }, actor, projectId, { source: "json_resume" });
+  audit("profile", profile.id, "json_resume_imported", { actor, version: profile.version, fact_count: facts.length, types: [...new Set(facts.map((fact) => String(fact.type)))] });
+  return profile;
+}
+
+/** JSON Resume v1 de um currículo adaptado (somente leitura; não altera o currículo). */
+export function exportResumeJsonResume(id: string, projectId = "busca-emprego") {
+  const resume = getResume(id);
+  if (!resume) throw new Error("resume.not_found");
+  return { resume, document: buildResumeJsonResume(db, resume, projectId) };
+}
+
+/** JSON Resume v1 do perfil-mestre: só fatos confirmados. */
+export function exportProfileJsonResume(id: string, projectId = "busca-emprego") {
+  const profile = getProfile(id, projectId);
+  if (!profile) throw new Error("profile.not_found");
+  return { profile, document: buildProfileJsonResume(db, profile) };
 }
 
 export function updateProfessionalProfile(id: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): any {
@@ -1718,12 +1750,17 @@ function snapshotFacts(snapshot: Record<string, unknown>): Record<string, unknow
 
 function printableFactValue(value: unknown): string {
   if (Array.isArray(value)) return value.map(String).filter(Boolean).join(", ");
-  if (value && typeof value === "object") return Object.entries(value as Record<string, unknown>).map(([key, item]) => `${key}: ${String(item)}`).join("; ");
+  if (value && typeof value === "object") return Object.entries(value as Record<string, unknown>).map(([key, item]) => `${key}: ${printableFactValue(item)}`).join("; ");
   return String(value ?? "").trim();
 }
 
 function factualAtsContent(facts: readonly Record<string, unknown>[]): string {
   return facts.map((fact) => `${String(fact.type ?? "fato")}: ${printableFactValue(fact.value)}`).filter((line) => !line.endsWith(": ")).join("\n");
+}
+
+function snapshotProfileSource(snapshot: Record<string, unknown>) {
+  const row = db.prepare("SELECT source FROM professional_profiles WHERE id=?").get(String(snapshot.profile_id ?? "")) as { source?: string } | undefined;
+  return row?.source ?? "pdf";
 }
 
 function atsSnapshotForResume(resume: Resume) {
@@ -1860,9 +1897,10 @@ function factCheckFindings(resume: Resume): string[] {
 function writerFindings(resume: Resume): string[] {
   const findings: string[] = [];
   const content = resume.content.trim();
-  if (!resume.base_resume_id) findings.push("base_resume.required");
-  else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
   const snapshot = atsSnapshotForResume(resume);
+  // Perfil importado de JSON Resume não tem PDF-base: os fatos confirmados são a única fonte.
+  if (!resume.base_resume_id) { if (!snapshot || snapshotProfileSource(snapshot) !== "json_resume") findings.push("base_resume.required"); }
+  else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
   const facts = snapshot ? snapshotFacts(snapshot) : [];
   const byId = new Map(facts.filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
   const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
@@ -1907,14 +1945,17 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   assertJobNotArchived(job.id);
   if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
   const snapshotId = String(input.profile_snapshot_id ?? getLatestProfileSnapshot(undefined, projectId)?.id ?? "");
-  const snapshot = snapshotId ? db.prepare(`SELECT s.*,p.project_id,p.base_resume_id AS profile_base_resume_id
+  const snapshot = snapshotId ? db.prepare(`SELECT s.*,p.project_id,p.base_resume_id AS profile_base_resume_id,p.source AS profile_source
     FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id WHERE s.id=? AND p.project_id=?`).get(snapshotId, projectId) as Record<string, unknown> | undefined : undefined;
   if (!snapshot) throw new Error("PROFILE_SNAPSHOT_REQUIRED");
   const baseId = String(input.base_resume_id ?? "");
-  if (!baseId) throw new Error("base_resume.required");
-  if (snapshot.profile_base_resume_id && snapshot.profile_base_resume_id !== baseId) throw new Error("ATS_BASE_RESUME_MISMATCH");
-  const base = getBaseResumeExtraction(baseId);
-  if (base.extraction_status !== "extracted") throw new Error("BASE_RESUME_EXTRACTION_REQUIRED");
+  // Perfil importado de JSON Resume dispensa PDF-base; perfis de PDF continuam exigindo o PDF extraído.
+  if (!baseId && snapshot.profile_source !== "json_resume") throw new Error("base_resume.required");
+  if (baseId) {
+    if (snapshot.profile_base_resume_id && snapshot.profile_base_resume_id !== baseId) throw new Error("ATS_BASE_RESUME_MISMATCH");
+    const base = getBaseResumeExtraction(baseId);
+    if (base.extraction_status !== "extracted") throw new Error("BASE_RESUME_EXTRACTION_REQUIRED");
+  }
   const factsUsed = Array.isArray(input.facts_used) ? [...new Set(input.facts_used.map(String))] : [];
   if (!factsUsed.length) throw new Error("ATS_CONFIRMED_FACTS_REQUIRED");
   const confirmed = new Map(snapshotFacts(snapshot).filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
@@ -1927,7 +1968,7 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   const supported = normalizeComparableText(selectedFacts.map((fact) => printableFactValue(fact.value)).join(" "));
   if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new Error("ATS_KEYWORD_UNSUPPORTED");
   const gaps = Array.isArray(input.gaps) ? input.gaps.map(String) : [];
-  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never, actor === "writer" ? undefined : actor);
+  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId || null, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never, actor === "writer" ? undefined : actor);
   audit("resume", resume?.id ?? "unknown", "generated_by_writer", { actor, profile_snapshot_id: snapshotId, base_resume_id: baseId, facts_count: factsUsed.length, gaps_count: gaps.length });
   return resume;
 }
