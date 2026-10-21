@@ -47,6 +47,16 @@ function watchConsole(page: Page) {
   return errors;
 }
 
+/** Chamada à API com a sessão da página (cookie do login). */
+async function pageApi(page: Page, method: string, path: string, data?: unknown) {
+  const response = await page.request.fetch(path, { method, data, headers: data === undefined ? {} : { "content-type": "application/json" } });
+  expect(response.ok(), `${method} ${path}: ${response.status()} ${await response.text()}`).toBeTruthy();
+  return response.json();
+}
+
+/** PNG 1×1 transparente: os tiles do OpenStreetMap não saem da máquina no teste. */
+const TILE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+
 /** Dados mínimos para as páginas não ficarem vazias: duas vagas, interesse, currículo e candidatura. */
 async function seed(browser: Browser) {
   const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
@@ -161,6 +171,80 @@ test.describe("smoke de UI", () => {
     await page.locator("#view [data-clear-chart-filter]").click();
     await expect(page.locator("#view .chart-filter-summary")).toHaveCount(0);
     await expect(sourceBar).toHaveAttribute("aria-pressed", "false");
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Análises: gráficos e mapa (Leaflet) montado uma vez, atualizado no filtro e removido ao sair", async ({ page }) => {
+    const errors = watchConsole(page);
+    await page.route("https://tile.openstreetmap.de/**", (route) => route.fulfill({ status: 200, contentType: "image/png", body: TILE_PNG }));
+    // Sem animações (flyTo e view transition do Expandir): o teste não espera segundos por elas.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await login(page);
+    // Coordenadas nas duas vagas semeadas para o mapa ter marcadores.
+    const bootstrap = await pageApi(page, "GET", "api/bootstrap");
+    const coords: Record<string, [number, number]> = { "Pessoa desenvolvedora TypeScript": [-23.55, -46.63], "Engenharia de dados": [-8.05, -34.9] };
+    for (const job of bootstrap.jobs as { id: string; title: string }[]) {
+      const point = coords[job.title];
+      if (point) await pageApi(page, "PATCH", `api/jobs/${job.id}`, { latitude: point[0], longitude: point[1] });
+    }
+    await page.goto("#/analises");
+    await page.reload();
+    await expect(page.locator("#page-heading")).toHaveText("Análises");
+    await expect(page.locator("#view .salary-chart .salary-column")).toHaveCount(1);
+    await expect(page.locator('#view .pipeline-block .bar-list [data-chart-filter-type="status"]').first()).toBeVisible();
+    await expect(page.locator("#view .map-job-list")).toHaveAttribute("role", "region");
+    await expect(page.locator("#view .map-job-list")).toHaveAttribute("aria-label", "Vagas no mapa");
+    await expect(page.locator("#view .map-job-list")).toHaveAttribute("tabindex", "0");
+
+    // Mapa desligado por padrão (consentimento); "Carregar mapa" liga e monta o Leaflet.
+    await expect(page.locator("#view .map-consent")).toContainText("Mapa desligado");
+    await page.locator("#view [data-enable-map]").click();
+    const map = page.locator("#view #opportunities-map");
+    await expect(map).toHaveClass(/leaflet-container/);
+    await expect(page.locator("#view .leaflet-container")).toHaveCount(1);
+    await expect(map.locator(".leaflet-interactive")).toHaveCount(2);
+    const leafletId = await map.evaluate((element) => (element as unknown as { _leaflet_id: number })._leaflet_id);
+
+    // Filtro visual: re-render no lugar troca só os marcadores (mesma instância, sem segundo mapa).
+    await page.locator('#view .location-row[data-chart-filter-value="Recife, PE"]').click();
+    await expect(page.locator("#view .chart-filter-summary").first()).toContainText("Filtro: Recife, PE · 1 de 2 vagas");
+    await expect(map.locator(".leaflet-interactive")).toHaveCount(1);
+    await expect(page.locator("#view .leaflet-container")).toHaveCount(1);
+    expect(await map.evaluate((element) => (element as unknown as { _leaflet_id: number })._leaflet_id)).toBe(leafletId);
+    await page.locator("#view [data-clear-chart-filter]").first().click();
+    await expect(map.locator(".leaflet-interactive")).toHaveCount(2);
+
+    // Lista "Vagas no mapa" centraliza e marca a vaga; Expandir/Reduzir vem do estado.
+    const mapJob = page.locator("#view .map-job", { hasText: "Engenharia de dados" });
+    await mapJob.click();
+    await expect(mapJob).toHaveClass(/selected/);
+    const expand = page.locator("#view [data-expand-map]");
+    await expand.click();
+    await expect(expand).toHaveText("Reduzir mapa");
+    await expect(expand).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#view .map-shell")).toHaveClass(/is-expanded/);
+    await expect(page.locator("body")).toHaveClass(/map-expanded/);
+    await expand.click();
+    await expect(expand).toHaveText("Expandir mapa");
+    await expect(page.locator("#view .map-shell")).not.toHaveClass(/is-expanded/);
+
+    const results = await new AxeBuilder({ page }).analyze();
+    const blocking = results.violations.filter((violation) => BLOCKING_IMPACTS.has(violation.impact ?? ""));
+    expect(blocking.map((violation) => ({ rule: violation.id, nodes: violation.nodes.slice(0, 3).map((node) => node.target.join(" ")) })), "axe com o mapa ligado").toEqual([]);
+
+    // Sair desmonta (map.remove); voltar monta uma instância nova, sem "Map container is already initialized".
+    await page.locator('.sidebar [data-page="overview"]').click();
+    await expect(page.locator("#page-heading")).toHaveText("Visão geral");
+    await expect(page.locator("#view .leaflet-container")).toHaveCount(0);
+    await page.locator('.sidebar [data-page="analytics"]').click();
+    await expect(page.locator("#page-heading")).toHaveText("Análises");
+    await expect(page.locator("#view .leaflet-container")).toHaveCount(1);
+    await expect(map.locator(".leaflet-interactive")).toHaveCount(2);
+    // Recarregar os dados com as mesmas vagas mantém o mapa.
+    await page.locator("#refresh-button").click();
+    await expect(page.locator("#sync-label")).toContainText("Atualizado");
+    await expect(page.locator("#view .leaflet-container")).toHaveCount(1);
+    await expect(map.locator(".leaflet-interactive")).toHaveCount(2);
     expect(errors, "erros de console").toEqual([]);
   });
 });

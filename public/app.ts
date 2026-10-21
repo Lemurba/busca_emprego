@@ -1,15 +1,12 @@
-import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
+import { AnalyticsPage } from "./ui/pages/analytics-page.js";
 import { OverviewPage } from "./ui/pages/overview-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
 import { type AutomationOverview, authorizationCell, automationPanel, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
-
-// Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
-const leafletLib: any = (LeafletModule as any).default ?? LeafletModule;
 
 type Job = {
   id: string;
@@ -241,8 +238,9 @@ const state = {
   modalDirty: false,
   lastSync: null as Date | null
 };
+/** Mapa de Análises: criado e removido pelo componente (analytics-page.tsx), registrado aqui por `onMapChange`. */
 let activeMap: any = null;
-const activeMapMarkers = new Map<string, any>();
+let activeMapMarkers = new Map<string, any>();
 
 function setTheme(theme: "light" | "dark") {
   document.documentElement.dataset.theme = theme;
@@ -525,42 +523,6 @@ function relativeApplication(job: Job) {
 /* Gráficos                                                            */
 /* ------------------------------------------------------------------ */
 
-function chartBars(entries: [string, number][], type: VisualFilter["type"], color = "", labels: Record<string, string> = {}, groupLabel = "Gráfico de barras") {
-  if (!entries.length) return `<div class="empty-state"><div><strong>Sem dados ainda</strong><span>Os números aparecem quando novas vagas entrarem.</span></div></div>`;
-  const sorted = [...entries].sort((a, b) => b[1] - a[1]);
-  const visible = sorted.slice(0, 7);
-  const rest = sorted.slice(7).reduce((sum, [, value]) => sum + value, 0);
-  const total = Math.max(sorted.reduce((sum, [, count]) => sum + count, 0), 1);
-  const max = Math.max(...visible.map(([, value]) => value), rest, 1);
-  const rows = visible.map(([key, value]) => {
-    const displayLabel = labels[key] ?? key;
-    const selected = state.visualFilter?.type === type && state.visualFilter.value === key;
-    const percentage = Math.round(value / total * 100);
-    return `<button class="bar-row chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="${type}" data-chart-filter-value="${escapeHtml(key)}" data-chart-filter-label="${escapeHtml(displayLabel)}" data-tooltip="${escapeHtml(`${displayLabel}: ${value} vaga${value === 1 ? "" : "s"} (${percentage}%)`)}" aria-pressed="${selected}" aria-label="${escapeHtml(`${displayLabel}: ${value} vaga${value === 1 ? "" : "s"}, ${percentage}%. Filtrar`)}"><span>${escapeHtml(displayLabel)}</span><progress class="bar-track ${color}" value="${value}" max="${max}" aria-hidden="true"></progress><strong>${value}</strong></button>`;
-  });
-  if (rest) rows.push(`<div class="bar-row bar-row-static"><span>Outras (${sorted.length - visible.length})</span><progress class="bar-track ${color}" value="${rest}" max="${max}" aria-hidden="true"></progress><strong>${rest}</strong></div>`);
-  return `<div class="bar-list" role="group" aria-label="${escapeHtml(groupLabel)}">${rows.join("")}</div>`;
-}
-
-function salaryChart(jobs: Job[]) {
-  const currency = dominantCurrency(jobs);
-  const withSalary = jobs.filter((job) => monthlyRange(job));
-  const comparable = withSalary.filter((job) => (job.currency || "BRL") === currency);
-  const otherCurrency = withSalary.length - comparable.length;
-  const salaryJobs = comparable.sort((a, b) => (monthlyRange(b)?.max ?? 0) - (monthlyRange(a)?.max ?? 0)).slice(0, 8);
-  if (!salaryJobs.length) return `<div class="empty-state"><div><strong>Sem salários registrados</strong><span>Valores aparecem somente quando possuem fonte verificável.</span></div></div>`;
-  const max = Math.max(...salaryJobs.map((job) => monthlyRange(job)?.max ?? 0), 1);
-  const columns = salaryJobs.map((job) => {
-    const range = monthlyRange(job)!;
-    const height = Math.max(12, Math.round(range.max / max * 100));
-    const minimumHeight = Math.round(range.min / max * 100);
-    const selected = state.visualFilter?.type === "job" && state.visualFilter.value === job.id;
-    const description = `${job.title} · ${job.company}: ${salaryLabel(job)} (≈ ${formatMoney(range.max, currency)}/mês)`;
-    return `<button class="salary-column chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="job" data-chart-filter-value="${escapeHtml(job.id)}" data-chart-filter-label="${escapeHtml(job.title)}" data-tooltip="${escapeHtml(description)}" aria-label="${escapeHtml(description)}" aria-pressed="${selected}"><span class="salary-value">${escapeHtml(formatMoney(range.max, currency))}</span><svg class="salary-plot" viewBox="0 0 40 100" preserveAspectRatio="none" aria-hidden="true"><rect class="salary-range" x="14" y="${100 - height}" width="12" height="${height}" rx="3"></rect><line class="salary-min-marker" x1="11" x2="29" y1="${100 - minimumHeight}" y2="${100 - minimumHeight}"></line></svg><span class="salary-label"><strong>${escapeHtml(job.company)}</strong>${escapeHtml(job.title)}</span></button>`;
-  }).join("");
-  return `<div class="salary-chart" role="group" aria-label="Faixas salariais mensais por vaga">${columns}</div><p class="chart-note">Valores mensais estimados em ${escapeHtml(currency)} (hora × ${HOURS_PER_MONTH}, ano ÷ 12). A barra vai até o máximo; o traço branco marca o mínimo.${otherCurrency ? ` ${otherCurrency} vaga${otherCurrency === 1 ? "" : "s"} em outra moeda ficou${otherCurrency === 1 ? "" : "aram"} de fora.` : ""}</p>`;
-}
-
 function averageMonthlySalary(jobs: Job[]) {
   const currency = dominantCurrency(jobs);
   const values = jobs.filter((job) => (job.currency || "BRL") === currency).map((job) => monthlyRange(job)?.mid).filter((value): value is number => value != null);
@@ -626,48 +588,6 @@ function jobCard(job: Job) {
 /* Mapa (opt-in: os tiles vêm de um servidor de terceiros)             */
 /* ------------------------------------------------------------------ */
 
-function lifecycleColor(value: Lifecycle) {
-  return getComputedStyle(document.documentElement).getPropertyValue(`--tone-${value}`).trim() || "#1f8a88";
-}
-
-function initializeMap(data: Data) {
-  const container = document.getElementById("opportunities-map");
-  if (!container || !state.mapEnabled) return;
-  const leaflet = leafletLib;
-  if (!leaflet?.map) { container.textContent = "Mapa indisponível."; return; }
-  activeMap?.remove();
-  activeMapMarkers.clear();
-  const map = leaflet.map(container, { scrollWheelZoom: false }).setView([-14.235, -51.925], 4);
-  activeMap = map;
-  leaflet.tileLayer("https://tile.openstreetmap.de/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap contributors</a>"
-  }).addTo(map);
-  const located = visualFilteredJobs(data).filter((job) => job.latitude != null && job.longitude != null && Number.isFinite(job.latitude) && Number.isFinite(job.longitude) && Math.abs(job.latitude) <= 90 && Math.abs(job.longitude) <= 180);
-  const bounds: number[][] = [];
-  for (const job of located) {
-    const color = lifecycleColor(job.lifecycle);
-    const point: [number, number] = [job.latitude as number, job.longitude as number];
-    const marker = leaflet.circleMarker(point, { radius: state.selectedJobId === job.id ? 10 : 7, color: "#fff", fillColor: color, fillOpacity: 0.95, weight: state.selectedJobId === job.id ? 3 : 2 }).addTo(map)
-      .bindPopup(`<strong>${escapeHtml(job.title)}</strong><br>${escapeHtml(job.company)} · ${escapeHtml(job.location)}<br>${escapeHtml(lifecycleMeta[job.lifecycle]?.label ?? "")}<br><button class="map-popup-action" data-detail="${escapeHtml(job.id)}">Abrir vaga</button>`);
-    marker.on("click", () => { state.selectedJobId = job.id; });
-    activeMapMarkers.set(job.id, marker);
-    bounds.push(point);
-  }
-  if (bounds.length > 1) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 12 });
-  else if (bounds.length === 1) map.setView(bounds[0], 10);
-  else {
-    container.setAttribute("aria-label", "Nenhuma vaga com coordenadas corresponde ao filtro atual.");
-    leaflet.popup().setLatLng([-14.235, -51.925]).setContent("Nenhuma vaga com coordenadas neste filtro.").openOn(map);
-  }
-  if (state.selectedJobId && activeMapMarkers.has(state.selectedJobId)) {
-    const marker = activeMapMarkers.get(state.selectedJobId);
-    map.setView(marker.getLatLng(), 11);
-    marker.openPopup();
-  }
-  window.setTimeout(() => map.invalidateSize(), 0);
-}
-
 function focusMapJob(jobId: string) {
   const job = currentData().jobs.find((item) => item.id === jobId);
   if (!job || job.latitude == null || job.longitude == null) { toast("Esta vaga ainda não possui coordenadas para exibir no mapa.", true); return; }
@@ -679,41 +599,16 @@ function focusMapJob(jobId: string) {
   }
 }
 
-function mapCanvas() {
-  if (!state.mapEnabled) {
-    return `<div class="map-canvas map-consent"><div><strong>Mapa desligado</strong><p>As imagens do mapa vêm do OpenStreetMap. Ao carregar, esse serviço recebe seu endereço IP e as regiões exibidas.</p><button type="button" class="secondary-button" data-enable-map>Carregar mapa</button></div></div>`;
-  }
-  return `<div id="opportunities-map" class="map-canvas" role="region" tabindex="0" aria-label="Mapa interativo das vagas"></div>`;
-}
-
-function mapPanel(data: Data) {
-  const filtered = visualFilteredJobs(data);
-  const locations = Object.entries(filtered.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {})).sort((a, b) => b[1] - a[1]);
-  const locationRows = locations.slice(0, 6).map(([location, count]) => { const selected = state.visualFilter?.type === "location" && state.visualFilter.value === location; return `<button class="location-row chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="location" data-chart-filter-value="${escapeHtml(location)}" data-chart-filter-label="${escapeHtml(location)}" aria-pressed="${selected}"><span>${escapeHtml(location)}</span><strong>${count}</strong></button>`; }).join("");
-  const jobRows = filtered.slice(0, 6).map((job) => { const noCoords = job.latitude == null || job.longitude == null; return `<button type="button" class="map-job ${state.selectedJobId === job.id ? "selected" : ""}" data-map-job="${escapeHtml(job.id)}" ${noCoords || !state.mapEnabled ? "disabled" : ""} ${noCoords ? `title="Vaga sem coordenadas"` : ""}><span>${escapeHtml(job.title)}</span><small>${escapeHtml(job.company)} · ${escapeHtml(job.location)}${noCoords ? " · sem coordenadas" : ""}</small></button>`; }).join("");
-  return `${visualFilterSummary(data)}<div class="map-wrap">${mapCanvas()}<div class="map-context"><div class="location-list" role="group" aria-label="Filtrar por localização">${locationRows}</div><div class="map-job-list" role="region" aria-label="Vagas no mapa" tabindex="0">${jobRows || `<p class="map-caption">Nenhuma vaga corresponde ao filtro.</p>`}</div><p class="map-caption">Selecione uma vaga para centralizar o mapa. Vagas sem latitude e longitude não aparecem.</p></div></div>`;
-}
-
-function mapHeader(title: string) {
-  return `<div class="map-panel-head"><div><h2>${escapeHtml(title)}</h2><p>Gráficos, mapa e lista de vagas usam o mesmo filtro.</p></div>${state.mapEnabled ? `<button class="secondary-button map-expand-button" type="button" data-expand-map aria-pressed="${state.mapExpanded}">${state.mapExpanded ? "Reduzir mapa" : "Expandir mapa"}</button>` : ""}</div>`;
-}
-
 function prefersReducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function setMapExpanded(expanded: boolean) {
   state.mapExpanded = expanded;
+  // A página (Preact) desenha classe, rótulo e aria-pressed a partir do estado; o mapa continua montado.
   const apply = () => {
-    document.body.classList.toggle("map-expanded", expanded);
-    const shell = document.querySelector<HTMLElement>(".map-shell");
-    shell?.classList.toggle("is-expanded", expanded);
-    const button = shell?.querySelector<HTMLElement>("[data-expand-map]");
-    if (button) {
-      button.textContent = expanded ? "Reduzir mapa" : "Expandir mapa";
-      button.setAttribute("aria-pressed", String(expanded));
-      button.focus({ preventScroll: true });
-    }
+    render();
+    document.querySelector<HTMLElement>(".map-shell [data-expand-map]")?.focus({ preventScroll: true });
     window.setTimeout(() => activeMap?.invalidateSize(), 220);
   };
   const transition = (document as Document & { startViewTransition?: (callback: () => void) => void }).startViewTransition;
@@ -820,17 +715,7 @@ function renderCompanies(data: Data) {
     <div class="company-grid">${companyStats(data).map(({ company, salary }) => `<article class="company-card"><div class="company-top"><div class="company-logo" aria-hidden="true">${escapeHtml(company.name.slice(0, 1).toUpperCase())}</div><span class="chip">${company.jobs} vaga${company.jobs === 1 ? "" : "s"}</span></div><div><h3>${escapeHtml(company.name)}</h3><p>${escapeHtml(company.locations.join(" · "))}</p></div><div class="company-stat"><div><span>Salário médio</span><strong>${escapeHtml(salary ? `${formatMoney(salary.value, salary.currency)}/mês` : "Não informado")}</strong>${salary ? `<small>estimado em ${salary.count} vaga${salary.count === 1 ? "" : "s"}</small>` : ""}</div><div><span>Fontes</span><strong>${escapeHtml(company.sources.length)}</strong></div></div><div class="tag-list">${company.sources.map((source) => `<span class="tag">${escapeHtml(source)}</span>`).join("")}</div></article>`).join("") || `<div class="empty-state"><div><strong>Nenhuma empresa ainda</strong><span>As empresas aparecem conforme as vagas chegam.</span></div></div>`}</div>`;
 }
 
-function renderAnalytics(data: Data) {
-  const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [key, Number(value)]);
-  const average = averageMonthlySalary(data.jobs);
-  return `${pageHeading(pageMeta.analytics.label, "Entenda onde estão os melhores matches, quanto pagam e quais prazos estão escapando.")}
-    <div class="analytics-content">${visualFilterSummary(data)}<section class="panel analytics-studio"><div class="analytics-studio-head"><div><h2>Painel analítico</h2><p>Todos os gráficos usam as mesmas ${data.jobs.length} vagas e filtram mapa e lista.</p></div><div class="analytics-pulse" aria-label="Resumo dos dados"><span><strong>${escapeHtml(data.stats.strongMatches ?? 0)}</strong> matches fortes</span><span><strong>${escapeHtml(data.stats.applied ?? 0)}</strong> candidaturas</span><span><strong>${escapeHtml(data.companies.length)}</strong> empresas</span></div></div>
-      <div class="analytics-chart-grid"><div class="analytics-block salary-block"><div class="section-head flush"><div><h3>Faixas salariais</h3><p>Clique para filtrar pela vaga.</p></div></div>${salaryChart(data.jobs)}<p class="chart-note">Média mensal estimada: <strong>${escapeHtml(average ? `${formatMoney(average.value, average.currency)} (${average.count} vaga${average.count === 1 ? "" : "s"})` : "não informada")}</strong>.</p></div>
-      <div class="analytics-block pipeline-block"><div class="section-head flush"><div><h3>Etapas do pipeline</h3><p>Clique numa barra para filtrar.</p></div></div>${chartBars(statusEntries, "status", "purple", statusLabels, "Vagas por etapa")}</div></div></section>
-    <section class="panel map-panel map-shell">${mapHeader("Cobertura geográfica")}${mapPanel(data)}</section>
-    <div class="analytics-insights" aria-label="Leituras rápidas"><div class="insight"><span class="insight-icon" aria-hidden="true">↗</span><p><strong>${escapeHtml(data.stats.strongMatches ?? 0)} matches fortes</strong> com aderência de 80% ou mais.</p></div><div class="insight"><span class="insight-icon" aria-hidden="true">⌛</span><p><strong>${escapeHtml(data.stats.lost ?? 0)} vagas perdidas</strong> fecharam sem candidatura enviada.</p></div><div class="insight"><span class="insight-icon" aria-hidden="true">◎</span><p><strong>${escapeHtml(data.jobs.filter((job) => monthlyRange(job)).length)} vagas</strong> possuem faixa salarial com fonte.</p></div></div></div>`;
-}
-
+// Análises: migrada para Preact em public/ui/pages/analytics-page.tsx (registro em render()).
 // Agentes: migrada para Preact em public/ui/pages/agents-page.tsx (registro em render()).
 
 function describeRule(rule: any) {
@@ -902,6 +787,20 @@ const overviewPage = preactPage(OverviewPage, () => ({
   deadlineText,
   formatShortDate
 }));
+const analyticsPage = preactPage(AnalyticsPage, () => ({
+  title: pageMeta.analytics.label,
+  statusLabels,
+  lifecycleMeta,
+  hoursPerMonth: HOURS_PER_MONTH,
+  formatMoney,
+  salaryLabel,
+  monthlyRange,
+  dominantCurrency,
+  averageMonthlySalary,
+  visualFilteredJobs,
+  onSelectJob: (jobId: string) => { state.selectedJobId = jobId; },
+  onMapChange: (map: any, markers: Map<string, any>) => { activeMap = map; activeMapMarkers = markers; }
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
 export type { AgentConfig, Data };
@@ -909,17 +808,13 @@ export type { AgentConfig, Data };
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: overviewPage, board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: overviewPage, board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: analyticsPage, operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
   if (!pages[state.page]) state.page = "overview";
-  activeMap?.remove();
-  activeMap = null;
-  activeMapMarkers.clear();
+  // O mapa de Análises vive no componente (criado na montagem, removido ao desmontar).
   mountPage(view(), pages[state.page]);
   const mapShell = view().querySelector<HTMLElement>(".map-shell");
   if (!mapShell || !state.mapEnabled) state.mapExpanded = false;
-  mapShell?.classList.toggle("is-expanded", state.mapExpanded);
   document.body.classList.toggle("map-expanded", state.mapExpanded && Boolean(mapShell));
-  initializeMap(data);
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => {
     if (element.closest("#view")) return;
     const active = element.dataset.page === state.page;
