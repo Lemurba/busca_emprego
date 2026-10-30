@@ -18,7 +18,7 @@ sh ops/hermes/radar-s6-run.sh                                        # ou pelo s
 
 Instale o app sob `/opt/data` (volume persistente do Hermes, padrão `/opt/data/dashboard/busca_emprego`); `/opt/hermes` é do root e somente leitura na imagem oficial. Mantenha o SQLite em armazenamento persistente.
 
-O banco inicia vazio e o aplicativo não cria dados exemplificativos em nenhuma configuração: vagas, currículos e candidaturas surgem somente de agentes, da importação de rodadas ou do uso real do dashboard. A manutenção legada de anonimização só roda quando solicitada explicitamente com `RADAR_RUN_LEGACY_ANONYMIZATION=true`; não a habilite em produção.
+O banco inicia vazio e o aplicativo não cria dados exemplificativos em nenhuma configuração: vagas, currículos e candidaturas surgem somente de agentes, da importação de rodadas ou do uso real do dashboard. A manutenção legada de anonimização (destrutiva e irreversível) nunca roda ao subir o dashboard ou o MCP: só pelo comando explícito `RADAR_RUN_LEGACY_ANONYMIZATION=true node scripts/ops/anonymize-legacy.mjs [--db CAMINHO]` (requer `npm run build`; faça backup antes). Não a use em produção.
 
 ## Acesso e autenticação
 

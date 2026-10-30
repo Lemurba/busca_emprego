@@ -54,3 +54,13 @@ test("verify-environment: rede privada e HTTPS obrigatório", async () => {
   assert.equal(publicHttp.status, 2);
   assert.match(publicHttp.stderr, /url_must_use_https_or_private_lan_http/);
 });
+
+test("anonimização legada (TD-13): comando explícito recusa sem RADAR_RUN_LEGACY_ANONYMIZATION=true", () => {
+  const env = { ...process.env };
+  delete env.RADAR_RUN_LEGACY_ANONYMIZATION;
+  const refused = spawnSync(process.execPath, ["scripts/ops/anonymize-legacy.mjs", "--db", join(directory, "anon.sqlite")], { encoding: "utf8", env });
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /legacy_anonymization\.disabled/);
+  const wrongValue = spawnSync(process.execPath, ["scripts/ops/anonymize-legacy.mjs", "--db", join(directory, "anon.sqlite")], { encoding: "utf8", env: { ...env, RADAR_RUN_LEGACY_ANONYMIZATION: "1" } });
+  assert.equal(wrongValue.status, 2, "só o valor literal true habilita");
+});

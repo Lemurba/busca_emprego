@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { openDb } from "./connection.js";
+import { openDb, tx } from "./connection.js";
 import { MIGRATIONS, type Migration } from "./migrations/index.js";
 
 const MIGRATION_ID = /^\d{4}_[a-z0-9_]+$/;
@@ -36,7 +36,7 @@ function pendingOutsideLock(db: DatabaseSync, migrations: readonly Migration[]) 
 
 /**
  * Aplica, em ordem, as migrações ainda não registradas em schema_migrations e devolve os ids
- * aplicados. Tudo acontece numa única transação BEGIN EXCLUSIVE: se o dashboard e o servidor
+ * aplicados. Tudo acontece numa única transação exclusiva (`tx(db, fn, "EXCLUSIVE")`): se o dashboard e o servidor
  * MCP sobem juntos sobre o mesmo arquivo, um espera o outro (busy_timeout) e, ao conseguir o
  * lock, relê a lista de aplicadas — então cada migração roda exatamente uma vez. Uma falha
  * desfaz o lote inteiro e o banco fica como estava.
@@ -46,8 +46,7 @@ export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIG
   // Caminho rápido: sem pendências, nenhuma escrita nem lock exclusivo a cada inicialização.
   if (!pendingOutsideLock(db, migrations)) return [];
   if (db.isTransaction) throw new Error("migration.inside_transaction");
-  db.exec("BEGIN EXCLUSIVE");
-  try {
+  return tx(db, () => {
     db.exec(CONTROL_TABLE);
     const applied = appliedIds(db); // relido dentro do lock
     const done: string[] = [];
@@ -58,16 +57,8 @@ export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIG
       record.run(migration.id, new Date().toISOString());
       done.push(migration.id);
     }
-    db.exec("COMMIT");
     return done;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      /* transação já encerrada */
-    }
-    throw error;
-  }
+  }, "EXCLUSIVE");
 }
 
 /** Abre a conexão e aplica as migrações pendentes: o único caminho de inicialização do banco. */

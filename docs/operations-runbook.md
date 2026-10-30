@@ -238,6 +238,6 @@ Não fazer downgrade de código sobre schema incompatível. O schema é versiona
 - A API distingue apenas dois papéis (token interno e sessão do dashboard), sem escopos por rota. SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
 - As migrações são versionadas, mas não há rollback automático de schema (use o backup pré-deploy), alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
-- A anonimização legada permanece opt-in (`RADAR_RUN_LEGACY_ANONYMIZATION=true`) e deve ficar desabilitada em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.
+- A anonimização legada não roda mais na inicialização (importar `src/db.ts` não altera dados). Ela é um comando explícito: `RADAR_RUN_LEGACY_ANONYMIZATION=true node scripts/ops/anonymize-legacy.mjs --db CAMINHO` (sem a variável o script sai com código 2). Faça backup antes e não a use em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.
 
 Essas limitações são bloqueadores de produção, não exceções aceitas por este runbook.

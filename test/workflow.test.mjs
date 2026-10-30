@@ -59,7 +59,8 @@ old.close();
 
 process.env.RADAR_DB_PATH = dbPath;
 process.env.RADAR_RUN_LEGACY_ANONYMIZATION = "true";
-// Banco legado sem schema_migrations: o baseline roda sobre ele ao importar.
+// Banco legado sem schema_migrations: o baseline roda sobre ele ao importar. A anonimização
+// legada não roda no import (TD-13); o teste a chama explicitamente.
 const store = await importStore("workflow");
 const { renderResumeFile } = await import("../src/resume-files.ts");
 after(() => {
@@ -70,6 +71,13 @@ after(() => {
 describe("Workflow, privacy migration, PDF library, and authorization checks", () => {
 
   test("migração de privacidade legada roda uma única vez", () => {
+    // TD-13: importar o módulo com a variável ligada não anonimiza nada (sem efeito colateral).
+    assert.equal(store.getJob("legacy-job").title, "Private role", "o import não pode anonimizar o banco");
+    const previous = process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
+    delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
+    assert.throws(() => store.runLegacyAnonymization(), /legacy_anonymization\.disabled/u, "sem a variável o comando recusa");
+    process.env.RADAR_RUN_LEGACY_ANONYMIZATION = previous;
+    assert.deepEqual(store.runLegacyAnonymization(), { applied: true, jobs: 1 });
     const first = store.getBootstrap();
     assert.equal(first.jobs.length, 1);
     assert.equal(first.jobs[0].id, "legacy-job", "job ID remains stable through anonymization");
@@ -83,8 +91,8 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(first.applications[0].auto_authorized_at, null);
     assert.equal(store.db.prepare("SELECT payload FROM audit_events").get().payload, '{"redacted":true}');
     assert.equal(store.db.prepare("SELECT agent_name FROM agent_runs").get().agent_name, "Agente");
-    store.getBootstrap();
-    assert.equal(store.getJob("legacy-job").title, "Vaga anonimizada 001", "the privacy migration runs only once");
+    assert.deepEqual(store.runLegacyAnonymization(), { applied: false, jobs: 0 }, "the privacy migration runs only once");
+    assert.equal(store.getJob("legacy-job").title, "Vaga anonimizada 001");
   });
 
   test("currículo base, interesse, aprovação e autorização automática", async () => {

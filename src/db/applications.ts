@@ -127,14 +127,14 @@ export type ExecutorDeps = {
   expireAuthorizations: () => void;
   revokeAuthorizationRows: (applicationId: string, reason: string) => void;
   abortApplyingJob: (jobId: string, reason: string, actor: string) => void;
-  listApplications: () => Application[];
+  getApplication: (id: string) => Application | null;
   /** #18 — fim de um lease novo do claim (o mesmo do heartbeat). */
   leaseExpiresAt: () => string;
 };
 
 export function createExecutor(deps: ExecutorDeps) {
   const { db, tx, audit } = deps;
-  const applicationById = (id: string) => deps.listApplications().find((item) => item.id === id) ?? null;
+  const applicationById = (id: string) => deps.getApplication(id);
 
   /** URL observada obrigatória, https, num ATS da allowlist e com o mesmo hash canônico da autorizada. */
   function assertObservedUrl(authorization: AuthorizationRow, observedUrl: unknown, settings: AutomationSettings) {
