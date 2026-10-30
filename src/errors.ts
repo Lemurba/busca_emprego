@@ -100,6 +100,13 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio em evidence.",
   "profile.import.invalid": "O arquivo não é um JSON Resume válido.",
   "profile.import.empty": "O JSON Resume não tem nenhuma informação que o Radar saiba importar.",
+  // Perfil profissional (#49, QA-04/TD-07, I49-09/I49-11).
+  "profile.fact.invalid": "Informação do perfil inválida: informe o tipo (até 80 caracteres) e um valor; listas aceitam só textos, números ou sim/não.",
+  "profile.interview.invalid": "Resposta inválida: informe a pergunta e um valor; listas aceitam só textos, números ou sim/não.",
+  "profile.fact.review.forbidden": "Revisar informações do perfil é decisão humana: use o dashboard.",
+  "profile.confirm.forbidden": "Confirmar o perfil é decisão humana: use o dashboard.",
+  PROFILE_SNAPSHOT_REQUIRED: "Confirme o perfil profissional antes: a nota e o currículo usam a versão confirmada do perfil.",
+  PROFILE_SNAPSHOT_INVALID: "A versão do perfil informada não existe neste projeto.",
 };
 
 export const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";

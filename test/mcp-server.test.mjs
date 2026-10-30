@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { markJobOpen } from "./helpers/liveness.mjs";
 import { FIELDS_SUMMARY, TINY_PNG_BASE64 } from "./helpers/final-confirmation.mjs";
+import { confirmedProfile } from "./helpers/profile.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-mcp-test-"));
 process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
@@ -156,12 +157,18 @@ try {
     assert.deepEqual(invented.fact_check.pending.map((item) => [item.kind, item.text]), [["number", "40%"], ["company", "Google"]]);
     assert.deepEqual(invented.fact_check.warnings.map((item) => item.text), ["Elixir"]);
     assert.match(invented.next_step, /fact_check\.pending/u);
-    const scored = await ok("radar_record_score", {
+    const scoreArgs = {
       agent_id: matcher.id, job_id: jobId,
       scores: { role_family: 80, skills: 70, seniority: null, location_work_model: 90, compensation: null, explicit_preferences: 60 },
       strengths: ["Domínio de produto"], gaps: ["Salário não informado"],
-    });
+    };
+    // I49-09: sem perfil confirmado a nota é recusada; snapshot de outro projeto/inexistente também.
+    await refused("radar_record_score", scoreArgs, "PROFILE_SNAPSHOT_REQUIRED");
+    const profile = confirmedProfile(store);
+    await refused("radar_record_score", { ...scoreArgs, profile_snapshot_id: "snapshot-inexistente" }, "PROFILE_SNAPSHOT_INVALID");
+    const scored = await ok("radar_record_score", scoreArgs);
     assert.ok(scored.score.score_final > 0);
+    assert.equal(scored.score.profile_snapshot_id, profile.snapshot.id, "sem id explícito a nota usa o snapshot do perfil ativo");
 
     // ---- candidatura automática desligada ----
     const assistant = store.createAgentConfig({

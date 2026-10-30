@@ -15,7 +15,7 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 
 - Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes (porta canônica 8787; a instalação pode trocar `PORT` no `.env.local`).
 - Autenticação: toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` com o valor de `RADAR_INTERNAL_SERVICE_TOKEN` **ou** o cookie `radar_session` do dashboard (obtido em `GET /auth?token=<RADAR_DASHBOARD_TOKEN>`). Sem credencial: `401`. Sem token interno configurado no servidor: `503 internal_token_not_configured`.
-- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil, termos de fonte e criação/publicação/rollback de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
+- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil e revisão de fatos (`/api/profiles/{id}/confirm`, `/facts/{factId}/review`), fato de perfil `origin: "user"` ou já `confirmed`, mesclagem de duplicatas (`/api/possible-duplicates/{id}/resolve`), resolução de conflito (`/api/field-conflicts/{id}/resolve`), exclusão do currículo-base (`DELETE /api/base-resumes/{id}`), termos de fonte e criação/publicação/rollback de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
 - Auditoria: o ator gravado vem da credencial — `human:dashboard` (sessão), `service:<nome>` (token; `<nome>` do header opcional `x-radar-service-name`, padrão `internal`) e `agent:<agent_id>` (MCP). `GET /api/jobs/{id}/history` devolve transições e decisões da vaga com o ator.
 - O `Host` precisa estar em `RADAR_ALLOWED_HOSTS`; rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
@@ -288,7 +288,8 @@ Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extra�
 | `POST /api/base-resumes` | Envia um PDF-base |
 | `GET /api/base-resumes/{id}/file` | Baixa o PDF com `Content-Disposition: attachment` |
 | `POST /api/base-resumes/{id}/select` | Seleciona a base padrão para novas adaptações |
-| `DELETE /api/base-resumes/{id}` | Remove o PDF e limpa vínculos de base dos currículos |
+| `DELETE /api/base-resumes/{id}` | Remove o PDF e limpa vínculos de base dos currículos (só com a sessão do painel) |
+| `POST /api/base-resumes/{id}/create-profile` | Cria um perfil em rascunho com os fatos propostos do PDF (página real de cada fato); perfil e fatos numa transação |
 
 O envio é JSON com `title`, `file_name` e `file_data` (bytes codificados em Base64), limite de 5 MB e cabeçalho `%PDF-` obrigatório. O primeiro PDF vira a base selecionada; a seleção pode ser alterada. O conteúdo binário fica somente no SQLite local. Não inclua PDF ou dados pessoais em `POST /api/agent-events`.
 
@@ -453,6 +454,18 @@ Campos de `run`:
 | `message` | `string` | Não | `""` |
 
 Resposta: `201` com `AgentRun` salvo.
+
+### Perfil e nota de aderência
+
+| Método e rota | Uso |
+| --- | --- |
+| `POST /api/profiles` | Rascunho de perfil: `{ base_resume_id?, context?, facts? }` (corpo estrito; `id` e `source` não vêm do cliente) |
+| `POST /api/profiles/{id}/facts` | Fato: `{ type, value, origin?, state?, evidence_page?, evidence_excerpt?, confidence? }`. Lista só com itens texto/número/sim-não; item objeto → `422 profile.fact.invalid` |
+| `POST /api/profiles/{id}/interview` | `{ question_key, answer }`. Com o token de serviço a resposta vira fato `derived`/`proposed` para revisão |
+| `POST /api/profiles/{id}/facts/{factId}/review`, `/confirm` | Só com a sessão do painel |
+| `POST /api/jobs/{id}/score` | `{ scores, profile_snapshot_id?, round_id?, evidence?, strengths?, gaps? }` (token interno). Exige perfil confirmado: sem `profile_snapshot_id` usa o snapshot ativo; sem perfil → `422 PROFILE_SNAPSHOT_REQUIRED`; snapshot de outro projeto/inexistente → `422 PROFILE_SNAPSHOT_INVALID` |
+
+Todas as rotas que alteram dados validam o corpo com um schema estrito (`src/http-schemas.ts`): campo desconhecido ou de tipo errado → `400 invalid_body` com `details[].path`. Rotas sem corpo aceitam só `{}`.
 
 ## Códigos de resposta e comportamento
 

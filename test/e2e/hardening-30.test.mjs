@@ -66,11 +66,12 @@ try {
     const second = await api("POST", "/api/profiles", { facts: [] });
     assert.equal(first.status, 201, JSON.stringify(first.json));
     assert.equal(second.status, 201, JSON.stringify(second.json));
-    const fact = await api("POST", `/api/profiles/${first.json.id}/facts`, { type: "skills", value: "SQL", origin: "user", state: "proposed" });
+    // Fato declarado (origin=user) e revisão são decisões humanas (QA-04): vão com a sessão.
+    const fact = await human("POST", `/api/profiles/${first.json.id}/facts`, { type: "skills", value: "SQL", origin: "user", state: "proposed" });
     assert.equal(fact.status, 201, JSON.stringify(fact.json));
-    const foreign = await api("POST", `/api/profiles/${second.json.id}/facts/${fact.json.id}/review`, { state: "confirmed" });
+    const foreign = await human("POST", `/api/profiles/${second.json.id}/facts/${fact.json.id}/review`, { state: "confirmed" });
     assert.equal(foreign.status, 404, JSON.stringify(foreign.json));
-    const own = await api("POST", `/api/profiles/${first.json.id}/facts/${fact.json.id}/review`, { state: "confirmed" });
+    const own = await human("POST", `/api/profiles/${first.json.id}/facts/${fact.json.id}/review`, { state: "confirmed" });
     assert.equal(own.status, 200, JSON.stringify(own.json));
     assert.equal(own.json.state, "confirmed");
   });

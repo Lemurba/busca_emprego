@@ -120,6 +120,9 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
  * só valem com a sessão do dashboard. O token de serviço (Hermes, scripts) recebe 403.
  * #32: também a confirmação final do envio (ENVIAR) e o cancelamento, o kill-switch/limites
  * (`PUT /api/settings/automation`) e a captura da confirmação final.
+ * QA-04/TD-07: revisão de fato do perfil, mescla de duplicatas (irreversível), resolução de
+ * conflito de enriquecimento e exclusão do currículo-base. Fatos `origin=user` ou já
+ * confirmados vindos do serviço são recusados em `assertServiceOnlyProposes`.
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
   return method === "POST" && (
@@ -127,12 +130,14 @@ function isHumanOnlyRequest(method: string | undefined, pathname: string) {
     || /^\/api\/jobs\/[^/]+\/(?:decision|decision\/undo|feedback|restore|unsuppress)$/u.test(pathname)
     || /^\/api\/resumes\/[^/]+\/(?:approve|facts\/[^/]+)$/u.test(pathname)
     || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual|confirm-final|cancel-final)$/u.test(pathname)
-    || /^\/api\/profiles\/[^/]+\/confirm$/u.test(pathname)
+    || /^\/api\/profiles\/[^/]+\/(?:confirm|facts\/[^/]+\/review)$/u.test(pathname)
+    || /^\/api\/possible-duplicates\/[^/]+\/resolve$/u.test(pathname)
+    || /^\/api\/field-conflicts\/[^/]+\/resolve$/u.test(pathname)
     || /^\/api\/sources\/[^/]+\/terms$/u.test(pathname)
     || /^\/api\/agents\/[^/]+\/(?:publish|rollback)$/u.test(pathname)
   )
     || method === "PATCH" && /^\/api\/applications\/[^/]+$/u.test(pathname)
-    || method === "DELETE" && /^\/api\/jobs\/[^/]+$/u.test(pathname)
+    || method === "DELETE" && /^\/api\/(?:jobs|base-resumes)\/[^/]+$/u.test(pathname)
     || method === "PUT" && pathname === "/api/settings/automation"
     || method === "GET" && /^\/api\/applications\/[^/]+\/evidence\/[^/]+$/u.test(pathname);
 }
@@ -160,6 +165,23 @@ function authenticate(req: IncomingMessage, pathname: string): string {
     return `service:${serviceName(req)}`;
   }
   throw new HttpError(401, "unauthorized", "Sessão ausente ou expirada. Abra o link de acesso enviado pelo Hermes.");
+}
+
+/** Ator do token de serviço (Hermes, scripts): só propõe; quem declara ou confirma é o humano. */
+function isServiceActor(actor: string) {
+  return actor.startsWith("service:");
+}
+
+/**
+ * QA-04/TD-07: o token de serviço pode propor fatos de perfil, mas não declarar em nome do
+ * usuário (`origin=user`) nem gravar fato já confirmado; isso é decisão humana (403).
+ * Sem `origin`, o domínio grava o fato do serviço como `derived`/`proposed`.
+ */
+function assertServiceOnlyProposes(actor: string, facts: ReadonlyArray<{ origin?: string | null; state?: string | null }>) {
+  if (!isServiceActor(actor)) return;
+  if (facts.some((fact) => String(fact.origin ?? "").trim() === "user" || String(fact.state ?? "").trim() === "confirmed")) {
+    throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
+  }
 }
 
 function assertAutomationEnabled(req: IncomingMessage, pathname: string) {
@@ -218,7 +240,11 @@ const routes: Route[] = [
 
   // Perfis
   { method: "GET", pattern: r("/api/profiles"), handler: ({ res }) => ok(res, 200, listProfiles(projectId)) },
-  { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => ok(res, 201, createProfessionalProfile(body, actor, projectId)) },
+  { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => {
+    const input = validateBody(schemas.profileCreate, body);
+    assertServiceOnlyProposes(actor, input.facts ?? []);
+    ok(res, 201, createProfessionalProfile(input, actor, projectId));
+  } },
   // JSON Resume: o corpo é o próprio documento (limite padrão de 1 MB); vira um perfil novo em rascunho.
   { method: "POST", pattern: r("/api/profiles/import/json-resume"), handler: ({ actor, res, body }) => {
     const result = validateJsonResume(body);
@@ -233,12 +259,24 @@ const routes: Route[] = [
     attachment(res, "application/json; charset=utf-8", `perfil-v${profile.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
   } },
   { method: "GET", pattern: r("/api/profile/active"), handler: ({ res }) => ok(res, 200, getProfile(listProfiles(projectId).find((profile) => profile.status === "confirmed")?.id ?? "", projectId)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor, params[0]!)) },
+  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(validateBody(schemas.profileFactReview, body).state ?? ""), actor, params[0]!)) },
   { method: "GET", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params }) => ok(res, 200, listProfileFacts(params[0]!)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ actor, res, params, body }) => ok(res, 201, addProfileFact(params[0]!, body, actor)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ actor, res, params }) => ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/interview"), handler: ({ actor, res, params, body }) => ok(res, 200, answerProfileInterview(params[0]!, String(body.question_key ?? ""), body.answer, actor)) },
-  { method: "PATCH", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateProfessionalProfile(params[0]!, body, actor, projectId)) },
+  { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.profileFact, body);
+    assertServiceOnlyProposes(actor, [input]);
+    ok(res, 201, addProfileFact(params[0]!, input, actor, projectId));
+  } },
+  { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)); } },
+  // Resposta vinda do serviço (Hermes) vira fato proposto para revisão humana (ver answerProfileInterview).
+  { method: "POST", pattern: r("/api/profiles/{id}/interview"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.profileInterview, body);
+    ok(res, 200, answerProfileInterview(params[0]!, String(input.question_key ?? ""), input.answer, actor, projectId));
+  } },
+  { method: "PATCH", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.profilePatch, body);
+    assertServiceOnlyProposes(actor, input.facts ?? []);
+    ok(res, 200, updateProfessionalProfile(params[0]!, input, actor, projectId));
+  } },
   { method: "GET", pattern: r("/api/profiles/{id}"), handler: ({ res, params }) => {
     const profile = getProfile(params[0]!, projectId);
     if (!profile) throw notFound("Perfil não encontrado.");
@@ -251,9 +289,9 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/agents/{id}/versions"), handler: ({ res, params }) => ok(res, 200, listAgentConfigVersions(params[0]!, projectId)) },
   { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => ok(res, 200, publishAgentConfigVersion(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
   { method: "POST", pattern: r("/api/agents/{id}/rollback"), handler: ({ actor, res, params, body }) => ok(res, 200, rollbackAgentConfig(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
-  { method: "POST", pattern: r("/api/agents/{id}/prompt-proposals"), handler: ({ res, params, body }) => ok(res, 201, proposeAgentPrompt(params[0]!, body, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/prompt-proposals"), handler: ({ res, params, body }) => ok(res, 201, proposeAgentPrompt(params[0]!, validateBody(schemas.agentPromptProposal, body), projectId)) },
   { method: "PATCH", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateAgentConfig(params[0]!, validateBody(schemas.agentPatch, body), actor, projectId)) },
-  { method: "DELETE", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params }) => ok(res, 200, deleteAgentConfig(params[0]!, actor, projectId)) },
+  { method: "DELETE", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteAgentConfig(params[0]!, actor, projectId)); } },
 
   // Fontes
   { method: "GET", pattern: r("/api/sources"), handler: ({ res }) => ok(res, 200, listSourceConfigs(projectId)) },
@@ -263,12 +301,12 @@ const routes: Route[] = [
     const input = validateBody(schemas.sourceReadiness, body);
     ok(res, 200, setSourceReadiness(params[0]!, String(input.status ?? ""), String(input.reason ?? ""), actor, projectId));
   } },
-  { method: "POST", pattern: r("/api/sources/{id}/terms"), handler: ({ actor, res, params }) => ok(res, 200, approveSourceTerms(params[0]!, actor, projectId)) },
-  { method: "DELETE", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params }) => ok(res, 200, deleteSourceConfig(params[0]!, actor, projectId)) },
+  { method: "POST", pattern: r("/api/sources/{id}/terms"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, approveSourceTerms(params[0]!, actor, projectId)); } },
+  { method: "DELETE", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteSourceConfig(params[0]!, actor, projectId)); } },
 
   // Rodadas
   { method: "GET", pattern: r("/api/rounds"), handler: ({ res }) => ok(res, 200, listSearchRounds(projectId)) },
-  { method: "POST", pattern: r("/api/rounds"), handler: ({ actor, res, body }) => ok(res, 201, startSearchRound(body, projectId, actor)) },
+  { method: "POST", pattern: r("/api/rounds"), handler: ({ actor, res, body }) => ok(res, 201, startSearchRound(validateBody(schemas.roundStart, body), projectId, actor)) },
   { method: "GET", pattern: r("/api/rounds/{id}/duplicates"), handler: ({ res, params }) => {
     const roundId = params[0]!;
     if (!listSearchRounds(projectId).some((round) => round.id === roundId)) throw notFound("Rodada não encontrada.");
@@ -282,8 +320,16 @@ const routes: Route[] = [
     if (!round) throw notFound("Rodada não encontrada.");
     ok(res, 200, round);
   } },
-  { method: "POST", pattern: r("/api/rounds/{id}/status"), handler: ({ res, params, body }) => ok(res, 200, recordRoundSourceStatus(params[0]!, String(body.source_id ?? ""), String(body.status ?? ""), body, projectId)) },
-  { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => ok(res, 200, ingestRoundBatch(params[0]!, String(body.source_id ?? ""), body.batch && typeof body.batch === "object" && !Array.isArray(body.batch) ? body.batch as Record<string, unknown> : body, projectId)) },
+  { method: "POST", pattern: r("/api/rounds/{id}/status"), handler: ({ res, params, body }) => {
+    const input = validateBody(schemas.roundSourceStatus, body);
+    ok(res, 200, recordRoundSourceStatus(params[0]!, String(input.source_id ?? ""), String(input.status ?? ""), input, projectId));
+  } },
+  // O lote vem no próprio corpo ou embrulhado em `{ source_id, batch }`.
+  { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => {
+    const envelope = body.batch !== undefined ? validateBody(schemas.roundBatchEnvelope, body) : null;
+    const batch = validateBody(schemas.roundBatch, envelope ? envelope.batch : body);
+    ok(res, 200, ingestRoundBatch(params[0]!, String(envelope?.source_id ?? batch.source_id ?? ""), batch, projectId));
+  } },
 
   // Vagas
   // Cadastro manual: nunca sobrescreve vaga existente/arquivada (a ingestão usa as rodadas e agent-events).
@@ -305,14 +351,15 @@ const routes: Route[] = [
   } },
   { method: "GET", pattern: r("/api/jobs/{id}/occurrences"), handler: ({ res, params }) => ok(res, 200, listJobOccurrences(params[0]!, projectId)) },
   { method: "GET", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params }) => ok(res, 200, getMatchScore(params[0]!)) },
-  { method: "POST", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params, body }) => ok(res, 200, recordMatchScore({ ...body, job_id: params[0]! } as never)) },
+  // I49-09: a nota exige um snapshot de perfil confirmado do projeto (o ativo, se não informado).
+  { method: "POST", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params, body }) => ok(res, 200, recordMatchScore({ ...validateBody(schemas.matchScore, body), job_id: params[0]!, project_id: projectId })) },
   { method: "GET", pattern: r("/api/jobs/{id}/provenance"), handler: ({ res, params }) => ok(res, 200, listFieldProvenance(params[0]!)) },
   { method: "PATCH", pattern: r("/api/jobs/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateJob(params[0]!, validateBody(schemas.jobPatch, body), { actor })) },
   // Excluir é reversível: a vaga é arquivada e pode ser restaurada.
   { method: "DELETE", pattern: r("/api/jobs/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, archiveJob(params[0]!, validateBody(schemas.jobArchive, body), actor)) },
-  { method: "POST", pattern: r("/api/jobs/{id}/restore"), handler: ({ actor, res, params }) => ok(res, 200, restoreJob(params[0]!, actor)) },
+  { method: "POST", pattern: r("/api/jobs/{id}/restore"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, restoreJob(params[0]!, actor)); } },
   // Reexibe uma vaga ocultada por regra "Não tenho interesse" (visão Ocultadas).
-  { method: "POST", pattern: r("/api/jobs/{id}/unsuppress"), handler: ({ actor, res, params }) => ok(res, 200, unsuppressJob(params[0]!, actor)) },
+  { method: "POST", pattern: r("/api/jobs/{id}/unsuppress"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, unsuppressJob(params[0]!, actor)); } },
   { method: "POST", pattern: r("/api/jobs/{id}/decision/undo"), handler: ({ actor, res, params, body }) => ok(res, 200, undoJobDecision(params[0]!, validateBody(schemas.jobUndoDecision, body), actor)) },
   { method: "GET", pattern: r("/api/jobs/{id}/history"), handler: ({ res, params }) => ok(res, 200, listJobHistory(params[0]!)) },
   { method: "GET", pattern: r("/api/jobs/{id}/feedback"), handler: ({ res, params }) => ok(res, 200, listJobFeedback(params[0]!)) },
@@ -334,7 +381,7 @@ const routes: Route[] = [
 
   // Currículos adaptados
   { method: "POST", pattern: r("/api/resumes"), handler: ({ actor, res, body }) => ok(res, 201, createResume(validateBody(schemas.resumeCreate, body) as never, actor)) },
-  { method: "POST", pattern: r("/api/resumes/generate"), handler: ({ actor, res, body }) => ok(res, 201, generateAtsResume(body, actor, projectId)) },
+  { method: "POST", pattern: r("/api/resumes/generate"), handler: ({ actor, res, body }) => ok(res, 201, generateAtsResume(validateBody(schemas.resumeGenerate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/resumes/{id}/files/(pdf|docx)"), handler: async ({ res, params }) => {
     const resume = getResume(params[0]!);
     if (!resume) throw notFound("Currículo não encontrado.");
@@ -348,15 +395,16 @@ const routes: Route[] = [
   } },
   // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
   { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },
-  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params }) => ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }); } },
   { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: async ({ actor, res, params, body }) => {
     const input = validateBody(schemas.resumeApprove, body);
     await ensureResumeParseCheck(params[0]!);
     ok(res, 200, approveResume(params[0]!, String(input.confirmation ?? ""), { override_reason: input.override_reason == null ? undefined : String(input.override_reason), actor }));
   } },
   { method: "POST", pattern: r("/api/resumes/{id}/review"), handler: async ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.resumeReview, body);
     await ensureResumeParseCheck(params[0]!);
-    ok(res, 200, reviewResume(params[0]!, body, actor));
+    ok(res, 200, reviewResume(params[0]!, input, actor));
   } },
   // Checagem de fatos (#31): resolver um fato é declaração humana (rota só da sessão, ver isHumanOnlyRequest).
   { method: "GET", pattern: r("/api/resumes/{id}/facts"), handler: ({ res, params }) => ok(res, 200, getResumeFactChecks(params[0]!)) },
@@ -372,10 +420,12 @@ const routes: Route[] = [
     attachment(res, "application/pdf", file.file_name, file.data);
   } },
   { method: "GET", pattern: r("/api/base-resumes/{id}/extraction"), handler: ({ res, params }) => ok(res, 200, getBaseResumeExtraction(params[0]!)) },
-  { method: "POST", pattern: r("/api/base-resumes/{id}/create-profile"), handler: ({ actor, res, params }) => ok(res, 201, createProfileFromBaseResume(params[0]!, actor, projectId)) },
+  { method: "POST", pattern: r("/api/base-resumes/{id}/create-profile"), handler: async ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 201, await createProfileFromBaseResume(params[0]!, actor, projectId)); } },
   { method: "POST", pattern: r("/api/base-resumes/{id}/select"), handler: ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectBaseResume(params[0]!)); } },
-  { method: "DELETE", pattern: r("/api/base-resumes/{id}"), handler: ({ res, params }) => {
-    if (!deleteBaseResume(params[0]!)) throw notFound("Currículo-base não encontrado.");
+  // Excluir o PDF-base é decisão humana (isHumanOnlyRequest).
+  { method: "DELETE", pattern: r("/api/base-resumes/{id}"), handler: ({ actor, res, params, body }) => {
+    validateBody(schemas.empty, body);
+    if (!deleteBaseResume(params[0]!, actor)) throw notFound("Currículo-base não encontrado.");
     ok(res, 200, { deleted: true });
   } },
 
@@ -410,13 +460,13 @@ const routes: Route[] = [
     const input = validateBody(schemas.applicationFail, body);
     ok(res, 200, failAuthorizedApplication(params[0]!, { worker_id: input.worker_id, reason: input.reason }));
   } },
-  { method: "POST", pattern: r("/api/applications/{id}/select-manual"), handler: ({ actor, res, params }) => ok(res, 200, selectManualApplication(params[0]!, actor)) },
+  { method: "POST", pattern: r("/api/applications/{id}/select-manual"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectManualApplication(params[0]!, actor)); } },
   { method: "POST", pattern: r("/api/applications/{id}/authorize-auto"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.applicationAuthorize, body);
     ok(res, 200, authorizeAutoApplication(params[0]!, String(input.resume_id ?? ""), String(input.confirmation ?? ""), actor));
   } },
-  { method: "POST", pattern: r("/api/applications/{id}/revoke-auto"), handler: ({ actor, res, params }) => ok(res, 200, revokeAutoApplication(params[0]!, actor)) },
-  { method: "POST", pattern: r("/api/applications/{id}/questions"), handler: ({ res, params, body }) => ok(res, 201, createHumanQuestion(params[0]!, body)) },
+  { method: "POST", pattern: r("/api/applications/{id}/revoke-auto"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, revokeAutoApplication(params[0]!, actor)); } },
+  { method: "POST", pattern: r("/api/applications/{id}/questions"), handler: ({ res, params, body }) => ok(res, 201, createHumanQuestion(params[0]!, validateBody(schemas.humanQuestionCreate, body))) },
   { method: "PATCH", pattern: r("/api/applications/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateApplication(params[0]!, validateBody(schemas.applicationPatch, body) as never, actor)) },
 
   // #32 — kill-switch, limite diário e allowlist de ATS (mudança só pela sessão do dashboard).
@@ -434,17 +484,18 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/human-questions/{id}/answer"), handler: ({ res, params, body }) => ok(res, 200, answerHumanQuestion(params[0]!, validateBody(schemas.humanAnswer, body))) },
 
   // Eventos de agentes
-  { method: "POST", pattern: r("/api/agent-events"), handler: ({ res, body }) => {
+  { method: "POST", pattern: r("/api/agent-events"), handler: ({ res, body: rawBody }) => {
+    const body = validateBody(schemas.agentEvent, rawBody);
     const event = String(body.event ?? "");
     if (event === "job.discovered" || event === "job.updated") {
       if (!body.agent_id) throw new HttpError(422, "agent_id.required", "Informe o agente responsável pelo evento.");
-      const job = body.job && typeof body.job === "object" && !Array.isArray(body.job) ? validateBody(schemas.jobPatch, body.job as Record<string, unknown>) : undefined;
+      const job = body.job ? validateBody(schemas.jobPatch, body.job) : undefined;
       if (event === "job.discovered") return ok(res, 201, createJobFromAgent(String(body.agent_id), (job ?? {}) as never, projectId));
       if (!job?.id) throw new HttpError(422, "job.id.required", "Informe o id da vaga a enriquecer.");
       const { id, ...patch } = job;
       return ok(res, 200, enrichJobFromAgent(String(body.agent_id), String(id), patch, String(body.evidence_source_url ?? ""), String(body.evidence_excerpt ?? ""), projectId));
     }
-    if (event === "agent.status") return ok(res, 201, recordAgentRun((body.run ?? {}) as never));
+    if (event === "agent.status") return ok(res, 201, recordAgentRun(validateBody(schemas.agentRun, body.run ?? {})));
     throw new HttpError(400, "event.unsupported", "Tipo de evento não suportado.");
   } },
 

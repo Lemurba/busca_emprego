@@ -14,6 +14,7 @@ import { matchScoreComponents, normalizeCriterionInputs } from "../src/db/scorin
 import { calculateMatchScore, DomainValidationError } from "../src/domain.ts";
 import { errorResponse } from "../src/http-security.ts";
 import { analyzeExtractedText } from "../src/resume-parse-check.ts";
+import { confirmedProfile } from "./helpers/profile.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
 const { store, cleanup, directory } = await openTempStore("radar-score-honesto");
@@ -53,6 +54,7 @@ describe("aderência explicável", () => {
 
   test("score com base e evidência persiste e aparece no bootstrap", () => {
     const job = store.upsertJob({ id: "score-basis", title: "Backend", company: "Exemplo", source: "fixture", source_url: "https://jobs.example.test/score-basis" });
+    confirmedProfile(store);
     const legacy = store.recordMatchScore({ job_id: job.id, scores: SIX });
     const score = store.recordMatchScore({ job_id: job.id, scores: { ...SIX, skills: { value: 70, basis: "explicit", evidence: "Requisitos: TypeScript" } } });
     assert.equal(score.score_final, legacy.score_final, "mesma nota com ou sem base");

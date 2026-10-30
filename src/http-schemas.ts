@@ -125,6 +125,31 @@ const resumeFields = {
 
 const versionRef = z.strictObject({ version_id: z.string().max(300).optional() });
 
+// Perfil profissional (F14). Enums, limites de tipo e regras de evidência continuam no domínio
+// (profile.fact.*), que devolve os códigos estáveis; aqui só a forma do corpo.
+const factPrimitive = z.union([z.string().max(20_000), z.number().finite(), z.boolean()]);
+/** Valor de fato: primitivo, lista ou objeto (JSON Resume). Item de lista não primitivo → profile.fact.invalid no domínio. */
+const factValue = z.union([factPrimitive, z.array(z.unknown()).max(500), z.record(z.string(), z.unknown())]).nullable().optional();
+const optPage = z.union([z.number().int().min(1).max(10_000), z.string().regex(/^\s*\d{1,5}\s*$/u)]).nullable().optional();
+const profileFact = z.strictObject({
+  id: optId,
+  type: shortText.optional(),
+  value: factValue,
+  origin: optShort,
+  state: optShort,
+  evidence_page: optPage,
+  page: optPage,
+  evidence_excerpt: optText,
+  excerpt: optText,
+  confidence: optNumber,
+});
+const profileContext = {
+  context: z.record(z.string(), z.unknown()).nullable().optional(),
+  context_json: z.union([z.string().max(200_000), z.record(z.string(), z.unknown())]).nullable().optional(),
+  facts: z.array(profileFact).max(500).optional(),
+};
+const optCount = z.number().int().min(0).nullable().optional();
+
 export const schemas = {
   // Cadastro manual: id, nota e versão não vêm do cliente (mesma regra de `updateJob`).
   jobCreate: z.strictObject(jobFields).omit({ id: true, match_score: true, expected_version: true }),
@@ -176,6 +201,63 @@ export const schemas = {
   fieldConflictResolve: z.strictObject({ choice: shortText.optional() }),
   duplicateResolve: z.strictObject({ status: shortText.optional() }),
   preferenceRule: z.strictObject({ state: shortText.optional() }),
+  // Perfil (F14): id e source nunca vêm do cliente (só o import de JSON Resume cria `json_resume`).
+  profileCreate: z.strictObject({ base_resume_id: optId, ...profileContext }),
+  profilePatch: z.strictObject(profileContext),
+  profileFact,
+  profileFactReview: z.strictObject({ state: shortText.optional() }),
+  profileInterview: z.strictObject({ question_key: shortText.optional(), answer: factValue }),
+  agentPromptProposal: z.strictObject({ prompt: optText, reason: optShort }),
+  roundStart: z.strictObject({ run_id: optId, source_ids: stringList.optional() }),
+  roundSourceStatus: z.strictObject({
+    source_id: optId, status: optShort, cursor: optShort, error_code: optShort,
+    batch_number: optCount, received_count: optCount, accepted_count: optCount,
+  }),
+  // Itens da fonte: a forma de cada item (campos permitidos, URLs) é validada em validateSourceBatch → SCHEMA_INVALID.
+  roundBatch: z.strictObject({ source_id: optId, items: z.array(z.unknown()).max(1_000), next_cursor: optShort }),
+  roundBatchEnvelope: z.strictObject({ source_id: optId, batch: z.record(z.string(), z.unknown()) }),
+  // Nota de aderência: cada critério (número ou {value, basis, evidence}) é validado no domínio.
+  matchScore: z.strictObject({
+    scores: z.record(z.string(), z.unknown()),
+    profile_snapshot_id: optId,
+    round_id: optId,
+    evidence: z.array(z.union([z.string().max(2_000), z.record(z.string(), z.unknown())])).max(50).optional(),
+    strengths: stringList.optional(),
+    gaps: stringList.optional(),
+  }),
+  resumeGenerate: z.strictObject({
+    job_id: optId, profile_snapshot_id: optId, base_resume_id: optId, title: optShort, content: optText,
+    facts_used: stringList.optional(), keywords: stringList.optional(), changes: stringList.optional(), gaps: stringList.optional(),
+  }),
+  resumeReview: z.strictObject({ verdict: optShort, findings: stringList.optional() }),
+  humanQuestionCreate: z.strictObject({
+    field_ref: optShort, question: optShort, required: optBool, choices: stringList.optional(),
+    allow_free_text: optBool, uncertainty_reason: optShort, step: optShort,
+  }),
+  agentEvent: z.strictObject({
+    event: shortText.optional(),
+    agent_id: optId,
+    job: z.record(z.string(), z.unknown()).nullable().optional(),
+    run: z.record(z.string(), z.unknown()).nullable().optional(),
+    evidence_source_url: z.string().max(4_000).nullable().optional(),
+    evidence_excerpt: optText,
+  }),
+  // Execução de agente: versão e snapshot da configuração são derivados no servidor, nunca do corpo.
+  agentRun: z.strictObject({
+    id: id.optional(),
+    agent_id: optId,
+    agent_name: z.string().min(1).max(200),
+    status: z.enum(["running", "completed", "failed"]),
+    started_at: z.string().max(64).optional(),
+    finished_at: z.string().max(64).nullable().optional(),
+    found_count: z.number().int().min(0).optional(),
+    message: z.string().max(2_000).optional(),
+    model_effective: optShort,
+    input_tokens: optCount,
+    output_tokens: optCount,
+    cost: z.number().finite().min(0).nullable().optional(),
+    latency_ms: optCount,
+  }),
 } as const;
 
 const SEMANTIC_ISSUES = new Set(["url.scheme.invalid", "deadline.format.invalid"]);

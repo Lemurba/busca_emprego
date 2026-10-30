@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { openTempStore } from "./helpers/temp-db.mjs";
+import { confirmedProfile } from "./helpers/profile.mjs";
 
 const { store, cleanup } = await openTempStore("radar-sdd-score", "test.sqlite");
 after(cleanup);
@@ -16,6 +17,7 @@ test("SDD score preference matching", async () => {
     seniority: "Sênior", location: "Lisboa", work_model: "Presencial",
   });
   store.recordJobDecision(liked.id, "interested", "TENHO INTERESSE");
+  confirmedProfile(store);
 
   const relatedScore = store.recordMatchScore({ job_id: liked.id, scores: six });
   const unrelatedScore = store.recordMatchScore({ job_id: unrelated.id, scores: six });

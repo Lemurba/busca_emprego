@@ -113,9 +113,56 @@ try {
     await refusedToService("POST", "/api/agents", { name: "Agente do serviço", role_type: "custom" });
     await refusedToService("POST", "/api/agents/qualquer/publish", { version_id: "v" });
     await refusedToService("POST", "/api/agents/qualquer/rollback", { version_id: "v" });
+    // QA-04/TD-07: revisão de fato do perfil, mescla de duplicata, conflito de enriquecimento e exclusão do PDF-base.
+    await refusedToService("POST", "/api/profiles/qualquer/facts/fato/review", { state: "confirmed" });
+    await refusedToService("POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" });
+    await refusedToService("POST", "/api/field-conflicts/qualquer/resolve", { choice: "candidate" });
+    await refusedToService("DELETE", "/api/base-resumes/qualquer", {});
+    // Fato declarado (origin=user) ou já confirmado vindo do serviço é decisão humana.
+    await refusedToService("POST", "/api/profiles", { facts: [{ type: "skills", value: "SQL", origin: "user" }] });
+    await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "user" });
+    await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "pdf", state: "confirmed", evidence_page: 1, evidence_excerpt: "SQL" });
+    await refusedToService("PATCH", "/api/profiles/qualquer", { facts: [{ type: "skills", value: "SQL", origin: "user", state: "confirmed" }] });
     // Sem credencial nenhuma continua 401; com a sessão a rota é alcançada (404 do recurso).
     assert.equal((await call(json, "POST", "/api/profiles/qualquer/confirm", {})).status, 401);
     assert.notEqual((await human("POST", "/api/sources/qualquer/terms", {})).status, 403);
+    for (const [method, path, body] of [
+      ["POST", "/api/profiles/qualquer/facts/fato/review", { state: "confirmed" }],
+      ["POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" }],
+      ["POST", "/api/field-conflicts/qualquer/resolve", { choice: "candidate" }],
+      ["DELETE", "/api/base-resumes/qualquer", {}],
+    ]) assert.equal((await human(method, path, body)).status, 404, `${method} ${path} com a sessão chega ao recurso`);
+  });
+
+  await test("QA-04: o serviço propõe fatos do perfil; revisar e confirmar ficam com a sessão", async () => {
+    const before = (await svc("GET", "/api/profiles")).data.length;
+    await refusedToService("POST", "/api/profiles", { facts: [{ type: "skills", value: "SQL", state: "confirmed", origin: "pdf", evidence_page: 1, evidence_excerpt: "SQL" }] });
+    assert.equal((await svc("GET", "/api/profiles")).data.length, before, "a recusa não cria rascunho");
+
+    const draft = await svc("POST", "/api/profiles", { facts: [{ type: "skills", value: ["SQL", "Python"], origin: "pdf", evidence_page: 1, evidence_excerpt: "SQL, Python" }] });
+    assert.equal(draft.status, 201, JSON.stringify(draft.data));
+    const profileId = draft.data.id;
+    const [pdfFact] = draft.data.facts;
+    assert.equal(pdfFact.state, "proposed");
+    // Sem origin, o fato do serviço é derivado e proposto (nunca declaração humana).
+    const implicit = await svc("POST", `/api/profiles/${profileId}/facts`, { type: "languages", value: "Inglês" });
+    assert.equal(implicit.status, 201, JSON.stringify(implicit.data));
+    assert.deepEqual([implicit.data.origin, implicit.data.state], ["derived", "proposed"]);
+    // Entrevista repassada pelo Hermes também fica proposta para revisão.
+    const interview = await svc("POST", `/api/profiles/${profileId}/interview`, { question_key: "target_role", answer: "Analista" });
+    assert.equal(interview.status, 200, JSON.stringify(interview.data));
+    const relayed = interview.data.facts.find((fact) => fact.type === "target_role");
+    assert.deepEqual([relayed.origin, relayed.state], ["derived", "proposed"]);
+
+    await refusedToService("POST", `/api/profiles/${profileId}/facts/${pdfFact.id}/review`, { state: "confirmed" });
+    await refusedToService("POST", `/api/profiles/${profileId}/confirm`, {});
+    for (const fact of [pdfFact, implicit.data, relayed]) {
+      const reviewed = await human("POST", `/api/profiles/${profileId}/facts/${fact.id}/review`, { state: "confirmed" });
+      assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    }
+    const confirmed = await human("POST", `/api/profiles/${profileId}/confirm`, {});
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.data));
+    assert.ok(confirmed.data.snapshot?.id);
   });
 
   await test("#19: histórico grava human:dashboard para a sessão e service:<nome> para o token", async () => {

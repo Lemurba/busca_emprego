@@ -10,6 +10,7 @@ import { after, describe, test } from "node:test";
 import { markJobOpen } from "./helpers/liveness.mjs";
 import { atsUrl, confirmFinal } from "./helpers/final-confirmation.mjs";
 import { importStore } from "./helpers/temp-db.mjs";
+import { confirmedProfile } from "./helpers/profile.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-core-fixes-"));
 process.env.RADAR_DB_PATH = join(directory, "core.sqlite");
@@ -120,12 +121,16 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
   });
 
   test("3. match_scores: score idêntico atualiza a mesma linha", () => {
-    // 3. match_scores: identical score twice updates the same (job, '', '') row.
+    // 3. match_scores: identical score twice updates the same (job, snapshot, '') row.
     const job = newJob();
     const six = { role_family: 80, skills: 80, seniority: 80, location_work_model: 80, compensation: 80, explicit_preferences: 80 };
+    // I49-09: sem perfil confirmado não há nota; com ele, a nota usa o snapshot ativo.
+    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores: six }), /PROFILE_SNAPSHOT_REQUIRED/u);
+    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores: six, profile_snapshot_id: "snapshot-inexistente" }), /PROFILE_SNAPSHOT_INVALID/u);
+    const snapshotId = confirmedProfile(store).snapshot.id;
     store.recordMatchScore({ job_id: job.id, scores: six });
-    const again = store.recordMatchScore({ job_id: job.id, scores: six });
-    assert.equal(again.profile_snapshot_id, null);
+    const again = store.recordMatchScore({ job_id: job.id, scores: six, profile_snapshot_id: snapshotId });
+    assert.equal(again.profile_snapshot_id, snapshotId);
     assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM match_scores WHERE job_id=?").get(job.id).count, 1);
     store.recordMatchScore({ job_id: job.id, scores: { ...six, skills: 90 } });
     assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM match_scores WHERE job_id=?").get(job.id).count, 1);
@@ -363,7 +368,8 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
     try {
       const rows = migrated.db.prepare("SELECT id,profile_snapshot_id,round_id,score_final FROM match_scores WHERE job_id='legacy-score-job'").all();
       assert.deepEqual(rows.map((row) => ({ ...row })), [{ id: "old-2", profile_snapshot_id: "", round_id: "", score_final: 70 }], "NULL scopes migrate to '' keeping the latest row");
-      migrated.recordMatchScore({ job_id: "legacy-score-job", scores: { role_family: 90, skills: 90, seniority: 90, location_work_model: 90, compensation: 90, explicit_preferences: 90 } });
+      // I49-09: nota nova sem perfil confirmado é recusada; a linha legada fica como estava.
+      assert.throws(() => migrated.recordMatchScore({ job_id: "legacy-score-job", scores: { role_family: 90, skills: 90, seniority: 90, location_work_model: 90, compensation: 90, explicit_preferences: 90 } }), /PROFILE_SNAPSHOT_REQUIRED/u);
       assert.equal(migrated.db.prepare("SELECT COUNT(*) AS count FROM match_scores WHERE job_id='legacy-score-job'").get().count, 1);
     } finally {
       migrated.db.close();

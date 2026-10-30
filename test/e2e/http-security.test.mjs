@@ -249,7 +249,8 @@ try {
       assert.equal(response.status, 404, path);
       assert.equal((await response.json()).error, "not_found", path);
     }
-    const deleted = await fetch(`${base}/api/base-resumes/nao-existe`, { method: "DELETE", headers: { ...json, ...svc } });
+    // Excluir o PDF-base é decisão humana (QA-04): com a sessão, id ausente → 404.
+    const deleted = await fetch(`${base}/api/base-resumes/nao-existe`, { method: "DELETE", headers: { ...json, cookie } });
     assert.equal(deleted.status, 404);
   });
 
