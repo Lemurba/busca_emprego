@@ -507,6 +507,9 @@ test.describe("smoke de UI", () => {
     await dialog.getByRole("button", { name: "Enviar agora" }).click();
     await expect.poll(() => confirms.length).toBe(1);
     expect(JSON.parse(confirms[0]!)).toEqual({ confirmation: "ENVIAR" });
+    // O bootstrap recarrega depois do envio; descarta rotas ainda em voo para o fim do teste não
+    // fechar a página no meio de um route.fetch (corrida vista na CI).
+    await page.unrouteAll({ behavior: "ignoreErrors" });
     expect(errors, "erros de console").toEqual([]);
   });
 
