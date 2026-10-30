@@ -15,7 +15,9 @@ concurrency:
 jobs:
   # Smoke de UI (Playwright + axe) num job separado: só ele baixa o Chromium.
   ui-smoke:
-    runs-on: ubuntu-24.04 # Playwright 1.56 não suporta o ubuntu-latest (26.04)
+    # Fixo em 24.04: o Playwright fixado (1.56.1, igual ao Chromium do ambiente
+    # local) não instala navegador no ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

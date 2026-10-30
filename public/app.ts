@@ -1,14 +1,19 @@
-import * as LeafletModule from "leaflet";
 import { bindAppState } from "./ui/app-state.js";
 import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
+import { SCORE_BADGE_TITLE, scoreTone } from "./ui/components/job-badges.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
+import { AnalyticsPage } from "./ui/pages/analytics-page.js";
+import { BoardPage } from "./ui/pages/board-page.js";
+import { OverviewPage } from "./ui/pages/overview-page.js";
+import { ApplicationsPage } from "./ui/pages/applications-page.js";
+import { OperationsPage } from "./ui/pages/operations-page.js";
+import { JobsPage } from "./ui/pages/jobs-page.js";
+import { ResumesPage } from "./ui/pages/resumes-page.js";
+import { CompaniesPage } from "./ui/pages/companies-page.js";
+import { type SettingsPref, SettingsPage } from "./ui/pages/settings-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
-import { connectorCompaniesSection, mountConnectorPanel } from "./connectors-panel.js";
-import { type AutomationOverview, authorizationCell, automationPanel, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
-
-// Leaflet empacotado pelo esbuild (sem CDN externo; CSP script-src 'self').
-const leafletLib: any = (LeafletModule as any).default ?? LeafletModule;
+import { type AutomationOverview, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
 
 type Job = {
   id: string;
@@ -233,15 +238,15 @@ const state = {
   jobsLimit: 50,
   visualFilter: null as VisualFilter | null,
   selectedJobId: null as string | null,
-  dragJobId: null as string | null,
   mapExpanded: false,
   mapEnabled: readPref("radar-map-consent", false),
   browserAiTools: readPref("radar-browser-ai-tools", false),
   modalDirty: false,
   lastSync: null as Date | null
 };
+/** Mapa de Análises: criado e removido pelo componente (analytics-page.tsx), registrado aqui por `onMapChange`. */
 let activeMap: any = null;
-const activeMapMarkers = new Map<string, any>();
+let activeMapMarkers = new Map<string, any>();
 
 function setTheme(theme: "light" | "dark") {
   document.documentElement.dataset.theme = theme;
@@ -386,11 +391,6 @@ function repostText(job: Job) {
   return `Repostada ${count} ${count === 1 ? "vez" : "vezes"}${job.first_seen_at ? ` desde ${formatNumericDate(job.first_seen_at)}` : ""}`;
 }
 
-function repostBadge(job: Job) {
-  const text = repostText(job);
-  return text ? `<span class="chip orange" title="Mesma empresa, título e descrição de vaga anterior">${escapeHtml(text)}</span>` : "";
-}
-
 function livenessSummary(job: Job) {
   const check = job.last_liveness_check;
   if (!check) return { title: "Ainda não verificada", detail: "O Radar confere sozinho a cada 6–48 h." };
@@ -415,10 +415,9 @@ function lifecycleChip(job: Job, element = "span") {
   return `<${element} class="status-pill ${meta.tone}">${escapeHtml(meta.label)}</${element}>`;
 }
 
-/** Mesmas faixas do domínio (calculateScore): ≥ 80 match forte, ≥ 65 vale olhar. */
+/** Faixas e título compartilhados com o `ScoreBadge` em JSX (ui/components/job-badges.tsx). */
 function scoreBadge(score: number) {
-  const tone = score >= 80 ? "high" : score >= 65 ? "mid" : "low";
-  return `<span class="score ${tone}" title="Aderência: estimativa de quanto a vaga combina com seu perfil (não é nota de ATS)">${escapeHtml(score)}%</span>`;
+  return `<span class="score ${scoreTone(score)}" title="${escapeHtml(SCORE_BADGE_TITLE)}">${escapeHtml(score)}%</span>`;
 }
 
 const SCORE_EXPLANATION = "Estimativa de quanto a vaga combina com seu perfil. Não é a nota de nenhum ATS.";
@@ -433,13 +432,6 @@ const blockerStatusMeta: Record<string, { label: string; tone: string }> = { blo
 
 function blockedBlockers(job: Job) {
   return (job.blockers ?? []).filter((blocker) => blocker.status === "blocked");
-}
-
-/** Selo separado da nota: só aparece quando há eliminatório confirmado dos dois lados. */
-function blockerBadge(job: Job) {
-  const blocked = blockedBlockers(job);
-  if (!blocked.length) return "";
-  return `<span class="status-pill red" title="${escapeHtml(blocked.map((blocker) => blocker.reason).join(" "))}">Eliminatório: ${escapeHtml(blocked[0]!.label)}${blocked.length > 1 ? ` +${blocked.length - 1}` : ""}</span>`;
 }
 
 function blockersSection(job: Job) {
@@ -467,11 +459,6 @@ function coverageBlock(coverage: Coverage | null | undefined) {
   const rows = coverage.components.map((item) => `<tr><td>${escapeHtml(item.label)}<small>${escapeHtml(item.detail)}</small></td><td class="num">${escapeHtml(item.weight)}</td><td class="num">${item.score == null ? "—" : `${escapeHtml(Math.round(item.score))}%`}</td><td>${escapeHtml(basisLabels[item.basis] ?? item.basis)}</td></tr>`).join("");
   const missing = coverage.missing_keywords.length ? `<p><strong>Faltam no currículo:</strong> ${coverage.missing_keywords.map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join(" ")}</p>` : `<p>Todos os termos identificados na vaga aparecem no currículo.</p>`;
   return `<p><strong>Cobertura de requisitos: ${escapeHtml(coverage.total)}%</strong> — conta determinística, sem IA; não é a nota de nenhum ATS.</p><div class="table-wrap flat"><table class="signal-table"><thead><tr><th>Componente</th><th class="num">Peso</th><th class="num">Valor</th><th>Base</th></tr></thead><tbody>${rows}</tbody></table></div>${missing}`;
-}
-
-function parseCheckPill(check: ParseCheckSummary | null | undefined) {
-  if (!check || check.stale) return `<span class="status-pill neutral">Leitura do PDF não testada</span>`;
-  return check.ok ? `<span class="status-pill teal">Leitura do PDF ok</span>` : `<span class="status-pill red">Leitura do PDF falhou</span>`;
 }
 
 function renderParseCheck(root: HTMLElement, check: ParseCheck | null) {
@@ -507,9 +494,7 @@ function factDisplay(fact: { type: string; value: unknown }) {
 
 /** Eliminatórios que o perfil ainda não responde: sem eles a vaga fica "não verificado". */
 function missingBlockerFacts(facts: Array<{ type: string; state: string }>) {
-  const missing = blockerFactTypes.filter((type) => !facts.some((fact) => fact.type === type && fact.state === "confirmed"));
-  if (!missing.length) return "";
-  return `<p class="muted-text">Eliminatórios sem resposta no perfil: ${escapeHtml(missing.map((type) => label(factTypeLabels, type)).join(", "))}. Responda na entrevista do Hermes; até lá essas checagens aparecem como “não verificado”.</p>`;
+  return blockerFactTypes.filter((type) => !facts.some((fact) => fact.type === type && fact.state === "confirmed"));
 }
 
 function relativeApplication(job: Job) {
@@ -523,64 +508,6 @@ function relativeApplication(job: Job) {
 /* ------------------------------------------------------------------ */
 /* Gráficos                                                            */
 /* ------------------------------------------------------------------ */
-
-function chartBars(entries: [string, number][], type: VisualFilter["type"], color = "", labels: Record<string, string> = {}, groupLabel = "Gráfico de barras") {
-  if (!entries.length) return `<div class="empty-state"><div><strong>Sem dados ainda</strong><span>Os números aparecem quando novas vagas entrarem.</span></div></div>`;
-  const sorted = [...entries].sort((a, b) => b[1] - a[1]);
-  const visible = sorted.slice(0, 7);
-  const rest = sorted.slice(7).reduce((sum, [, value]) => sum + value, 0);
-  const total = Math.max(sorted.reduce((sum, [, count]) => sum + count, 0), 1);
-  const max = Math.max(...visible.map(([, value]) => value), rest, 1);
-  const rows = visible.map(([key, value]) => {
-    const displayLabel = labels[key] ?? key;
-    const selected = state.visualFilter?.type === type && state.visualFilter.value === key;
-    const percentage = Math.round(value / total * 100);
-    return `<button class="bar-row chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="${type}" data-chart-filter-value="${escapeHtml(key)}" data-chart-filter-label="${escapeHtml(displayLabel)}" data-tooltip="${escapeHtml(`${displayLabel}: ${value} vaga${value === 1 ? "" : "s"} (${percentage}%)`)}" aria-pressed="${selected}" aria-label="${escapeHtml(`${displayLabel}: ${value} vaga${value === 1 ? "" : "s"}, ${percentage}%. Filtrar`)}"><span>${escapeHtml(displayLabel)}</span><progress class="bar-track ${color}" value="${value}" max="${max}" aria-hidden="true"></progress><strong>${value}</strong></button>`;
-  });
-  if (rest) rows.push(`<div class="bar-row bar-row-static"><span>Outras (${sorted.length - visible.length})</span><progress class="bar-track ${color}" value="${rest}" max="${max}" aria-hidden="true"></progress><strong>${rest}</strong></div>`);
-  return `<div class="bar-list" role="group" aria-label="${escapeHtml(groupLabel)}">${rows.join("")}</div>`;
-}
-
-function donutChart(data: Data) {
-  const total = Math.max(data.jobs.length, 1);
-  let offset = 0;
-  const counts = new Map(lifecycleOrder.map((value) => [value, data.jobs.filter((job) => job.lifecycle === value).length]));
-  const segments = lifecycleOrder.map((value) => {
-    const meta = lifecycleMeta[value];
-    const count = counts.get(value) ?? 0;
-    const size = count / total * 100;
-    const selected = state.visualFilter?.type === "lifecycle" && state.visualFilter.value === value;
-    const segment = count ? `<circle class="donut-segment ${selected ? "selected" : ""}" cx="50" cy="50" r="42" pathLength="100" fill="none" stroke="var(--tone-${value})" stroke-width="16" stroke-dasharray="${size} ${100 - size}" stroke-dashoffset="${-offset}" aria-hidden="true"><title>${escapeHtml(`${meta.plural}: ${count} (${Math.round(size)}%)`)}</title></circle>` : "";
-    offset += size;
-    return segment;
-  }).join("");
-  const legend = lifecycleOrder.map((value) => {
-    const meta = lifecycleMeta[value];
-    const count = counts.get(value) ?? 0;
-    const selected = state.visualFilter?.type === "lifecycle" && state.visualFilter.value === value;
-    return `<button class="legend-item chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="lifecycle" data-chart-filter-value="${value}" data-chart-filter-label="${escapeHtml(meta.plural)}" aria-pressed="${selected}" aria-label="${escapeHtml(`${meta.plural}: ${count} vaga${count === 1 ? "" : "s"}. Filtrar`)}"><i class="legend-dot tone-dot-${value}" aria-hidden="true"></i><span><strong>${count}</strong>${escapeHtml(meta.plural)}</span></button>`;
-  }).join("");
-  return `<div class="donut-layout"><div class="donut-wrap"><svg class="donut-chart" viewBox="0 0 100 100" role="img" aria-label="Distribuição das ${data.jobs.length} vagas por situação"><circle class="donut-track" cx="50" cy="50" r="42" pathLength="100" fill="none" stroke-width="16"></circle>${segments}<text x="50" y="48" text-anchor="middle" class="donut-total">${data.jobs.length}</text><text x="50" y="60" text-anchor="middle" class="donut-caption">vagas</text></svg></div><div class="donut-legend" role="group" aria-label="Filtrar por situação">${legend}</div></div>`;
-}
-
-function salaryChart(jobs: Job[]) {
-  const currency = dominantCurrency(jobs);
-  const withSalary = jobs.filter((job) => monthlyRange(job));
-  const comparable = withSalary.filter((job) => (job.currency || "BRL") === currency);
-  const otherCurrency = withSalary.length - comparable.length;
-  const salaryJobs = comparable.sort((a, b) => (monthlyRange(b)?.max ?? 0) - (monthlyRange(a)?.max ?? 0)).slice(0, 8);
-  if (!salaryJobs.length) return `<div class="empty-state"><div><strong>Sem salários registrados</strong><span>Valores aparecem somente quando possuem fonte verificável.</span></div></div>`;
-  const max = Math.max(...salaryJobs.map((job) => monthlyRange(job)?.max ?? 0), 1);
-  const columns = salaryJobs.map((job) => {
-    const range = monthlyRange(job)!;
-    const height = Math.max(12, Math.round(range.max / max * 100));
-    const minimumHeight = Math.round(range.min / max * 100);
-    const selected = state.visualFilter?.type === "job" && state.visualFilter.value === job.id;
-    const description = `${job.title} · ${job.company}: ${salaryLabel(job)} (≈ ${formatMoney(range.max, currency)}/mês)`;
-    return `<button class="salary-column chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="job" data-chart-filter-value="${escapeHtml(job.id)}" data-chart-filter-label="${escapeHtml(job.title)}" data-tooltip="${escapeHtml(description)}" aria-label="${escapeHtml(description)}" aria-pressed="${selected}"><span class="salary-value">${escapeHtml(formatMoney(range.max, currency))}</span><svg class="salary-plot" viewBox="0 0 40 100" preserveAspectRatio="none" aria-hidden="true"><rect class="salary-range" x="14" y="${100 - height}" width="12" height="${height}" rx="3"></rect><line class="salary-min-marker" x1="11" x2="29" y1="${100 - minimumHeight}" y2="${100 - minimumHeight}"></line></svg><span class="salary-label"><strong>${escapeHtml(job.company)}</strong>${escapeHtml(job.title)}</span></button>`;
-  }).join("");
-  return `<div class="salary-chart" role="group" aria-label="Faixas salariais mensais por vaga">${columns}</div><p class="chart-note">Valores mensais estimados em ${escapeHtml(currency)} (hora × ${HOURS_PER_MONTH}, ano ÷ 12). A barra vai até o máximo; o traço branco marca o mínimo.${otherCurrency ? ` ${otherCurrency} vaga${otherCurrency === 1 ? "" : "s"} em outra moeda ficou${otherCurrency === 1 ? "" : "aram"} de fora.` : ""}</p>`;
-}
 
 function averageMonthlySalary(jobs: Job[]) {
   const currency = dominantCurrency(jobs);
@@ -626,68 +553,9 @@ function allowedMoves(job: Job) {
   return Object.keys(kanbanMoves[job.status] ?? {});
 }
 
-function moveSelect(job: Job) {
-  const moves = allowedMoves(job);
-  if (!moves.length) return "";
-  return `<label class="move-field"><span class="visually-hidden">Mover ${escapeHtml(job.title)} para outra etapa</span><select class="move-select" data-move-id="${escapeHtml(job.id)}"><option value="">Mover para…</option>${moves.map((status) => `<option value="${status}">${escapeHtml(statusColumns.find((column) => column.target === status)?.title ?? statusLabels[status] ?? status)}</option>`).join("")}</select></label>`;
-}
-
-function jobCard(job: Job) {
-  const draggable = allowedMoves(job).length > 0;
-  return `<article class="job-card ${draggable ? "is-draggable" : ""}" ${draggable ? `draggable="true" data-drag-id="${escapeHtml(job.id)}"` : ""} data-detail-id="${escapeHtml(job.id)}">
-    <div class="job-card-top"><h3><button type="button" class="card-title-button" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button></h3>${scoreBadge(job.match_score)}</div>
-    <p><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.location)}</p>
-    <div class="job-card-meta">${lifecycleChip(job)}<span class="chip">${escapeHtml(job.work_model)}</span><span class="chip">${escapeHtml(job.source)}</span>${job.insecure_url ? `<span class="chip" title="O link da vaga usa http:// (sem criptografia)">Link não seguro</span>` : ""}${repostBadge(job)}</div>
-    <div class="card-footer"><span>${escapeHtml(salaryLabel(job))}</span><span>${escapeHtml(deadlineText(job))}</span></div>
-    ${moveSelect(job)}
-  </article>`;
-}
-
 /* ------------------------------------------------------------------ */
 /* Mapa (opt-in: os tiles vêm de um servidor de terceiros)             */
 /* ------------------------------------------------------------------ */
-
-function lifecycleColor(value: Lifecycle) {
-  return getComputedStyle(document.documentElement).getPropertyValue(`--tone-${value}`).trim() || "#1f8a88";
-}
-
-function initializeMap(data: Data) {
-  const container = document.getElementById("opportunities-map");
-  if (!container || !state.mapEnabled) return;
-  const leaflet = leafletLib;
-  if (!leaflet?.map) { container.textContent = "Mapa indisponível."; return; }
-  activeMap?.remove();
-  activeMapMarkers.clear();
-  const map = leaflet.map(container, { scrollWheelZoom: false }).setView([-14.235, -51.925], 4);
-  activeMap = map;
-  leaflet.tileLayer("https://tile.openstreetmap.de/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap contributors</a>"
-  }).addTo(map);
-  const located = visualFilteredJobs(data).filter((job) => job.latitude != null && job.longitude != null && Number.isFinite(job.latitude) && Number.isFinite(job.longitude) && Math.abs(job.latitude) <= 90 && Math.abs(job.longitude) <= 180);
-  const bounds: number[][] = [];
-  for (const job of located) {
-    const color = lifecycleColor(job.lifecycle);
-    const point: [number, number] = [job.latitude as number, job.longitude as number];
-    const marker = leaflet.circleMarker(point, { radius: state.selectedJobId === job.id ? 10 : 7, color: "#fff", fillColor: color, fillOpacity: 0.95, weight: state.selectedJobId === job.id ? 3 : 2 }).addTo(map)
-      .bindPopup(`<strong>${escapeHtml(job.title)}</strong><br>${escapeHtml(job.company)} · ${escapeHtml(job.location)}<br>${escapeHtml(lifecycleMeta[job.lifecycle]?.label ?? "")}<br><button class="map-popup-action" data-detail="${escapeHtml(job.id)}">Abrir vaga</button>`);
-    marker.on("click", () => { state.selectedJobId = job.id; });
-    activeMapMarkers.set(job.id, marker);
-    bounds.push(point);
-  }
-  if (bounds.length > 1) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 12 });
-  else if (bounds.length === 1) map.setView(bounds[0], 10);
-  else {
-    container.setAttribute("aria-label", "Nenhuma vaga com coordenadas corresponde ao filtro atual.");
-    leaflet.popup().setLatLng([-14.235, -51.925]).setContent("Nenhuma vaga com coordenadas neste filtro.").openOn(map);
-  }
-  if (state.selectedJobId && activeMapMarkers.has(state.selectedJobId)) {
-    const marker = activeMapMarkers.get(state.selectedJobId);
-    map.setView(marker.getLatLng(), 11);
-    marker.openPopup();
-  }
-  window.setTimeout(() => map.invalidateSize(), 0);
-}
 
 function focusMapJob(jobId: string) {
   const job = currentData().jobs.find((item) => item.id === jobId);
@@ -700,41 +568,16 @@ function focusMapJob(jobId: string) {
   }
 }
 
-function mapCanvas() {
-  if (!state.mapEnabled) {
-    return `<div class="map-canvas map-consent"><div><strong>Mapa desligado</strong><p>As imagens do mapa vêm do OpenStreetMap. Ao carregar, esse serviço recebe seu endereço IP e as regiões exibidas.</p><button type="button" class="secondary-button" data-enable-map>Carregar mapa</button></div></div>`;
-  }
-  return `<div id="opportunities-map" class="map-canvas" role="region" tabindex="0" aria-label="Mapa interativo das vagas"></div>`;
-}
-
-function mapPanel(data: Data) {
-  const filtered = visualFilteredJobs(data);
-  const locations = Object.entries(filtered.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {})).sort((a, b) => b[1] - a[1]);
-  const locationRows = locations.slice(0, 6).map(([location, count]) => { const selected = state.visualFilter?.type === "location" && state.visualFilter.value === location; return `<button class="location-row chart-control ${selected ? "selected" : ""}" type="button" data-chart-filter-type="location" data-chart-filter-value="${escapeHtml(location)}" data-chart-filter-label="${escapeHtml(location)}" aria-pressed="${selected}"><span>${escapeHtml(location)}</span><strong>${count}</strong></button>`; }).join("");
-  const jobRows = filtered.slice(0, 6).map((job) => { const noCoords = job.latitude == null || job.longitude == null; return `<button type="button" class="map-job ${state.selectedJobId === job.id ? "selected" : ""}" data-map-job="${escapeHtml(job.id)}" ${noCoords || !state.mapEnabled ? "disabled" : ""} ${noCoords ? `title="Vaga sem coordenadas"` : ""}><span>${escapeHtml(job.title)}</span><small>${escapeHtml(job.company)} · ${escapeHtml(job.location)}${noCoords ? " · sem coordenadas" : ""}</small></button>`; }).join("");
-  return `${visualFilterSummary(data)}<div class="map-wrap">${mapCanvas()}<div class="map-context"><div class="location-list" role="group" aria-label="Filtrar por localização">${locationRows}</div><div class="map-job-list" role="region" aria-label="Vagas no mapa" tabindex="0">${jobRows || `<p class="map-caption">Nenhuma vaga corresponde ao filtro.</p>`}</div><p class="map-caption">Selecione uma vaga para centralizar o mapa. Vagas sem latitude e longitude não aparecem.</p></div></div>`;
-}
-
-function mapHeader(title: string) {
-  return `<div class="map-panel-head"><div><h2>${escapeHtml(title)}</h2><p>Gráficos, mapa e lista de vagas usam o mesmo filtro.</p></div>${state.mapEnabled ? `<button class="secondary-button map-expand-button" type="button" data-expand-map aria-pressed="${state.mapExpanded}">${state.mapExpanded ? "Reduzir mapa" : "Expandir mapa"}</button>` : ""}</div>`;
-}
-
 function prefersReducedMotion() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function setMapExpanded(expanded: boolean) {
   state.mapExpanded = expanded;
+  // A página (Preact) desenha classe, rótulo e aria-pressed a partir do estado; o mapa continua montado.
   const apply = () => {
-    document.body.classList.toggle("map-expanded", expanded);
-    const shell = document.querySelector<HTMLElement>(".map-shell");
-    shell?.classList.toggle("is-expanded", expanded);
-    const button = shell?.querySelector<HTMLElement>("[data-expand-map]");
-    if (button) {
-      button.textContent = expanded ? "Reduzir mapa" : "Expandir mapa";
-      button.setAttribute("aria-pressed", String(expanded));
-      button.focus({ preventScroll: true });
-    }
+    render();
+    document.querySelector<HTMLElement>(".map-shell [data-expand-map]")?.focus({ preventScroll: true });
     window.setTimeout(() => activeMap?.invalidateSize(), 220);
   };
   const transition = (document as Document & { startViewTransition?: (callback: () => void) => void }).startViewTransition;
@@ -751,121 +594,19 @@ function currentData() {
 /* Páginas                                                             */
 /* ------------------------------------------------------------------ */
 
-function renderOverview(data: Data) {
-  const stats = data.stats;
-  const sourceEntries = Object.entries(stats.sources ?? {}).map(([key, value]) => [key, Number(value)]) as [string, number][];
-  const urgent = data.jobs.filter((job) => job.is_open && !job.application_date && (daysUntil(job.deadline_at) ?? 99) <= 7).sort((a, b) => (daysUntil(a.deadline_at) ?? 99) - (daysUntil(b.deadline_at) ?? 99));
-  return `${pageHeading(pageMeta.overview.label, "Oportunidades, currículos e candidaturas em um só lugar.", ADD_JOB_BUTTON)}
-    <div class="metric-grid">${metric("Vagas abertas", stats.openVacancies ?? 0, "Ainda aceitando candidaturas", "⌕", "teal", true)}${metric("Matches fortes", stats.strongMatches ?? 0, "Aderência de 80% ou mais", "✦", "purple")}${metric("Candidaturas", stats.applied ?? 0, "Envios registrados", "✓", "teal")}${metric("Vagas perdidas", stats.lost ?? 0, "Prazo encerrado sem envio", "!", "red")}</div>
-    <div class="section-head"><div><h2>Panorama</h2><p>Clique numa barra ou na legenda para filtrar as vagas.</p></div><button class="text-button" data-page="analytics">Ver análises →</button></div>
-    ${visualFilterSummary(data)}
-    <div class="dashboard-grid"><section class="panel chart-panel"><div class="section-head flush"><div><h2>Fontes de descoberta</h2><p>De onde vieram as vagas</p></div><span class="chip teal">${data.jobs.length} no total</span></div>${chartBars(sourceEntries, "source", "", {}, "Vagas por fonte")}</section>
-      <section class="panel chart-panel"><div class="section-head flush"><div><h2>Situação das vagas</h2><p>Atualizado a cada sincronização</p></div></div>${donutChart(data)}</section></div>
-    <div class="dashboard-grid equal section-spaced">
-      <section class="panel"><div class="section-head flush"><div><h2>Prazos que merecem atenção</h2><p>Abertas, sem candidatura e encerrando em até 7 dias.</p></div></div>${urgent.length ? `<div class="deadline-list">${urgent.slice(0, 4).map((job) => `<div class="deadline-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · ${escapeHtml(job.location)}</span></div><span class="deadline-tag">${escapeHtml(deadlineText(job))}</span><button class="secondary-button" data-detail="${escapeHtml(job.id)}">Abrir</button></div>`).join("")}</div>` : `<div class="empty-state"><div><strong>Nenhum prazo crítico</strong><span>Nada encerra nos próximos 7 dias.</span></div></div>`}</section>
-      <section class="panel"><div class="section-head flush"><div><h2>Atividade dos agentes</h2><p>Últimas sincronizações recebidas</p></div><button class="text-button" data-page="agents">Ver agentes →</button></div><div class="activity-list">${data.agentRuns.slice(0, 4).map((run) => `<div class="activity-item"><i aria-hidden="true"></i><div><strong>${escapeHtml(run.agent_name)}</strong><span>${escapeHtml(run.message || `${run.found_count} vagas processadas`)}</span></div><time datetime="${escapeHtml(run.finished_at || run.started_at)}">${escapeHtml(formatShortDate(run.finished_at || run.started_at))}</time></div>`).join("") || `<div class="empty-state"><div><strong>Aguardando agentes</strong><span>As buscas do Hermes aparecerão aqui.</span></div></div>`}</div></section>
-    </div>`;
-}
+// Visão geral: migrada para Preact em public/ui/pages/overview-page.tsx (registro em render()).
 
-function renderBoard(data: Data) {
-  return `${pageHeading(pageMeta.board.label, "Arraste ou use “Mover para…” nas etapas iniciais. Interesse, currículo e candidatura avançam pelo detalhe da vaga.", ADD_JOB_BUTTON)}
-    <div class="board">${statusColumns.map((column) => { const jobs = data.jobs.filter((job) => column.statuses.includes(job.status)); const movable = Boolean(column.target); return `<section class="board-column" aria-labelledby="column-${column.statuses[0]}"><div class="column-head"><h2 class="column-title" id="column-${column.statuses[0]}">${escapeHtml(column.title)}</h2><span class="column-count" aria-label="${jobs.length} vagas">${jobs.length}</span></div><div class="column-drop" ${movable ? `data-drop-status="${escapeHtml(column.target ?? "")}"` : ""}>${jobs.map((job) => jobCard(job)).join("") || `<p class="column-empty">${movable ? "Nenhuma vaga nesta etapa" : "Avança pelo detalhe da vaga"}</p>`}</div></section>`; }).join("")}</div>`;
-}
+// Quadro: migrado para Preact em public/ui/pages/board-page.tsx (registro em render()).
 
-function filterJobs(data: Data) {
-  const query = state.filters.query.toLowerCase();
-  const filtered = visualFilteredJobs(data).filter((job) => {
-    const textMatch = !query || [job.title, job.company, job.location, job.source].some((value) => String(value ?? "").toLowerCase().includes(query));
-    const sourceMatch = state.filters.source === "all" || job.source === state.filters.source;
-    const lifecycleMatch = state.filters.lifecycle === "all" || job.lifecycle === state.filters.lifecycle;
-    const modelMatch = state.filters.workModel === "all" || job.work_model === state.filters.workModel;
-    return textMatch && sourceMatch && lifecycleMatch && modelMatch && job.match_score >= state.filters.minMatch;
-  });
-  const deadlineValue = (job: Job) => daysUntil(job.deadline_at) ?? Number.POSITIVE_INFINITY;
-  const sorters: Record<SortKey, (a: Job, b: Job) => number> = {
-    match: (a, b) => b.match_score - a.match_score,
-    deadline: (a, b) => deadlineValue(a) - deadlineValue(b),
-    salary: (a, b) => (monthlyRange(b)?.max ?? -1) - (monthlyRange(a)?.max ?? -1),
-    updated: (a, b) => String(b.updated_at).localeCompare(String(a.updated_at))
-  };
-  return filtered.sort(sorters[state.sort]);
-}
+// Vagas: migrada para Preact em public/ui/pages/jobs-page.tsx (registro em render()).
 
-function jobTableRows(jobs: Job[]) {
-  if (!jobs.length) return `<tr><td colspan="7"><div class="empty-state"><div><strong>Nenhuma vaga encontrada</strong><span>Altere os filtros ou adicione uma vaga manualmente.</span></div></div></td></tr>`;
-  const rows = jobs.slice(0, state.jobsLimit).map((job) => `<tr><td data-label="Vaga"><button type="button" class="table-link" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button><small>${escapeHtml(job.company)}</small></td><td data-label="Local">${escapeHtml(job.location)}<small>${escapeHtml(job.work_model)}</small></td><td data-label="Salário"><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}</small></td><td data-label="Aderência">${scoreBadge(job.match_score)}${blockerBadge(job)}</td><td data-label="Situação">${lifecycleChip(job)}<small>${escapeHtml(statusLabels[job.status] ?? humanize(job.status))}</small></td><td data-label="Prazo"><span class="deadline-inline ${job.lifecycle === "lost" ? "lost" : ""}">${escapeHtml(deadlineText(job))}</span><small>${escapeHtml(relativeApplication(job))}</small></td><td class="cell-action"><button class="secondary-button" data-detail="${escapeHtml(job.id)}" aria-label="${escapeHtml(`Detalhes de ${job.title}`)}">Detalhes</button></td></tr>`).join("");
-  const more = jobs.length > state.jobsLimit ? `<tr><td colspan="7" class="table-more"><button type="button" class="secondary-button" data-show-more-jobs>Mostrar mais ${Math.min(50, jobs.length - state.jobsLimit)} de ${jobs.length - state.jobsLimit} restantes</button></td></tr>` : "";
-  return rows + more;
-}
+// Candidaturas: migrada para Preact em public/ui/pages/applications-page.tsx (registro em render()).
 
-function jobsResultsMarkup(data: Data) {
-  const jobs = filterJobs(data);
-  const sortHeader = (key: SortKey, text: string) => `<th aria-sort="${state.sort === key ? (key === "deadline" ? "ascending" : "descending") : "none"}"><button type="button" class="sort-button ${state.sort === key ? "active" : ""}" data-sort="${key}">${escapeHtml(text)}<span aria-hidden="true">${state.sort === key ? (key === "deadline" ? " ↑" : " ↓") : ""}</span></button></th>`;
-  return `<p class="results-count" role="status">${jobs.length} vaga${jobs.length === 1 ? "" : "s"}</p><div class="table-wrap"><table class="data-table responsive-table"><thead><tr><th>Vaga</th><th>Localização</th>${sortHeader("salary", "Faixa salarial")}${sortHeader("match", "Aderência")}<th>Situação</th>${sortHeader("deadline", "Prazo / candidatura")}<th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${jobTableRows(jobs)}</tbody></table></div>`;
-}
+// Currículos: migrada para Preact em public/ui/pages/resumes-page.tsx (registro em render()).
 
-function renderJobs(data: Data) {
-  const sources = [...new Set(data.jobs.map((job) => job.source))].sort();
-  const models = [...new Set(data.jobs.map((job) => job.work_model).filter(Boolean))].sort();
-  const option = (value: string, text: string, current: string) => `<option value="${escapeHtml(value)}" ${current === value ? "selected" : ""}>${escapeHtml(text)}</option>`;
-  return `${pageHeading(pageMeta.jobs.label, "Pesquise, compare salários, confirme prazos e escolha quais entram no seu fluxo.", ADD_JOB_BUTTON)}
-    ${visualFilterSummary(data, false)}
-    <div class="filter-bar" role="search"><label class="filter-field grow"><span>Buscar</span><input class="input" type="search" data-filter="query" value="${escapeHtml(state.filters.query)}" placeholder="Cargo, empresa, cidade ou fonte" /></label>
-      <label class="filter-field"><span>Fonte</span><select class="select" data-filter="source">${option("all", "Todas", state.filters.source)}${sources.map((source) => option(source, source, state.filters.source)).join("")}</select></label>
-      <label class="filter-field"><span>Situação</span><select class="select" data-filter="lifecycle">${option("all", "Todas", state.filters.lifecycle)}${lifecycleOrder.map((value) => option(value, lifecycleMeta[value].plural, state.filters.lifecycle)).join("")}</select></label>
-      <label class="filter-field"><span>Modelo</span><select class="select" data-filter="workModel">${option("all", "Todos", state.filters.workModel)}${models.map((model) => option(model, model, state.filters.workModel)).join("")}</select></label>
-      <label class="filter-field"><span>Match mínimo</span><select class="select" data-filter="minMatch">${[0, 50, 70, 80, 90].map((value) => option(String(value), value ? `${value}%` : "Qualquer", String(state.filters.minMatch))).join("")}</select></label></div>
-    <div id="jobs-results">${jobsResultsMarkup(data)}</div>`;
-}
+// Empresas: migrada para Preact em public/ui/pages/companies-page.tsx (registro em render()).
 
-function renderApplications(data: Data) {
-  const byId = new Map(data.jobs.map((job) => [job.id, job]));
-  const applications = data.applications.filter((application) => byId.has(application.job_id));
-  const rows = applications.map((application) => {
-    const job = byId.get(application.job_id)!;
-    return `<tr><td data-label="Vaga"><button type="button" class="table-link" data-detail="${escapeHtml(job.id)}">${escapeHtml(job.title)}</button><small>${escapeHtml(job.company)}</small></td><td data-label="Estado"><span class="status-pill ${applicationStatusTone[application.status] ?? "orange"}">${escapeHtml(label(applicationStatusLabels, application.status))}</span></td><td data-label="Data">${escapeHtml(formatDate(application.submitted_at))}</td><td data-label="Desde o envio">${escapeHtml(job.application_date ? relativeApplication(job) : "Ainda não enviada")}</td><td data-label="Modo">${escapeHtml(label(automationModeLabels, application.automation_mode))}</td><td data-label="Autorização">${authorizationCell(data.automation, application.id, { escapeHtml, formatDate })}</td><td data-label="Etapa">${escapeHtml(application.current_step || "—")}</td><td class="cell-action"><button class="secondary-button" data-detail="${escapeHtml(job.id)}" aria-label="${escapeHtml(`Abrir ${job.title}`)}">Abrir</button></td></tr>`;
-  }).join("");
-  const pending = data.jobs.filter((job) => job.lifecycle === "open" || job.lifecycle === "unknown");
-  return `${pageHeading(pageMeta.applications.label, "Veja quando cada candidatura foi registrada e há quanto tempo ela está no histórico.")}
-    <div class="metric-grid">${metric("Enviadas", data.stats.applied ?? 0, "Com data registrada", "✓", "teal", true)}${metric("Na fila", applications.filter((item) => ["queued", "in_progress", "awaiting_final_confirmation", "needs_review"].includes(item.status)).length, "Precisam de revisão ou envio", "↗", "orange")}${metric("Vagas perdidas", data.stats.lost ?? 0, "Prazo passou sem envio", "!", "red")}${metric("Sem interesse", data.stats.notInterested ?? 0, "Decisão registrada", "×", "neutral")}</div>
-    <div class="section-head"><div><h2>Histórico de candidaturas</h2><p>Uma data só é registrada quando o envio é confirmado.</p></div></div>
-    <div class="table-wrap"><table class="data-table responsive-table"><thead><tr><th>Vaga</th><th>Estado</th><th>Data da candidatura</th><th>Tempo desde envio</th><th>Modo</th><th>Autorização</th><th>Etapa</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${rows || `<tr><td colspan="8"><div class="empty-state"><div><strong>Nenhuma candidatura registrada</strong><span>Abra uma vaga e registre o envio quando ele acontecer.</span></div></div></td></tr>`}</tbody></table></div>
-    <div class="section-head"><div><h2>Vagas ainda sem candidatura</h2><p>Abertas ou a confirmar, ordenadas pelo prazo.</p></div>${pending.length > 6 ? `<button class="text-button" data-page="jobs">Ver todas →</button>` : ""}</div><div class="company-grid">${pending.sort((a, b) => (daysUntil(a.deadline_at) ?? 999) - (daysUntil(b.deadline_at) ?? 999)).slice(0, 6).map((job) => `<article class="company-card"><div class="company-top"><div><h3>${escapeHtml(job.title)}</h3><p>${escapeHtml(job.company)} · ${escapeHtml(job.location)}</p></div>${lifecycleChip(job)}</div><div class="company-stat"><div><span>Prazo</span><strong>${escapeHtml(deadlineText(job))}</strong></div><div><span>Decisão</span><strong>${escapeHtml(label(decisionLabels, job.decision))}</strong></div></div><button class="secondary-button" data-detail="${escapeHtml(job.id)}">Revisar vaga</button></article>`).join("") || `<div class="empty-state"><div><strong>Todas as vagas estão encaminhadas</strong></div></div>`}</div>`;
-}
-
-function renderResumes(data: Data) {
-  const jobs = new Map(data.jobs.map((job) => [job.id, job]));
-  return `${pageHeading(pageMeta.resumes.label, "Revise o currículo adaptado a cada vaga e aprove antes de qualquer envio. A aprovação não envia nada sozinha.")}
-    <section class="panel"><div class="section-head flush"><div><h2>Currículos-base</h2><p>Envie PDFs, escolha qual será usado nas próximas adaptações e baixe uma cópia.</p></div></div>
-      <form data-form="base-resume" class="base-resume-form"><div class="form-field"><label for="base-resume-title">Nome</label><input class="input" id="base-resume-title" name="title" required placeholder="Currículo principal" /></div><div class="form-field"><label for="base-resume-file">Arquivo PDF (máx. 5 MB)</label><input class="input" id="base-resume-file" name="file" type="file" accept="application/pdf,.pdf" required /></div><button class="primary-button" type="submit">Enviar PDF</button></form>
-      <form data-form="json-resume-import" class="base-resume-form"><div class="form-field"><span>Já tem um currículo em JSON Resume?</span><small>Vira um novo perfil em rascunho; revise e confirme as informações antes de usar.</small></div><div class="form-field"><label for="json-resume-file">Arquivo JSON Resume (máx. 1 MB)</label><input class="input" id="json-resume-file" name="file" type="file" accept="application/json,.json" required /></div><button class="secondary-button" type="submit">Importar JSON Resume</button></form>
-      <div class="resume-grid">${data.baseResumes.length ? data.baseResumes.map((resume) => `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(resume.file_name)}</p></div><span class="status-pill ${resume.is_base ? "teal" : "neutral"}">${resume.is_base ? "Em uso" : "Na biblioteca"}</span></div><div class="button-row"><a class="secondary-button" href="api/base-resumes/${encodeURIComponent(resume.id)}/file">Baixar PDF</a>${!resume.is_base ? `<button class="secondary-button" data-action="select-base-resume" data-resume-id="${escapeHtml(resume.id)}">Usar como base</button>` : ""}<button class="danger-button" data-action="delete-base-resume" data-resume-id="${escapeHtml(resume.id)}" data-resume-title="${escapeHtml(resume.title)}">Excluir</button></div></article>`).join("") : `<div class="empty-state"><div><strong>Nenhum currículo-base</strong><span>Envie um PDF para começar a adaptar por vaga.</span></div></div>`}</div></section>
-    <div class="section-head"><div><h2>Currículos por vaga</h2><p>Cada um nasce quando você marca interesse numa vaga.</p></div></div>
-    <div class="resume-grid">${data.resumes.length ? data.resumes.map((resume) => { const job = jobs.get(resume.job_id); const approved = resume.status === "approved"; const status = approved ? "Aprovado" : resume.status === "review" ? "Em revisão" : "Rascunho"; return `<article class="resume-card"><div class="resume-top"><div><h3>${escapeHtml(resume.title)}</h3><p>${escapeHtml(job?.company ?? "Vaga removida")} · versão ${escapeHtml(resume.version)}</p></div><span class="status-pill ${approved ? "teal" : "orange"}">${status}</span></div><p>${escapeHtml(approved ? "Pronto para a etapa de candidatura." : resume.fact_check?.pending ? `${resume.fact_check.pending} fato${resume.fact_check.pending === 1 ? "" : "s"} novo${resume.fact_check.pending === 1 ? "" : "s"} para confirmar, corrigir ou remover antes de aprovar.` : "Revise os destaques antes de aprovar.")}</p><div class="tag-list">${resume.keywords.slice(0, 6).map((keyword) => `<span class="tag">${escapeHtml(keyword)}</span>`).join("")}</div><p><strong>Cobertura de requisitos: ${resume.coverage ? `${escapeHtml(resume.coverage.total)}%` : "—"}</strong>${resume.coverage?.missing_keywords.length ? `<br><small>Faltam: ${escapeHtml(resume.coverage.missing_keywords.slice(0, 6).join(", "))}${resume.coverage.missing_keywords.length > 6 ? "…" : ""}</small>` : ""}</p><div class="job-card-meta">${parseCheckPill(resume.parse_check)}</div><div class="button-row resume-download-row">${resumeDownloadLinks(resume)}</div><div class="resume-foot"><span>${escapeHtml(resume.changes.length)} sugest${resume.changes.length === 1 ? "ão" : "ões"} de ajuste</span><button class="text-button" data-edit-resume="${escapeHtml(resume.id)}">Editar →</button></div></article>`; }).join("") : `<div class="empty-state"><div><strong>Sem currículos ainda</strong><span>Abra uma vaga e marque “Tenho interesse” para criar o primeiro.</span></div></div>`}</div>`;
-}
-
-function companyStats(data: Data) {
-  const byCompany = new Map<string, Job[]>();
-  data.jobs.forEach((job) => byCompany.set(job.company, [...(byCompany.get(job.company) ?? []), job]));
-  return data.companies.map((company) => ({ company, salary: averageMonthlySalary(byCompany.get(company.name) ?? []) }));
-}
-
-function renderCompanies(data: Data) {
-  return `${pageHeading(pageMeta.companies.label, "Compare concentração de vagas, localidades e salários médios registrados.")}
-    <div class="company-grid">${companyStats(data).map(({ company, salary }) => `<article class="company-card"><div class="company-top"><div class="company-logo" aria-hidden="true">${escapeHtml(company.name.slice(0, 1).toUpperCase())}</div><span class="chip">${company.jobs} vaga${company.jobs === 1 ? "" : "s"}</span></div><div><h3>${escapeHtml(company.name)}</h3><p>${escapeHtml(company.locations.join(" · "))}</p></div><div class="company-stat"><div><span>Salário médio</span><strong>${escapeHtml(salary ? `${formatMoney(salary.value, salary.currency)}/mês` : "Não informado")}</strong>${salary ? `<small>estimado em ${salary.count} vaga${salary.count === 1 ? "" : "s"}</small>` : ""}</div><div><span>Fontes</span><strong>${escapeHtml(company.sources.length)}</strong></div></div><div class="tag-list">${company.sources.map((source) => `<span class="tag">${escapeHtml(source)}</span>`).join("")}</div></article>`).join("") || `<div class="empty-state"><div><strong>Nenhuma empresa ainda</strong><span>As empresas aparecem conforme as vagas chegam.</span></div></div>`}</div>`;
-}
-
-function renderAnalytics(data: Data) {
-  const statusEntries: [string, number][] = Object.entries(data.stats.statuses ?? {}).map(([key, value]) => [key, Number(value)]);
-  const average = averageMonthlySalary(data.jobs);
-  return `${pageHeading(pageMeta.analytics.label, "Entenda onde estão os melhores matches, quanto pagam e quais prazos estão escapando.")}
-    <div class="analytics-content">${visualFilterSummary(data)}<section class="panel analytics-studio"><div class="analytics-studio-head"><div><h2>Painel analítico</h2><p>Todos os gráficos usam as mesmas ${data.jobs.length} vagas e filtram mapa e lista.</p></div><div class="analytics-pulse" aria-label="Resumo dos dados"><span><strong>${escapeHtml(data.stats.strongMatches ?? 0)}</strong> matches fortes</span><span><strong>${escapeHtml(data.stats.applied ?? 0)}</strong> candidaturas</span><span><strong>${escapeHtml(data.companies.length)}</strong> empresas</span></div></div>
-      <div class="analytics-chart-grid"><div class="analytics-block salary-block"><div class="section-head flush"><div><h3>Faixas salariais</h3><p>Clique para filtrar pela vaga.</p></div></div>${salaryChart(data.jobs)}<p class="chart-note">Média mensal estimada: <strong>${escapeHtml(average ? `${formatMoney(average.value, average.currency)} (${average.count} vaga${average.count === 1 ? "" : "s"})` : "não informada")}</strong>.</p></div>
-      <div class="analytics-block pipeline-block"><div class="section-head flush"><div><h3>Etapas do pipeline</h3><p>Clique numa barra para filtrar.</p></div></div>${chartBars(statusEntries, "status", "purple", statusLabels, "Vagas por etapa")}</div></div></section>
-    <section class="panel map-panel map-shell">${mapHeader("Cobertura geográfica")}${mapPanel(data)}</section>
-    <div class="analytics-insights" aria-label="Leituras rápidas"><div class="insight"><span class="insight-icon" aria-hidden="true">↗</span><p><strong>${escapeHtml(data.stats.strongMatches ?? 0)} matches fortes</strong> com aderência de 80% ou mais.</p></div><div class="insight"><span class="insight-icon" aria-hidden="true">⌛</span><p><strong>${escapeHtml(data.stats.lost ?? 0)} vagas perdidas</strong> fecharam sem candidatura enviada.</p></div><div class="insight"><span class="insight-icon" aria-hidden="true">◎</span><p><strong>${escapeHtml(data.jobs.filter((job) => monthlyRange(job)).length)} vagas</strong> possuem faixa salarial com fonte.</p></div></div></div>`;
-}
-
+// Análises: migrada para Preact em public/ui/pages/analytics-page.tsx (registro em render()).
 // Agentes: migrada para Preact em public/ui/pages/agents-page.tsx (registro em render()).
 
 function describeRule(rule: any) {
@@ -879,47 +620,9 @@ function describeRule(rule: any) {
   return Object.entries(match).filter(([, value]) => typeof value === "string" || typeof value === "number").map(([key, value]) => `${humanize(key)}: ${value}`).join(" · ") || "Regra sem detalhes";
 }
 
-function renderOperations(data: Data) {
-  const profile = data.activeProfile;
-  const facts = profile?.facts ?? [];
-  const jobName = (id: string) => {
-    const job = data.jobs.find((item) => item.id === id);
-    return job ? `${job.title} · ${job.company}` : "Vaga removida";
-  };
-  const applicationJob = new Map(data.applications.map((application) => [application.id, application.job_id]));
-  const rounds = data.rounds.map((round) => {
-    const counters = round.counters ?? {};
-    return `<tr><td data-label="Início"><strong>${escapeHtml(formatDate(round.started_at))}</strong></td><td data-label="Estado"><span class="status-pill ${roundStatusTone[round.status] ?? "orange"}">${escapeHtml(label(roundStatusLabels, round.status))}</span></td><td data-label="Fontes">${escapeHtml((round.source_ids ?? []).length)}</td><td data-label="Resultado">${escapeHtml(counters.received ?? 0)} recebidas · ${escapeHtml(counters.accepted ?? 0)} aceitas</td></tr>`;
-  }).join("");
-  const duplicates = data.possibleDuplicates.map((duplicate) => `<article class="ops-item"><div><strong>${escapeHtml(jobName(duplicate.job_id))}</strong><span>Parece a mesma vaga que ${escapeHtml(jobName(duplicate.candidate_job_id))} · ${Math.round(Number(duplicate.similarity) * 100)}% de semelhança</span></div><div class="button-row"><button class="secondary-button" data-resolve-duplicate="${escapeHtml(duplicate.id)}" data-resolution="distinct">São diferentes</button><button class="primary-button" data-resolve-duplicate="${escapeHtml(duplicate.id)}" data-resolution="merged">Mesclar</button></div></article>`).join("");
-  // Regras desfeitas junto com o feedback de origem não podem ser reativadas; ficam fora da lista.
-  const rules = data.preferences.rules.filter((rule) => rule.state !== "undone").map((rule) => `<article class="ops-item"><div><strong>${escapeHtml(describeRule(rule))}</strong><span>${escapeHtml(rule.reason || "Sem justificativa")} · ${escapeHtml(rule.hidden_count ?? 0)} vaga${Number(rule.hidden_count ?? 0) === 1 ? "" : "s"} oculta${Number(rule.hidden_count ?? 0) === 1 ? "" : "s"} agora${rule.state === "active" ? "" : " · pausada"}</span></div><button class="secondary-button" data-preference-rule="${escapeHtml(rule.id)}" data-next-state="${rule.state === "active" ? "paused" : "active"}">${rule.state === "active" ? "Pausar" : "Reativar"}</button></article>`).join("");
-  // Vagas ocultadas pelas regras: motivo (regra) e ação de reexibir no painel.
-  const suppressedJobs = (data.suppressedJobs ?? []).map((job) => `<article class="ops-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · ${escapeHtml(job.rules.map((rule) => `${describeRule(rule)}${rule.reason ? ` (${rule.reason})` : ""}`).join("; ") || "Regra removida")}</span></div><button class="secondary-button" data-action="unsuppress-job" data-job-id="${escapeHtml(job.id)}">Reexibir</button></article>`).join("");
-  const openQuestions = data.humanQuestions.filter((question) => ["pending", "delivered", "delivery_failed"].includes(question.status));
-  const questions = openQuestions.map((question) => { const jobId = applicationJob.get(question.application_id); return `<article class="ops-item"><div><strong>${escapeHtml(question.question)}</strong><span>${escapeHtml(jobId ? jobName(jobId) : "Candidatura removida")} · ${escapeHtml(label(questionStatusLabels, question.status))}</span></div><span class="status-pill ${question.status === "delivery_failed" ? "red" : "orange"}">Responda no Telegram</span></article>`; }).join("");
-  const sourceRows = data.sourceConfigs.map((source) => `<tr><td data-label="Fonte"><strong>${escapeHtml(source.name)}</strong><small>${escapeHtml(source.domain)}</small></td><td data-label="Prontidão"><span class="status-pill ${readinessTone[source.readiness_status ?? ""] ?? "orange"}">${escapeHtml(label(readinessLabels, source.readiness_status ?? "configured"))}</span></td><td data-label="Detalhe">${escapeHtml(source.readiness_reason || "Ainda não testada")}</td><td data-label="Último teste">${escapeHtml(formatDate(source.last_smoke_test_at))}</td></tr>`).join("");
-  return `${pageHeading(pageMeta.operations.label, "Perfil confirmado, rodadas de busca e decisões que dependem de você.", `<button class="secondary-button" data-page="agents">Ver agentes</button>`)}
-    <div class="metric-grid">${metric("Perfil ativo", profile ? `v${profile.version}` : "—", profile ? `${facts.length} informações confirmadas` : "Confirmação necessária", "◎", "teal")}${metric("Rodadas", data.rounds.length, `${data.rounds.filter((round) => round.status === "running").length} em execução`, "↻", "purple")}${metric("Duplicatas", data.possibleDuplicates.length, "aguardando sua decisão", "≋", "orange")}${metric("Perguntas", openQuestions.length, "esperando resposta no Telegram", "?", "red")}</div>
-    ${automationPanel(data.automation, (applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || ""), { escapeHtml, formatDate })}
-    <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>${profile ? `<div class="button-row"><a class="secondary-button" href="api/profiles/${encodeURIComponent(profile.id)}/export/json-resume">Exportar JSON Resume</a><span class="status-pill teal">${escapeHtml(label(profileStatusLabels, profile.status))}</span></div>` : `<span class="status-pill red">Ausente</span>`}</div><div class="ops-list">${facts.map((fact: any) => `<article class="ops-item"><div><strong>${escapeHtml(label(factTypeLabels, fact.type))}</strong><span>${escapeHtml(factDisplay(fact))} · ${escapeHtml(label(originLabels, fact.origin))}${fact.evidence_page ? ` · página ${escapeHtml(fact.evidence_page)}` : ""}</span></div><span class="status-pill ${fact.state === "confirmed" ? "teal" : "orange"}">${fact.state === "confirmed" ? "Confirmado" : "A revisar"}</span></article>`).join("") || `<div class="empty-state"><div><strong>Nenhum perfil confirmado</strong><span>Crie o perfil a partir do currículo-base antes da busca.</span></div></div>`}</div>${profile ? missingBlockerFacts(facts) : ""}</section>
-    <section class="panel"><div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta no Telegram.</p></div></div><div class="ops-list">${questions || `<div class="empty-state"><div><strong>Nenhuma pergunta pendente</strong><span>Nenhuma automação está esperando por você.</span></div></div>`}</div></section></div>
-    <div class="dashboard-grid equal section-spaced"><section class="panel"><div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Quando há dúvida, você decide.</p></div></div><div class="ops-list">${duplicates || `<div class="empty-state"><div><strong>Fila limpa</strong><span>Nenhuma possível duplicata pendente.</span></div></div>`}</div></section><section class="panel"><div class="section-head flush"><div><h2>Preferências aprendidas</h2><p>Criadas pelo seu “Não tenho interesse”. Pausar não apaga o histórico.</p></div></div><div class="ops-list">${rules || `<div class="empty-state"><div><strong>Sem regras</strong><span>Seus motivos de descarte viram regras aqui.</span></div></div>`}</div></section></div>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Ocultadas (${escapeHtml((data.suppressedJobs ?? []).length)})</h2><p>Vagas novas que batem com uma regra “Não tenho interesse” ficam fora do painel. Reexiba se a regra errou.</p></div></div><div class="ops-list">${suppressedJobs || `<div class="empty-state compact"><div><strong>Nenhuma vaga oculta</strong></div></div>`}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Prontidão das fontes</h2><p>As buscas usam só fontes que passaram no teste de acesso.</p></div><button class="text-button" data-page="settings">Editar fontes →</button></div><div class="table-wrap flat"><table class="data-table responsive-table"><thead><tr><th>Fonte</th><th>Prontidão</th><th>Detalhe</th><th>Último teste</th></tr></thead><tbody>${sourceRows || `<tr><td colspan="4">Nenhuma fonte configurada.</td></tr>`}</tbody></table></div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Rodadas de busca</h2><p>Cada rodada guarda o perfil usado e o resultado.</p></div></div><div class="table-wrap flat"><table class="data-table responsive-table"><thead><tr><th>Início</th><th>Estado</th><th>Fontes</th><th>Resultado</th></tr></thead><tbody>${rounds || `<tr><td colspan="4">Nenhuma rodada registrada.</td></tr>`}</tbody></table></div></section>`;
-}
+// Saúde das buscas: migrada para Preact em public/ui/pages/operations-page.tsx (registro em render()).
 
-function renderSettings(data: Data) {
-  const sourceRows = data.sourceConfigs.map((source) => `<tr><td><strong>${escapeHtml(source.name)}</strong><br><small>${escapeHtml(source.domain)}</small></td><td>${escapeHtml(label(sourceTypeLabels, source.source_type))}</td><td>${escapeHtml(label(authLabels, source.auth_strategy))}</td><td><span class="status-pill ${source.enabled ? "teal" : "neutral"}">${source.enabled ? "Ativa" : "Pausada"}</span></td><td><button class="secondary-button" data-edit-source="${escapeHtml(source.id)}" aria-label="${escapeHtml(`Editar ${source.name}`)}">Editar</button></td></tr>`).join("");
-  const toggle = (name: string, checked: boolean, title: string, description: string) => `<label class="setting-toggle"><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span><input type="checkbox" data-pref="${name}" ${checked ? "checked" : ""} /></label>`;
-  return `${pageHeading(pageMeta.settings.label, "Fontes de vagas, privacidade e integrações deste navegador.")}
-    <section class="panel"><div class="section-head flush"><div><h2>Fontes e credenciais</h2><p>Senhas e tokens ficam no Hermes; aqui só há referências.</p></div><button class="primary-button" data-action="add-source"><span aria-hidden="true">+</span> Fonte</button></div><table class="source-table"><thead><tr><th>Fonte</th><th>Tipo</th><th>Acesso</th><th>Estado</th><th><span class="visually-hidden">Ações</span></th></tr></thead><tbody>${sourceRows || `<tr><td colspan="5">Nenhuma fonte configurada.</td></tr>`}</tbody></table></section>
-    ${connectorCompaniesSection()}
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Privacidade neste navegador</h2><p>Estas opções valem só para este navegador.</p></div></div><div class="settings-toggles">${toggle("map", state.mapEnabled, "Mostrar mapa", "Carrega imagens do OpenStreetMap, que recebe seu IP e as regiões exibidas.")}${toggle("browser-ai", state.browserAiTools, "Ferramentas para assistentes de IA do navegador", "Permite que um assistente de IA do navegador liste suas vagas e as mova entre as etapas iniciais.")}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Vagas excluídas</h2><p>Vagas excluídas não aparecem no painel nem voltam pelas buscas. Restaure quando quiser.</p></div></div><div class="ops-list">${(data.archivedJobs ?? []).map((job) => `<article class="ops-item"><div><strong>${escapeHtml(job.title)}</strong><span>${escapeHtml(job.company)} · excluída em ${escapeHtml(formatDate(job.archived_at))}${job.archived_reason ? ` · ${escapeHtml(job.archived_reason)}` : ""}</span></div><button class="secondary-button" data-action="restore-job" data-job-id="${escapeHtml(job.id)}">Restaurar</button></article>`).join("") || `<div class="empty-state compact"><div><strong>Nenhuma vaga excluída</strong></div></div>`}</div></section>
-    <section class="panel section-spaced"><div class="section-head flush"><div><h2>Agentes e integração com o Hermes</h2><p>Os agentes são criados e editados na página Agentes. A documentação técnica da integração fica em <code>docs/agent-api.md</code>.</p></div><button class="secondary-button" data-page="agents">Abrir agentes</button></div></section>`;
-}
+// Configurações: migrada para Preact em public/ui/pages/settings-page.tsx (registro em render()).
 
 /* Páginas em Preact (public/ui/): props com o vocabulário que continua aqui no app.ts. */
 const agentsPage = preactPage(AgentsPage, () => ({
@@ -928,24 +631,108 @@ const agentsPage = preactPage(AgentsPage, () => ({
   sourceName: (source: string) => portalNames.get(source) ?? source,
   fieldName: (field: string) => fieldLabels.get(field) ?? field
 }));
+const overviewPage = preactPage(OverviewPage, () => ({
+  title: pageMeta.overview.label,
+  lifecycleMeta,
+  lifecycleOrder,
+  visualFilteredJobs,
+  daysUntil,
+  deadlineText,
+  formatShortDate
+}));
+const boardPage = preactPage(BoardPage, () => ({
+  title: pageMeta.board.label,
+  statusColumns,
+  statusLabels,
+  lifecycleMeta,
+  allowedMoves,
+  salaryLabel,
+  deadlineText,
+  repostText,
+  onMove: async (jobId: string, status: string) => {
+    try { await moveJob(jobId, status); return true; } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); return false; }
+  }
+}));
+const analyticsPage = preactPage(AnalyticsPage, () => ({
+  title: pageMeta.analytics.label,
+  statusLabels,
+  lifecycleMeta,
+  hoursPerMonth: HOURS_PER_MONTH,
+  formatMoney,
+  salaryLabel,
+  monthlyRange,
+  dominantCurrency,
+  averageMonthlySalary,
+  visualFilteredJobs,
+  onSelectJob: (jobId: string) => { state.selectedJobId = jobId; },
+  onMapChange: (map: any, markers: Map<string, any>) => { activeMap = map; activeMapMarkers = markers; }
+}));
+const applicationsPage = preactPage(ApplicationsPage, () => ({
+  title: pageMeta.applications.label,
+  applicationStatusLabel: (status: string) => label(applicationStatusLabels, status),
+  applicationStatusTone: (status: string) => applicationStatusTone[status] ?? "orange",
+  automationModeLabel: (mode: string) => label(automationModeLabels, mode),
+  decisionLabel: (decision: string) => label(decisionLabels, decision),
+  lifecycle: (job: Job) => lifecycleMeta[job.lifecycle] ?? lifecycleMeta.unknown,
+  formatDate,
+  relativeApplication,
+  deadlineText,
+  daysUntil
+}));
+const operationsPage = preactPage(OperationsPage, () => ({
+  title: pageMeta.operations.label,
+  formatDate,
+  roundStatus: (status: string) => ({ label: label(roundStatusLabels, status), tone: roundStatusTone[status] ?? "orange" }),
+  readiness: (status: string | null | undefined) => ({ label: label(readinessLabels, status ?? "configured"), tone: readinessTone[status ?? ""] ?? "orange" }),
+  questionStatusLabel: (status: string) => label(questionStatusLabels, status),
+  profileStatusLabel: (status: string) => label(profileStatusLabels, status),
+  factTypeLabel: (type: string) => label(factTypeLabels, type),
+  originLabel: (origin: string) => label(originLabels, origin),
+  factDisplay,
+  describeRule,
+  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type))
+}));
+const jobsPage = preactPage(JobsPage, () => ({
+  title: pageMeta.jobs.label,
+  lifecycleMeta,
+  lifecycleOrder,
+  statusLabel: (status: string) => statusLabels[status] ?? humanize(status),
+  salaryLabel,
+  deadlineText,
+  relativeApplication,
+  daysUntil,
+  monthlyMax: (job: Job) => monthlyRange(job)?.max ?? null,
+  visualFilteredJobs: () => visualFilteredJobs(currentData()),
+  onFilter: setJobsFilter
+}));
+const resumesPage = preactPage(ResumesPage, () => ({ title: pageMeta.resumes.label }));
+const companiesPage = preactPage(CompaniesPage, () => ({
+  title: pageMeta.companies.label,
+  averageMonthlySalary,
+  formatMoney
+}));
+const settingsPage = preactPage(SettingsPage, () => ({
+  title: pageMeta.settings.label,
+  sourceTypeLabel: (type: string) => label(sourceTypeLabels, type),
+  authLabel: (strategy: string) => label(authLabels, strategy),
+  formatDate,
+  onPrefChange: setBrowserPref,
+  connectors: { fetchJson, formatDate, toast, confirm: confirmDialog }
+}));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
-export type { AgentConfig, Data };
+export type { AgentConfig, BaseResume, Data, Job, Lifecycle, ParseCheckSummary, Resume, SortKey };
 
 function render() {
   if (!state.data) return;
   const data = state.data;
-  const pages: Record<string, PageEntry> = { overview: () => renderOverview(data), board: () => renderBoard(data), jobs: () => renderJobs(data), applications: () => renderApplications(data), resumes: () => renderResumes(data), companies: () => renderCompanies(data), analytics: () => renderAnalytics(data), operations: () => renderOperations(data), agents: agentsPage, settings: () => renderSettings(data) };
+  const pages: Record<string, PageEntry> = { overview: overviewPage, board: boardPage, jobs: jobsPage, applications: applicationsPage, resumes: resumesPage, companies: companiesPage, analytics: analyticsPage, operations: operationsPage, agents: agentsPage, settings: settingsPage };
   if (!pages[state.page]) state.page = "overview";
-  activeMap?.remove();
-  activeMap = null;
-  activeMapMarkers.clear();
+  // O mapa de Análises vive no componente (criado na montagem, removido ao desmontar).
   mountPage(view(), pages[state.page]);
   const mapShell = view().querySelector<HTMLElement>(".map-shell");
   if (!mapShell || !state.mapEnabled) state.mapExpanded = false;
-  mapShell?.classList.toggle("is-expanded", state.mapExpanded);
   document.body.classList.toggle("map-expanded", state.mapExpanded && Boolean(mapShell));
-  initializeMap(data);
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => {
     if (element.closest("#view")) return;
     const active = element.dataset.page === state.page;
@@ -960,8 +747,6 @@ function render() {
   document.title = `${pageMeta[state.page].label} · Radar de Vagas`;
   const navTotal = document.getElementById("nav-total");
   if (navTotal) navTotal.textContent = String(data.jobs.length);
-  bindViewEvents();
-  if (state.page === "settings") void mountConnectorPanel(view(), { fetchJson, escapeHtml, formatDate, toast, confirm: confirmDialog });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1721,7 +1506,8 @@ async function handleForm(form: HTMLFormElement) {
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) throw new Error("Envie um arquivo PDF.");
     if (file.size > 5 * 1024 * 1024) throw new Error("O PDF deve ter no máximo 5 MB.");
     await fetchJson("/api/base-resumes", { method: "POST", body: JSON.stringify({ title: get("title") || file.name, file_name: file.name, file_data: await fileToBase64(file) }) });
-    await loadData(); toast("PDF salvo na biblioteca."); return;
+    // A página é Preact: o diff mantém o mesmo <form>, então os campos são limpos aqui.
+    form.reset(); await loadData(); toast("PDF salvo na biblioteca."); return;
   }
   if (form.dataset.form === "json-resume-import") {
     const file = formData.get("file");
@@ -2024,33 +1810,6 @@ async function moveJob(jobId: string, status: string) {
   await mutate(`/api/jobs/${encodeURIComponent(jobId)}/transitions`, "POST", { command, expected_version: job.version, data }, `Vaga movida para ${target}.`);
 }
 
-function bindDragEvents() {
-  const clearDropHints = () => document.querySelectorAll(".drop-valid, .drop-invalid, .drag-over").forEach((element) => element.classList.remove("drop-valid", "drop-invalid", "drag-over"));
-  document.querySelectorAll<HTMLElement>("[data-drag-id]").forEach((card) => {
-    card.addEventListener("dragstart", (event) => {
-      const jobId = card.dataset.dragId ?? "";
-      state.dragJobId = jobId;
-      event.dataTransfer?.setData("text/plain", jobId);
-      const job = currentData().jobs.find((item) => item.id === jobId);
-      const allowed = job ? allowedMoves(job) : [];
-      document.querySelectorAll<HTMLElement>(".column-drop").forEach((drop) => drop.classList.add(allowed.includes(drop.dataset.dropStatus ?? "") ? "drop-valid" : "drop-invalid"));
-    });
-    card.addEventListener("dragend", () => { state.dragJobId = null; clearDropHints(); });
-  });
-  document.querySelectorAll<HTMLElement>("[data-drop-status]").forEach((drop) => {
-    drop.addEventListener("dragover", (event) => { if (!drop.classList.contains("drop-valid")) return; event.preventDefault(); drop.classList.add("drag-over"); });
-    drop.addEventListener("dragleave", () => drop.classList.remove("drag-over"));
-    drop.addEventListener("drop", async (event) => {
-      event.preventDefault();
-      const valid = drop.classList.contains("drop-valid");
-      clearDropHints();
-      const jobId = event.dataTransfer?.getData("text/plain") || state.dragJobId;
-      if (!jobId || !valid) return;
-      try { await moveJob(jobId, drop.dataset.dropStatus ?? ""); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); }
-    });
-  });
-}
-
 function activateChartFilter(element: HTMLElement) {
   const type = element.dataset.chartFilterType as VisualFilter["type"] | undefined;
   const value = element.dataset.chartFilterValue;
@@ -2064,10 +1823,17 @@ function activateChartFilter(element: HTMLElement) {
   view().querySelector<HTMLElement>(`[data-chart-filter-type="${CSS.escape(type)}"][data-chart-filter-value="${CSS.escape(value)}"]`)?.focus({ preventScroll: true });
 }
 
-function refreshJobsResults() {
-  const results = document.getElementById("jobs-results");
-  if (results && state.data) results.innerHTML = jobsResultsMarkup(state.data);
+/** Filtros, ordem e "Mostrar mais" da página Vagas: o Preact atualiza só o que mudou (o campo em foco é preservado). */
+function refreshJobsPage() {
   syncJobsHash();
+  render();
+}
+
+function setJobsFilter(key: keyof typeof state.filters, value: string) {
+  if (key === "minMatch") state.filters.minMatch = Number(value) || 0;
+  else state.filters[key] = value;
+  state.jobsLimit = 50;
+  refreshJobsPage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2085,8 +1851,8 @@ async function handleViewClick(event: MouseEvent) {
   if (target.closest("[data-expand-map]")) { setMapExpanded(!state.mapExpanded); return; }
   if (target.closest("[data-enable-map]")) { state.mapEnabled = true; writePref("radar-map-consent", true); render(); return; }
   const sort = target.closest<HTMLElement>("[data-sort]")?.dataset.sort as SortKey | undefined;
-  if (sort) { state.sort = sort; refreshJobsResults(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
-  if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsResults(); return; }
+  if (sort) { state.sort = sort; refreshJobsPage(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
+  if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsPage(); return; }
   const mapJob = target.closest<HTMLElement>("[data-map-job]")?.dataset.mapJob;
   if (mapJob) { focusMapJob(mapJob); view().querySelectorAll(".map-job").forEach((item) => item.classList.toggle("selected", (item as HTMLElement).dataset.mapJob === mapJob)); return; }
   const detail = target.closest<HTMLElement>("[data-detail]")?.dataset.detail;
@@ -2126,7 +1892,7 @@ async function handleAction(target: HTMLElement) {
       await fetchJson(`/api/base-resumes/${encodeURIComponent(action.dataset.resumeId ?? "")}`, { method: "DELETE" }); await loadData(); toast("PDF removido da biblioteca."); return;
     }
   }
-  if (await handleAutomationAction(target, { escapeHtml, formatDate, fetchJson, openDialog, confirmDialog, reload: () => loadData(), toast })) return;
+  if (await handleAutomationAction(target, { escapeHtml, fetchJson, openDialog, confirmDialog, reload: () => loadData(), toast })) return;
   const editResume = target.closest<HTMLElement>("[data-edit-resume]")?.dataset.editResume;
   if (editResume) { showResumeModal(editResume); return; }
   const approve = target.closest<HTMLElement>("[data-approve-resume]")?.dataset.approveResume;
@@ -2170,24 +1936,11 @@ async function handleAction(target: HTMLElement) {
   }
 }
 
-function bindViewEvents() {
-  const root = view();
-  root.querySelectorAll<HTMLSelectElement>("[data-move-id]").forEach((select) => select.addEventListener("change", async () => {
-    select.disabled = true;
-    try { await moveJob(select.dataset.moveId ?? "", select.value); } catch (error) { toast(error instanceof Error ? error.message : "Falha ao mover vaga", true); select.disabled = false; select.value = ""; }
-  }));
-  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-filter]").forEach((input) => input.addEventListener(input.dataset.filter === "query" ? "input" : "change", () => {
-    const key = input.dataset.filter as keyof typeof state.filters;
-    if (key === "minMatch") state.filters.minMatch = Number(input.value) || 0;
-    else (state.filters as Record<string, string | number>)[key] = input.value;
-    state.jobsLimit = 50;
-    refreshJobsResults();
-  }));
-  root.querySelectorAll<HTMLInputElement>("[data-pref]").forEach((input) => input.addEventListener("change", () => {
-    if (input.dataset.pref === "map") { state.mapEnabled = input.checked; writePref("radar-map-consent", input.checked); toast(input.checked ? "Mapa ligado." : "Mapa desligado."); }
-    if (input.dataset.pref === "browser-ai") { state.browserAiTools = input.checked; writePref("radar-browser-ai-tools", input.checked); registerModelTools(); toast(input.checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
-  }));
-  bindDragEvents();
+
+/** Interruptores de privacidade de Configurações (handler Preact em settings-page.tsx). */
+function setBrowserPref(pref: SettingsPref, checked: boolean) {
+  if (pref === "map") { state.mapEnabled = checked; writePref("radar-map-consent", checked); toast(checked ? "Mapa ligado." : "Mapa desligado."); }
+  if (pref === "browser-ai") { state.browserAiTools = checked; writePref("radar-browser-ai-tools", checked); registerModelTools(); toast(checked ? "Ferramentas para assistentes de IA ligadas." : "Ferramentas para assistentes de IA desligadas."); }
 }
 
 /* Ferramentas para assistentes de IA do navegador: só com consentimento. */

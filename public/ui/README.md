@@ -12,7 +12,9 @@ registro de páginas de `render()`.
 - `app-state.ts` — leitura tipada do `state` de `app.ts` (`appState()`, `appData()`).
   Só leitura: mudanças continuam nas funções de `app.ts`, que chamam `render()`.
 - `components/` — peças reaproveitáveis equivalentes aos helpers em string
-  (`PageHeading` ↔ `pageHeading()`, `EmptyState` ↔ `.empty-state`).
+  (`PageHeading` ↔ `pageHeading()`, `EmptyState` ↔ `.empty-state`, `MetricCard` ↔ `metric()`).
+  `automation-panel.tsx` é a marcação do painel de automação (#32); as ações dele
+  (kill-switch, ENVIAR, cancelar) continuam em `public/automation-panel.ts`.
 - `pages/` — uma página por arquivo (`agents-page.tsx` foi a primeira).
 
 ## Como migrar a próxima tela
