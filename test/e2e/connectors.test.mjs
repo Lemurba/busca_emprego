@@ -240,6 +240,9 @@ try {
       assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "indeed", slug: "x" } }), /connector.unknown/u);
       assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "lever", slug: "../etc" } }), /slug_invalid/u);
       assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "lever", slug: 42 } }), /invalid_body|Dados inválidos/u);
+      // F14: corpo estrito; campo desconhecido também é recusado (antes passava em silêncio).
+      assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "lever", slug: "x", project_id: "outro" } }), /invalid_body|Dados inválidos/u);
+      assert.throws(() => routes["PATCH /api/connectors/companies/{id}"]({ params: [created.id], body: { slug: "trocado" } }), /invalid_body|Dados inválidos/u);
       const paused = routes["PATCH /api/connectors/companies/{id}"]({ params: [created.id], body: { enabled: false } });
       assert.equal(paused.enabled, false);
       assert.equal(paused.name, "Exemplo Tech 2");
