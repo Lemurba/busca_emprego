@@ -15,6 +15,9 @@ process.env.RADAR_UI_SMOKE_DIR ??= mkdtempSync(join(tmpdir(), "radar-ui-smoke-")
 process.env.RADAR_UI_SMOKE_TOKEN ??= `ui-smoke-${"d".repeat(32)}`;
 const port = Number(process.env.RADAR_UI_SMOKE_PORT ?? 8797);
 const dashboardToken = process.env.RADAR_UI_SMOKE_TOKEN;
+// Ambientes com um Chromium pré-instalado de outra revisão (ex.: containers de dev) apontam
+// o executável aqui em vez de baixar o navegador da versão fixada do Playwright.
+const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
 
 export default defineConfig({
   testDir: "test/ui",
@@ -32,7 +35,15 @@ export default defineConfig({
     timezoneId: "America/Sao_Paulo",
     trace: "retain-on-failure"
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
+      }
+    }
+  ],
   webServer: {
     command: "node dist/src/server.js",
     url: `http://127.0.0.1:${port}/api/ready`,
