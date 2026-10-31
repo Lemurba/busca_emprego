@@ -6,17 +6,19 @@
  * tratados em public/ops-actions.ts, regras (`data-preference-rule`), "Reexibir" (`data-action`),
  * troca de página (`data-page`) e o painel de automação (#32) continuam tratados pela
  * delegação de eventos do #view (`handleViewClick`/`handleAction`/`handleAutomationAction`).
+ * #49: revisão do perfil em rascunho (`ProfileDraftPanel`) e CTAs de onboarding do perfil.
  */
-import type { Data } from "../../app.js";
+import type { BaseResume, Data, ProfileFact } from "../../app.js";
 import { appData } from "../app-state.js";
 import { AutomationPanel } from "../components/automation-panel.js";
 import { EmptyState } from "../components/empty-state.js";
 import { MetricCard } from "../components/metric-card.js";
 import { OpsMetricsPanel } from "../components/ops-metrics-panel.js";
 import { PageHeading } from "../components/page-heading.js";
+import { ProfileDraftPanel } from "./profile-draft-panel.js";
 
 type Rule = NonNullable<Data["suppressedJobs"]>[number]["rules"][number];
-type Fact = { type: string; value: unknown; origin: string; state: string; evidence_page?: unknown };
+type Fact = Pick<ProfileFact, "type" | "value" | "origin" | "state"> & { evidence_page?: unknown };
 type Tone = { label: string; tone: string };
 
 /** Vocabulário e formatação que continuam definidos em app.ts. */
@@ -31,6 +33,7 @@ export type OperationsPageProps = {
   sourceName: (id: string) => string;
   questionStatusLabel: (status: string) => string;
   profileStatusLabel: (status: string) => string;
+  profileSourceLabel: (source: string) => string;
   factTypeLabel: (type: string) => string;
   originLabel: (origin: string) => string;
   factDisplay: (fact: Fact) => string;
@@ -39,6 +42,7 @@ export type OperationsPageProps = {
   missingBlockers: (facts: Fact[]) => string[];
   /** Cliente da API do app.ts, usado pelo painel de métricas (F17). */
   fetchJson: <T>(url: string, options?: RequestInit) => Promise<T>;
+  workModelLabels: Record<string, string>;
 };
 
 const openQuestionStatuses = ["pending", "delivered", "delivery_failed"];
@@ -48,28 +52,61 @@ function plural(count: number, singular: string, pluralForm: string) {
   return count === 1 ? singular : pluralForm;
 }
 
-function ProfilePanel({ profile, facts, props }: { profile: any; facts: Fact[]; props: OperationsPageProps }) {
+/** Sem perfil confirmado: caminhos para criar um (PDF-base, JSON Resume) ou seguir no rascunho. */
+function ProfileOnboarding({ draft, baseResume, resumes }: { draft: { version: number } | undefined; baseResume: BaseResume | undefined; resumes: BaseResume[] }) {
+  const isExtracted = (resume: BaseResume | undefined) => resume?.extraction_status === "extracted";
+  // PDF-base sem texto (digitalizado): oferece outro PDF da biblioteca que tenha texto, se houver.
+  const source = isExtracted(baseResume) ? baseResume : resumes.find(isExtracted);
+  const unreadable = Boolean(baseResume) && !source;
+  const text = draft
+    ? `O rascunho v${draft.version} espera sua revisão. Confirme o perfil para liberar as buscas, a nota e os currículos.`
+    : unreadable
+      ? "Não foi possível ler o texto do PDF-base (digitalizado como imagem?): envie um PDF com texto selecionável ou importe um JSON Resume, revise as informações e confirme."
+      : "Crie o perfil a partir do currículo-base em PDF ou de um JSON Resume, revise as informações e confirme.";
+  return (
+    <div class="empty-state">
+      <div>
+        <strong>Nenhum perfil confirmado</strong>
+        <span>{text}</span>
+        <div class="button-row">
+          {draft ? <button type="button" class="primary-button" data-action="goto-profile-draft">{`Revisar rascunho v${draft.version}`}</button> : null}
+          {!draft && source ? <button type="button" class="primary-button" data-action="create-profile-from-base" data-resume-id={source.id}>{source === baseResume ? "Criar perfil a partir do PDF-base" : `Criar perfil a partir de “${source.title}”`}</button> : null}
+          {!draft && unreadable ? <button type="button" class="primary-button" data-page="resumes">Enviar outro PDF</button> : null}
+          {!draft && !baseResume ? <button type="button" class="primary-button" data-page="resumes">Enviar currículo em PDF</button> : null}
+          {!draft ? <button type="button" class="secondary-button" data-page="resumes">Importar JSON Resume</button> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfilePanel({ profile, facts, draft, baseResume, resumes, props }: { profile: any; facts: Fact[]; draft: { version: number } | undefined; baseResume: BaseResume | undefined; resumes: BaseResume[]; props: OperationsPageProps }) {
   const missing = profile ? props.missingBlockers(facts) : [];
   return (
     <section class="panel">
       <div class="section-head flush">
-        <div><h2>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>
+        <div><h2 id="active-profile-heading" tabIndex={-1}>Perfil profissional</h2><p>Só informações confirmadas entram nas buscas.</p></div>
         {profile ? (
           <div class="button-row">
             <a class="secondary-button" href={`api/profiles/${encodeURIComponent(profile.id)}/export/json-resume`}>Exportar JSON Resume</a>
-            <span class="status-pill teal">{props.profileStatusLabel(profile.status)}</span>
+            {draft
+              ? <button type="button" class="secondary-button" data-action="goto-profile-draft">{`Ir para o rascunho v${draft.version}`}</button>
+              : <button type="button" class="secondary-button" data-action="new-profile-version" data-profile-id={profile.id}>Criar nova versão</button>}
+            <span class="status-pill teal">{`Perfil ativo v${profile.version}`}</span>
           </div>
         ) : <span class="status-pill red">Ausente</span>}
       </div>
-      <div class="ops-list">
-        {facts.length ? facts.map((fact, index) => (
-          <article key={index} class="ops-item">
-            <div><strong>{props.factTypeLabel(fact.type)}</strong><span>{`${props.factDisplay(fact)} · ${props.originLabel(fact.origin)}${fact.evidence_page ? ` · página ${fact.evidence_page}` : ""}`}</span></div>
-            <span class={`status-pill ${fact.state === "confirmed" ? "teal" : "orange"}`}>{fact.state === "confirmed" ? "Confirmado" : "A revisar"}</span>
-          </article>
-        )) : <EmptyState title="Nenhum perfil confirmado" detail="Crie o perfil a partir do currículo-base antes da busca." />}
-      </div>
-      {missing.length ? <p class="muted-text">{`Eliminatórios sem resposta no perfil: ${missing.join(", ")}. As respostas dadas ao Hermes chegam como propostas e só valem depois que você as confirma no perfil; até lá essas checagens aparecem como “não verificado”.`}</p> : null}
+      {profile ? (
+        <div class="ops-list">
+          {facts.length ? facts.map((fact, index) => (
+            <article key={index} class="ops-item">
+              <div><strong>{props.factTypeLabel(fact.type)}</strong><span>{`${props.factDisplay(fact)} · ${props.originLabel(fact.origin)}${fact.evidence_page ? ` · página ${fact.evidence_page}` : ""}`}</span></div>
+              <span class={`status-pill ${fact.state === "confirmed" ? "teal" : fact.state === "rejected" ? "neutral" : "orange"}`}>{fact.state === "confirmed" ? "Confirmado" : fact.state === "rejected" ? "Rejeitado" : "A revisar"}</span>
+            </article>
+          )) : <EmptyState title="Perfil sem informações" detail="Crie uma nova versão para revisar as informações." compact />}
+        </div>
+      ) : <ProfileOnboarding draft={draft} baseResume={baseResume} resumes={resumes} />}
+      {missing.length ? <p class="muted-text">{`Eliminatórios sem resposta no perfil: ${missing.join(", ")}. ${draft ? "Responda na entrevista do rascunho abaixo" : "Para responder, crie uma nova versão do perfil e use a entrevista do rascunho"}; respostas dadas ao Hermes chegam ao rascunho como propostas e só valem depois que você as confirma. Até lá essas checagens aparecem como “não verificado”.`}</p> : null}
     </section>
   );
 }
@@ -79,6 +116,9 @@ export function OperationsPage(props: OperationsPageProps) {
   const data = appData();
   const profile = data.activeProfile;
   const facts: Fact[] = profile?.facts ?? [];
+  const drafts = data.draftProfiles ?? [];
+  const draft = drafts[0];
+  const baseResume = data.baseResumes.find((resume) => resume.is_base) ?? data.baseResumes[0];
   const jobName = (id: string) => {
     const job = data.jobs.find((item) => item.id === id);
     return job ? `${job.title} · ${job.company}` : "Vaga removida";
@@ -97,7 +137,7 @@ export function OperationsPage(props: OperationsPageProps) {
         actions={<button type="button" class="secondary-button" data-page="agents">Ver agentes</button>}
       />
       <div class="metric-grid">
-        <MetricCard text="Perfil ativo" value={profile ? `v${profile.version}` : "—"} note={profile ? `${facts.length} informações confirmadas` : "Confirmação necessária"} icon="◎" tone="teal" />
+        <MetricCard text="Perfil ativo" value={profile ? `v${profile.version}` : "—"} note={profile ? `${facts.filter((fact) => fact.state === "confirmed").length} informações confirmadas` : draft ? `Rascunho v${draft.version} aguardando revisão` : "Confirmação necessária"} icon="◎" tone="teal" />
         <MetricCard text="Rodadas" value={data.rounds.length} note={`${data.rounds.filter((round) => round.status === "running").length} em execução`} icon="↻" tone="purple" />
         <MetricCard text="Duplicatas" value={data.possibleDuplicates.length} note="aguardando sua decisão" icon="≋" tone="orange" />
         <MetricCard text="Perguntas" value={openQuestions.length} note="esperando sua resposta" icon="?" tone="red" />
@@ -105,7 +145,7 @@ export function OperationsPage(props: OperationsPageProps) {
       <OpsMetricsPanel fetchJson={props.fetchJson} formatDate={formatDate} roundStatus={props.roundStatus} revision={data} />
       <AutomationPanel automation={data.automation} jobLabel={(applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || "")} formatDate={formatDate} />
       <div class="dashboard-grid equal section-spaced">
-        <ProfilePanel profile={profile} facts={facts} props={props} />
+        <ProfilePanel profile={profile} facts={facts} draft={draft} baseResume={baseResume} resumes={data.baseResumes} props={props} />
         <section class="panel">
           <div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta, no Telegram ou aqui.</p></div></div>
           <div class="ops-list">
@@ -125,6 +165,7 @@ export function OperationsPage(props: OperationsPageProps) {
           </div>
         </section>
       </div>
+      <ProfileDraftPanel drafts={drafts} factTypeLabel={props.factTypeLabel} originLabel={props.originLabel} profileSourceLabel={props.profileSourceLabel} factDisplay={props.factDisplay} formatDate={formatDate} workModelLabels={props.workModelLabels} activeVersion={profile?.version ?? null} />
       <div class="dashboard-grid equal section-spaced">
         <section class="panel">
           <div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Quando há dúvida, você decide.</p></div></div>

@@ -253,6 +253,20 @@ h3 { margin-bottom: 4px; color: var(--heading); font-size: var(--type-body); }
 .ops-item > div > span { margin-top: 3px; color: var(--muted); font-size: var(--type-sm); overflow-wrap: anywhere; }
 .ops-item .button-row { flex: 0 0 auto; margin-top: 0; }
 .ops-item .status-pill { display: inline-flex; flex: 0 0 auto; }
+/* #49: revisão do perfil em rascunho e CTAs de onboarding do perfil. */
+.empty-state .button-row { justify-content: center; }
+.empty-state .button-row .primary-button { margin-top: 0; }
+.profile-draft-actions { margin-top: 12px; }
+.ops-item.profile-fact { align-items: flex-start; }
+.ops-item.profile-fact .button-row { flex: 0 1 auto; justify-content: flex-end; }
+.ops-item > div > .profile-fact-value { color: var(--ink); font-size: var(--type-body); }
+.profile-interview, .profile-draft-others { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.profile-interview h3, .profile-draft-others h3 { margin: 0 0 6px; }
+.profile-interview .form-grid { margin-top: 12px; }
+@media (max-width: 600px) {
+  .ops-item.profile-fact { flex-direction: column; }
+  .ops-item.profile-fact .button-row { justify-content: flex-start; }
+}
 
 .empty-state { display: grid; place-items: center; min-height: 160px; padding: 16px; color: var(--muted); text-align: center; }
 .empty-state strong { display: block; margin-bottom: 6px; color: var(--heading); }

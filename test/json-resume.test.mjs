@@ -110,6 +110,8 @@ describe("import, confirmação e exportação", async () => {
   });
 
   test("confirmar → snapshot com experiência estruturada; currículo ATS sem PDF-base; export fiel", () => {
+    // Um rascunho por vez (#49): os rascunhos dos testes anteriores saem antes do novo import.
+    for (const draft of store.listProfiles().filter((item) => item.status === "draft")) store.deleteDraftProfile(draft.id, "tester");
     const profile = store.importJsonResumeProfile(sample, "tester");
     for (const fact of profile.facts) store.reviewProfileFact(fact.id, "confirmed", "tester");
     const confirmed = store.confirmProfessionalProfile(profile.id, "tester");

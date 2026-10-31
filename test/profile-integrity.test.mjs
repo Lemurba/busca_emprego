@@ -75,12 +75,20 @@ describe("QA-04/TD-07: serviço e agentes só propõem fatos", () => {
   });
 
   test("entrevista via serviço vira proposta e não sobrescreve a declaração humana", () => {
+    const proposedOnly = draft();
+    const proposal = store.answerProfileInterview(proposedOnly.id, "target_role", "Diretor", "service:hermes");
+    assert.equal(proposal.already_answered, false);
+    const proposedRole = proposal.facts.find((item) => item.type === "target_role");
+    assert.deepEqual([proposedRole.origin, proposedRole.state, proposedRole.value], ["derived", "proposed", "Diretor"]);
+    assert.equal(proposedRole.evidence_excerpt, "Entrevista via service:hermes: Diretor");
+
+    // Pergunta já respondida pela pessoa: a resposta repassada não vira proposta (nada para "Confirmar" por cima).
     const profile = draft();
     store.answerProfileInterview(profile.id, "target_role", "Analista", "tester");
     const relayed = store.answerProfileInterview(profile.id, "target_role", "Diretor", "service:hermes");
-    const roles = relayed.facts.filter((item) => item.type === "target_role").sort((left, right) => left.origin.localeCompare(right.origin));
-    assert.deepEqual(roles.map((item) => [item.origin, item.state, item.value]), [["derived", "proposed", "Diretor"], ["user", "confirmed", "Analista"]]);
-    assert.equal(roles[0].evidence_excerpt, "Entrevista via service:hermes: Diretor");
+    assert.equal(relayed.already_answered, true);
+    const roles = relayed.facts.filter((item) => item.type === "target_role");
+    assert.deepEqual(roles.map((item) => [item.origin, item.state, item.value]), [["user", "confirmed", "Analista"]]);
     const interview = store.db.prepare("SELECT answer_json,status FROM profile_interviews WHERE profile_id=? AND question_key='target_role'").get(profile.id);
     assert.deepEqual({ ...interview }, { answer_json: '"Analista"', status: "answered" }, "a resposta da pessoa continua registrada");
   });
@@ -177,6 +185,9 @@ describe("I49-13: perfil a partir do PDF-base", () => {
     const base = store.createBaseResume({ title: "Base Maria", file_name: "maria.pdf", file_data: bytes.toString("base64") });
     assert.equal(base.page_count, 2);
 
+    // Um rascunho por vez (#49): com rascunho aberto, criar do PDF-base é profile.draft_exists.
+    await assert.rejects(() => store.createProfileFromBaseResume(base.id, "human:dashboard"), /profile\.draft_exists/u);
+    for (const open of store.listProfiles().filter((item) => item.status === "draft")) store.deleteDraftProfile(open.id, "human:dashboard");
     const before = store.listProfiles().length;
     const profile = await store.createProfileFromBaseResume(base.id, "human:dashboard");
     assert.equal(store.listProfiles().length, before + 1);
@@ -196,5 +207,6 @@ describe("I49-13: perfil a partir do PDF-base", () => {
 
     await assert.rejects(() => store.createProfileFromBaseResume("nao-existe", "human:dashboard"), /base_resume\.not_found/u);
     assert.equal(store.listProfiles().length, before + 1, "falha não deixa rascunho para trás");
+    await assert.rejects(() => store.createProfileFromBaseResume(base.id, "human:dashboard"), /profile\.draft_exists/u, "um rascunho por vez");
   });
 });

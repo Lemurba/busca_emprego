@@ -75,7 +75,7 @@ try {
       assert.match(block, /RADAR_FORWARDED_PROTO: "\$\{env:RADAR_FORWARDED_PROTO\}"/u, `${name} sem RADAR_FORWARDED_PROTO`);
       assert.doesNotMatch(block, /RADAR_DB_PATH/u, `${name} ainda aponta para o SQLite`);
     }
-    assert.deepEqual(configuredRoles.sort(), ["coleta", "coordenador", "curriculo", "executor"]);
+    assert.deepEqual(configuredRoles.sort(), ["coleta", "coordenador", "curriculo", "executor", "preferencias"]);
     const pluginServers = JSON.parse(readFileSync(join(repoRoot, "hermes/plugin/mcp.json"), "utf8")).mcpServers;
     assert.deepEqual(Object.keys(pluginServers).sort(), [...blocks.keys()].sort(), "hermes/plugin/mcp.json diverge do config.example.yaml");
     // Referência literal do Hermes: `$` + `{env:VAR}` (não é template do JavaScript).
@@ -183,6 +183,44 @@ try {
 
     store.updateAgentConfig(lever.id, { enabled: false }, "operator");
     assert.ok(!(await ok(leitura, "radar_list_agents")).agents.some((agent) => agent.id === lever.id), "agente pausado continua listado");
+  });
+
+  await test("#49: entrevista de eliminatórios pelo MCP vira fato proposto no rascunho; sem rascunho, profile.draft_required.", async () => {
+    const leitura = await connect("leitura");
+    const agents = (await ok(leitura, "radar_list_agents")).agents;
+    const learner = agents.find((agent) => agent.role_type === "preference_learner");
+    const writer = agents.find((agent) => agent.role_type === "resume_writer");
+    assert.ok(learner && writer, "entrevistador e redator padrão publicados");
+    assert.deepEqual((await (await connect("preferencias")).listTools()).tools.map(({ name }) => name), ["radar_answer_profile_interview"]);
+    const preferencias = await connect("preferencias");
+    const answer = { agent_id: learner.id, question_key: "work_models", answer: ["remoto", "híbrido"] };
+    // Sem rascunho (perfil novo ainda não criado): a pessoa precisa abrir uma versão no dashboard.
+    await refused(preferencias, "radar_answer_profile_interview", answer, "profile.draft_required");
+    await refused(preferencias, "radar_answer_profile_interview", { ...answer, agent_id: writer.id }, "agent.role.forbidden");
+    await refused(await connect("curriculo"), "radar_answer_profile_interview", answer);
+
+    const draft = store.createProfessionalProfile({ context: { name: "Pessoa Teste" } }, "human:dashboard");
+    const saved = await ok(preferencias, "radar_answer_profile_interview", answer);
+    assert.equal(saved.profile_id, draft.id);
+    assert.equal(saved.proposed, true);
+    assert.equal(saved.pending_review, 1);
+    assert.ok(saved.missing_blockers.includes("work_models"), "work_models segue sem confirmação até a revisão humana");
+    const fact = store.listProfileFacts(draft.id).find((item) => item.type === "work_models");
+    assert.equal(fact.state, "proposed", "resposta do agente nunca nasce confirmada");
+    assert.equal(fact.origin, "derived");
+    assert.deepEqual(fact.value, ["remote", "hybrid"]);
+    await refused(preferencias, "radar_answer_profile_interview", { ...answer, question_key: "years_experience", answer: "muitos" }, "profile.fact.invalid");
+
+    // A pessoa já respondeu no dashboard: o agente não grava nada por cima.
+    store.answerProfileInterview(draft.id, "accepted_locations", ["Lisboa"], "human:dashboard");
+    const ignored = await ok(preferencias, "radar_answer_profile_interview", { ...answer, question_key: "accepted_locations", answer: ["Porto"] });
+    assert.equal(ignored.already_answered, true);
+    assert.equal(ignored.proposed, false);
+    assert.deepEqual(store.listProfileFacts(draft.id).filter((item) => item.type === "accepted_locations").map((item) => [item.origin, item.value]), [["user", ["Lisboa"]]]);
+    // Com mais de um rascunho, o agente precisa dizer qual (não adivinha o mais recente).
+    const other = store.createProfessionalProfile({ context: { name: "Outro rascunho" } }, "human:dashboard");
+    await refused(preferencias, "radar_answer_profile_interview", answer, "profile.draft_ambiguous");
+    assert.equal((await ok(preferencias, "radar_answer_profile_interview", { ...answer, profile_id: other.id })).profile_id, other.id);
   });
 } finally {
   delete process.env.RADAR_AUTO_APPLICATION_ENABLED;

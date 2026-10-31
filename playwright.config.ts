@@ -18,13 +18,10 @@ const dashboardToken = process.env.RADAR_UI_SMOKE_TOKEN;
 // Ambientes com um Chromium pré-instalado de outra revisão (ex.: containers de dev) apontam
 // o executável aqui em vez de baixar o navegador da versão fixada do Playwright.
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
-
-function browser() {
-  return {
-    ...devices["Desktop Chrome"],
-    ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
-  };
-}
+const chromium = {
+  ...devices["Desktop Chrome"],
+  ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
+};
 
 export default defineConfig({
   testDir: "test/ui",
@@ -42,13 +39,13 @@ export default defineConfig({
     timezoneId: "America/Sao_Paulo",
     trace: "retain-on-failure"
   },
-  // Todas as specs dividem um servidor e um banco. A ordem é explícita (não a ordem alfabética
-  // dos arquivos): o smoke vê o banco como ele o semeia; os fluxos rodam depois e deixam
-  // perfil confirmado, termos aceitos e uma rodada no banco. Spec nova que dependa de banco
-  // limpo entra no projeto "smoke"; a que aceite esse estado, num projeto que dependa de "fluxos".
+  // Todas as specs dividem um servidor e um banco. O smoke vê o banco como ele o semeia (vagas
+  // e currículos, sem perfil confirmado); os fluxos rodam depois e deixam perfil confirmado,
+  // termos aceitos e uma rodada no banco. Spec nova que dependa de banco limpo entra no
+  // projeto "chromium" (smoke); a que aceite esse estado fica nos fluxos.
   projects: [
-    { name: "chromium", testMatch: "smoke.spec.ts", use: browser() },
-    { name: "fluxos", testMatch: "sources-ats-flow.spec.ts", dependencies: ["chromium"], use: browser() }
+    { name: "chromium", testMatch: /smoke\.spec\.ts$/u, use: chromium },
+    { name: "fluxos", testIgnore: /smoke\.spec\.ts$/u, dependencies: ["chromium"], use: chromium }
   ],
   webServer: {
     command: "node dist/src/server.js",

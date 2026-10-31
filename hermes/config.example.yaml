@@ -120,6 +120,26 @@ mcp_servers:
       resources: false
       prompts: false
 
+  radar-vagas-preferencias:
+    # Entrevistador de preferências (preferences.write): respostas dos eliminatórios viram fatos
+    # propostos no rascunho do perfil; valem só depois de confirmadas no dashboard.
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    env:
+      # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
+      RADAR_API_URL: "${env:RADAR_API_URL}"
+      RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
+      RADAR_ENVIRONMENT: production
+      RADAR_MCP_ROLE: preferencias
+    trust: untrusted
+    tools:
+      include:
+        # escrita
+        - radar_answer_profile_interview
+      resources: false
+      prompts: false
+
   radar-vagas-executor:
     # Executor de candidatura autorizada: único servidor com claim/submit/fail.
     command: node
