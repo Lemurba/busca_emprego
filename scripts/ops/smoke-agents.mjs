@@ -141,8 +141,7 @@ function mcpCall(child, messages, timeoutMs = 8000) {
     const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error(`MCP timeout; recebido: ${JSON.stringify([...got.keys()])}`)); }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
-      let idx;
-      while ((idx = buffer.indexOf("\n")) >= 0) {
+      for (let idx = buffer.indexOf("\n"); idx >= 0; idx = buffer.indexOf("\n")) {
         const line = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 1);
         if (!line) continue;

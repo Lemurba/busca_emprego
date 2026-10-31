@@ -166,7 +166,7 @@ describe("excluir vaga e desfazer decisões", () => {
     const ids = [1, 2, 3].map(() => newJob({ work_model: "Presencial" }).id);
     const feedbacks = ids.map((id) => store.recordJobFeedback(id, { mode: "partial", reason_code: "work_model", detail_key: "work_model", explanation: "Prefiro trabalho remoto", confirmation: "REJEITAR PARCIALMENTE" }));
     assert.ok(store.listPreferenceState().suggestions.some((item) => item.detail_key === "work_model"));
-    ids.forEach((id, index) => store.undoJobDecision(id, { feedback_id: feedbacks[index].feedback_id }));
+    ids.forEach((id, index) => { store.undoJobDecision(id, { feedback_id: feedbacks[index].feedback_id }); });
     assert.ok(!store.listPreferenceState().suggestions.some((item) => item.detail_key === "work_model"));
   });
 

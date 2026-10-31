@@ -5,7 +5,7 @@ import { DomainError } from "./errors.js";
 import { deadlinePassed as isDeadlinePassed, isIsoDeadline, resolveTimeZone } from "./deadline.js";
 import { DomainValidationError, isHttpsUrl, canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
 import { extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "./domain.js";
-import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256, validatePdf } from "./pdf-profile.js";
+import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256 } from "./pdf-profile.js";
 import { tx as runTx } from "./db/connection.js";
 import { initDb } from "./db/migrate.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
@@ -83,7 +83,7 @@ export function runLegacyAnonymization(): { applied: boolean; jobs: number } {
       opening_status = 'unknown', opening_checked_at = NULL, deadline_at = NULL, closed_at = NULL,
       decision_at = NULL, description = '', benefits = '', requirements = '', responsibilities = '', additional_information = '', match_score = 0, posted_at = NULL
       WHERE id = ?`);
-    jobs.forEach((job, index) => redact.run(`Vaga anonimizada ${String(index + 1).padStart(3, "0")}`, job.id));
+    jobs.forEach((job, index) => { redact.run(`Vaga anonimizada ${String(index + 1).padStart(3, "0")}`, job.id); });
     db.prepare("UPDATE applications SET notes = '', automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL").run();
     db.prepare("UPDATE audit_events SET payload = '{\"redacted\":true}'").run();
     db.prepare("UPDATE agent_runs SET agent_name = 'Agente', message = ''").run();
@@ -1315,7 +1315,7 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
       }
     }
     if (entries.some(([field]) => ["application_url", "job_url", "source_url"].includes(field))) {
-      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress','awaiting_final_confirmation')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"));
+      db.prepare("SELECT id FROM applications WHERE job_id=? AND automation_mode='authorized_auto' AND status IN ('queued','needs_review','in_progress','awaiting_final_confirmation')").all(id).forEach((row) => { revokeAuthorizationRows(String((row as { id: string }).id), "job_url_changed"); });
       db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,
         authorized_resume_id=NULL,authorized_resume_version=NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,
         current_step='Autorização revogada: URL da vaga alterada',updated_at=?
@@ -1536,7 +1536,7 @@ function isAutomatedActor(actor: string): boolean {
 
 export function addProfileFact(profileId: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
   const profile = getProfile(profileId, projectId);
-  if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const type = String(input.type ?? "").trim();
   const value = normalizeBlockerFact(type, factValue(input.value));
   const automated = isAutomatedActor(actor);
@@ -1647,7 +1647,7 @@ export function exportProfileJsonResume(id: string, projectId = "busca-emprego")
 
 export function updateProfessionalProfile(id: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): any {
   const profile = getProfile(id, projectId);
-  if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const context = input.context === undefined && input.context_json === undefined ? profile.context : parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
   // Contexto e fatos são uma unidade (como na criação): um fato inválido desfaz o PATCH inteiro.
@@ -1668,7 +1668,7 @@ function profileContext(profile: ReturnType<typeof getProfile>, facts: ReturnTyp
 export function confirmProfessionalProfile(id: string, actor = "user", projectId = "busca-emprego"): any {
   if (isAutomatedActor(actor)) throw new Error("profile.confirm.forbidden");
   const profile = getProfile(id, projectId);
-  if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const facts = listProfileFacts(id);
   if (facts.some((fact) => ["proposed", "needs_review"].includes(String(fact.state)))) throw new Error("PROFILE_FACTS_UNCONFIRMED");
   if (!facts.some((fact) => fact.state === "confirmed") && !Object.keys(profile.context).length) throw new Error("PROFILE_EMPTY");
@@ -1704,7 +1704,7 @@ export function getLatestProfileSnapshot(profileId?: string, projectId = "busca-
 
 export function answerProfileInterview(profileId: string, questionKey: string, answer: unknown, actor = "user", projectId = "busca-emprego") {
   const profile = getProfile(profileId, projectId);
-  if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const key = questionKey.trim();
   // I49-11: lista com item não primitivo é inválida (antes virava "[object Object]").
   let value: unknown;
@@ -1792,7 +1792,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
   tx(() => {
     db.prepare(`UPDATE resumes SET ${set}, version = version + 1, review_status = CASE WHEN ? IN ('content','keywords','changes','base_resume_id','facts_used','gaps') THEN 'not_run' ELSE review_status END, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), entries.some(([key]) => ["content", "keywords", "changes", "base_resume_id", "facts_used", "gaps"].includes(key)) ? "content" : "unchanged", now(), id);
     if (patch.status && current?.status === "approved") {
-      db.prepare("SELECT id FROM applications WHERE resume_id=? AND status IN ('queued','needs_review','failed')").all(id).forEach((row) => revokeAuthorizationRows(String((row as { id: string }).id), "resume_changed"));
+      db.prepare("SELECT id FROM applications WHERE resume_id=? AND status IN ('queued','needs_review','failed')").all(id).forEach((row) => { revokeAuthorizationRows(String((row as { id: string }).id), "resume_changed"); });
       db.prepare("UPDATE applications SET automation_mode = CASE WHEN automation_mode = 'authorized_auto' THEN 'assisted' ELSE automation_mode END, auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL,authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL WHERE resume_id = ? AND status IN ('queued', 'needs_review', 'failed')").run(id);
       // Removing the approval returns the job to the resume stage, unless another approved resume remains.
       const otherApproved = db.prepare("SELECT id FROM resumes WHERE job_id=? AND status='approved' AND id<>? LIMIT 1").get(current.job_id, id);
@@ -2088,7 +2088,7 @@ export function approveResume(id: string, confirmation: string, options: { overr
   // #31: afirmação sem fato confirmado bloqueia sempre; override_reason não vale para esta regra.
   if (resume.status !== "approved" && tx(() => refreshResumeFactChecks(id)).some((row) => row.status === "pending")) throw new Error("resume.unverified_facts");
   const job = getJob(resume.job_id);
-  if (!job || job.decision !== "interested") throw new Error("A vaga precisa estar marcada como de interesse antes da aprovação.");
+  if (job?.decision !== "interested") throw new Error("A vaga precisa estar marcada como de interesse antes da aprovação.");
   if (resume.status === "approved") throw new Error("Este currículo já foi aprovado.");
   // SDD-ATS-003: never approve empty content, and every source (writer or manual) needs an
   // ATS review `pass` for the current version or an explicitly justified human override.
@@ -2895,7 +2895,7 @@ export function listJobFeedback(jobId: string) {
 
 export function createHumanQuestion(applicationId: string, input: Record<string, unknown>) {
   const application = getApplication(applicationId);
-  if (!application || !application.resume_id) throw new Error("application.not_found");
+  if (!application?.resume_id) throw new Error("application.not_found");
   if (application.automation_mode !== "authorized_auto" || !application.auto_authorized_at) throw new Error("application.authorization.required");
   if (application.status !== "in_progress") throw new Error("application.claim.required");
   assertCurrentAuthorization(currentAuthorization(applicationId), "claimed");
@@ -3181,7 +3181,7 @@ function agentJobItem(input: Partial<Job> & { source: string; title: string; com
  */
 export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
   const agent = publishedAgentConfig(agentId, projectId);
-  if (!agent || !agent.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
+  if (!agent?.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
   if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
   if (!String(input.source ?? "").trim() || !String(input.title ?? "").trim() || !String(input.company ?? "").trim()) throw new Error("job.required_fields.invalid");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
@@ -3200,7 +3200,7 @@ export function createJobFromAgent(agentId: string, input: Partial<Job> & { sour
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
   const agent = publishedAgentConfig(agentId, projectId);
-  if (!agent || !agent.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
+  if (!agent?.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
   const current = getJob(jobId);
   if (!current) throw new Error("job.not_found");
   const entries = Object.entries(patch);

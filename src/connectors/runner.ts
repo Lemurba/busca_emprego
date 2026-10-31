@@ -154,7 +154,7 @@ export async function runConnectorCollection(options: ConnectorRunOptions = {}) 
     if (controller.signal.aborted) stopReason ??= "connector.timeout";
 
     // 2. Cascata de enriquecimento (JSON-LD → seletores → fila de LLM) nos itens sem descrição útil.
-    const pending = [...bySource.values()].flatMap((state) => state.items.map((item, index) => ({ state, index }))).filter(({ state, index }) => needsEnrichment(state.items[index]!));
+    const pending = [...bySource.values()].flatMap((state) => state.items.map((_item, index) => ({ state, index }))).filter(({ state, index }) => needsEnrichment(state.items[index]!));
     const budgeted = pending.slice(0, limits.max_enrichments);
     for (const { state, index } of pending.slice(limits.max_enrichments)) { stages.limit += 1; llmQueue.push({ item: state.items[index]!, reason: "connector.enrichment.limit" }); }
     const done = new Set<typeof budgeted[number]>();

@@ -14,7 +14,7 @@
     "test:py": "python3 -m unittest discover -s hermes/native-plugin",
     "test:ui": "npm run build && playwright test",
     "test:all": "npm test && npm run test:e2e",
-    "lint": "biome lint .",
+    "lint": "biome lint --error-on-warnings .",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck:web && tsc -p tsconfig.ui.json",
     "start": "node dist/src/server.js",
     "dev": "npm run build && node dist/src/server.js",

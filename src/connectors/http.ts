@@ -186,7 +186,7 @@ export class ConnectorHttpClient {
           method: "GET", redirect: "manual", signal: controller.signal,
           headers: { "user-agent": this.userAgent, accept, "accept-language": "pt-BR,pt;q=0.9,en;q=0.8" }
         });
-      } catch (error) {
+      } catch {
         if (this.options.signal?.aborted) throw new ConnectorBudgetError("connector.timeout");
         state.nextAt = this.options.clock() + state.delayMs;
         if (attempt < this.options.maxRetries) continue;

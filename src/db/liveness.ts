@@ -80,7 +80,7 @@ export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; open
     const age = nowMs - time;
     return !Number.isNaN(time) && age <= LIVENESS_FRESH_MS && age >= -5 * 60_000;
   };
-  if (!job || job.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
+  if (job?.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
   const check = db.prepare("SELECT checked_at FROM job_liveness_checks WHERE job_id=? AND status='open' ORDER BY checked_at DESC LIMIT 1").get(job.id) as { checked_at: string } | undefined;
   if (check && fresh(check.checked_at)) return;
   const manual = db.prepare(`SELECT e.origin, p.selected_by FROM job_field_provenance p JOIN evidence_records e ON e.id = p.evidence_id
