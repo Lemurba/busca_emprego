@@ -160,13 +160,14 @@ function SalaryChart({ jobs, formatMoney, salaryLabel, monthlyRange, dominantCur
           const selected = isChartSelected("job", job.id);
           const description = `${job.title} · ${job.company}: ${salaryLabel(job)} (≈ ${formatMoney(range.max, currency)}/mês)`;
           return (
-            <button key={job.id} class={`salary-column chart-control ${selected ? "selected" : ""}`} type="button" data-chart-filter-type="job" data-chart-filter-value={job.id} data-chart-filter-label={job.title} data-tooltip={description} aria-label={description} aria-pressed={selected ? "true" : "false"}>
+            <button key={job.id} class={`salary-column chart-control ${selected ? "selected" : ""}`} type="button" data-chart-filter-type="job" data-chart-filter-value={job.id} data-chart-filter-label={job.title} data-tooltip={description} aria-pressed={selected ? "true" : "false"}>
               <span class="salary-value">{formatMoney(range.max, currency)}</span>
               <svg class="salary-plot" viewBox="0 0 40 100" preserveAspectRatio="none" aria-hidden="true">
                 <rect class="salary-range" x="14" y={100 - height} width="12" height={height} rx="3" />
                 <line class="salary-min-marker" x1="11" x2="29" y1={100 - minimumHeight} y2={100 - minimumHeight} />
               </svg>
-              <span class="salary-label"><strong>{job.company}</strong>{job.title}</span>
+              <span class="salary-label"><strong>{job.company}</strong> {job.title}</span>
+              <span class="visually-hidden">: {salaryLabel(job)}. Filtrar</span>
             </button>
           );
         })}
