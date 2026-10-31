@@ -1503,7 +1503,8 @@ function highlightedResume(content: string, report: FactReport) {
     html += `${escapeHtml(content.slice(cursor, mark.start))}<mark class="fact-mark ${mark.tone}" title="${escapeHtml(mark.title)}">${escapeHtml(content.slice(mark.start, mark.end))}</mark>`;
     cursor = mark.end;
   }
-  return `<div class="fact-preview" aria-label="Conteúdo do currículo com fatos destacados">${html}${escapeHtml(content.slice(cursor))}</div>`;
+  // Região rolável precisa ser focável para rolar pelo teclado (axe scrollable-region-focusable).
+  return `<div class="fact-preview" role="region" tabindex="0" aria-label="Conteúdo do currículo com fatos destacados">${html}${escapeHtml(content.slice(cursor))}</div>`;
 }
 
 function factChecklist(report: FactReport) {
