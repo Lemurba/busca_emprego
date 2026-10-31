@@ -1,12 +1,22 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.3/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**", "public/**/*.ts", "public/**/*.tsx", "public/**/*.js", "scripts/**", "test/**", "hermes/**/*.mjs", "hermes/**/*.js", "!!**/dist"]
+    "includes": [
+      "src/**",
+      "public/**/*.ts",
+      "public/**/*.tsx",
+      "public/**/*.js",
+      "scripts/**",
+      "test/**",
+      "hermes/**/*.mjs",
+      "hermes/**/*.js",
+      "!!**/dist"
+    ]
   },
   "formatter": {
     "enabled": false
@@ -27,8 +37,23 @@
         "noAssignInExpressions": "warn"
       },
       "correctness": {
-        "noInnerDeclarations": "warn"
+        "noInnerDeclarations": "warn",
+        "usePlaywrightValidDescribeCallback": "off"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "test/ui/**"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "usePlaywrightValidDescribeCallback": "error"
+          }
+        }
+      }
+    }
+  ]
 }

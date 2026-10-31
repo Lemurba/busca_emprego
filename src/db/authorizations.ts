@@ -268,6 +268,7 @@ function authorizationValidUntil(value: Record<string, unknown>) {
   if (value.paused_at || value.application_status === "awaiting_final_confirmation") {
     const lease = String(value.lease_expires_at ?? value.expires_at);
     const ttl = String(value.expires_at);
+    // biome-ignore lint/complexity/useMathMinMax: compara strings ISO 8601; Math.max daria NaN.
     return lease > ttl ? lease : ttl;
   }
   return String(value.lease_expires_at ?? value.expires_at);
