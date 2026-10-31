@@ -2,7 +2,8 @@
  * Página "Saúde das buscas" em Preact (antes `renderOperations()` em app.ts).
  *
  * Mesmas classes, textos e atributos `data-*` da versão em string: duplicatas
- * (`data-resolve-duplicate`), regras (`data-preference-rule`), "Reexibir" (`data-action`),
+ * (`data-resolve-duplicate`, `data-undo-duplicate`) e "Responder aqui" (`data-answer-question`),
+ * tratados em public/ops-actions.ts, regras (`data-preference-rule`), "Reexibir" (`data-action`),
  * troca de página (`data-page`) e o painel de automação (#32) continuam tratados pela
  * delegação de eventos do #view (`handleViewClick`/`handleAction`/`handleAutomationAction`).
  */
@@ -34,6 +35,7 @@ export type OperationsPageProps = {
 };
 
 const openQuestionStatuses = ["pending", "delivered", "delivery_failed"];
+const duplicateDecisionLabels: Record<string, string> = { merged: "Mesclada", distinct: "Marcada como diferente", dismissed: "Dispensada" };
 
 function plural(count: number, singular: string, pluralForm: string) {
   return count === 1 ? singular : pluralForm;
@@ -79,6 +81,7 @@ export function OperationsPage(props: OperationsPageProps) {
   const rules = data.preferences.rules.filter((rule) => rule.state !== "undone");
   const suppressedJobs = data.suppressedJobs ?? [];
   const openQuestions = data.humanQuestions.filter((question) => openQuestionStatuses.includes(question.status));
+  const recentDuplicates = data.recentDuplicateDecisions ?? [];
   return (
     <>
       <PageHeading
@@ -90,20 +93,24 @@ export function OperationsPage(props: OperationsPageProps) {
         <MetricCard text="Perfil ativo" value={profile ? `v${profile.version}` : "—"} note={profile ? `${facts.length} informações confirmadas` : "Confirmação necessária"} icon="◎" tone="teal" />
         <MetricCard text="Rodadas" value={data.rounds.length} note={`${data.rounds.filter((round) => round.status === "running").length} em execução`} icon="↻" tone="purple" />
         <MetricCard text="Duplicatas" value={data.possibleDuplicates.length} note="aguardando sua decisão" icon="≋" tone="orange" />
-        <MetricCard text="Perguntas" value={openQuestions.length} note="esperando resposta no Telegram" icon="?" tone="red" />
+        <MetricCard text="Perguntas" value={openQuestions.length} note="esperando sua resposta" icon="?" tone="red" />
       </div>
       <AutomationPanel automation={data.automation} jobLabel={(applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || "")} formatDate={formatDate} />
       <div class="dashboard-grid equal section-spaced">
         <ProfilePanel profile={profile} facts={facts} props={props} />
         <section class="panel">
-          <div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta no Telegram.</p></div></div>
+          <div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta, no Telegram ou aqui.</p></div></div>
           <div class="ops-list">
             {openQuestions.length ? openQuestions.map((question) => {
               const jobId = applicationJob.get(question.application_id);
+              const failed = question.status === "delivery_failed";
               return (
                 <article key={question.id} class="ops-item">
                   <div><strong>{question.question}</strong><span>{`${jobId ? jobName(jobId) : "Candidatura removida"} · ${props.questionStatusLabel(question.status)}`}</span></div>
-                  <span class={`status-pill ${question.status === "delivery_failed" ? "red" : "orange"}`}>Responda no Telegram</span>
+                  <div class="button-row">
+                    {failed ? <span class="status-pill red">Não chegou ao Telegram</span> : null}
+                    <button type="button" class={failed ? "primary-button" : "secondary-button"} data-answer-question={question.id}>Responder aqui</button>
+                  </div>
                 </article>
               );
             }) : <EmptyState title="Nenhuma pergunta pendente" detail="Nenhuma automação está esperando por você." />}
@@ -124,6 +131,20 @@ export function OperationsPage(props: OperationsPageProps) {
               </article>
             )) : <EmptyState title="Fila limpa" detail="Nenhuma possível duplicata pendente." />}
           </div>
+          {recentDuplicates.length ? (
+            <>
+              <h3 class="subsection-title">Decididas recentemente</h3>
+              <p class="muted-text">Mesclar não apaga vagas. Cada decisão pode ser desfeita por 24 horas.</p>
+              <div class="ops-list">
+                {recentDuplicates.map((duplicate) => (
+                  <article key={duplicate.id} class="ops-item">
+                    <div><strong>{jobName(duplicate.job_id)}</strong><span>{`${duplicateDecisionLabels[duplicate.status] ?? duplicate.status} com ${jobName(duplicate.candidate_job_id)} · desfazer até ${formatDate(duplicate.undo_until)}`}</span></div>
+                    <button type="button" class="secondary-button" data-undo-duplicate={duplicate.id}>Desfazer</button>
+                  </article>
+                ))}
+              </div>
+            </>
+          ) : null}
         </section>
         <section class="panel">
           <div class="section-head flush"><div><h2>Preferências aprendidas</h2><p>Criadas pelo seu “Não tenho interesse”. Pausar não apaga o histórico.</p></div></div>

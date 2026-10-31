@@ -3,12 +3,14 @@
  *
  * Mantém as mesmas classes, textos e atributos `data-*` da versão em string: os botões
  * Publicar/Versões/Editar/Novo agente continuam tratados pela delegação de eventos do
- * #view (`handleAction` em app.ts), sem handlers próprios aqui.
+ * #view (`handleAction` em app.ts; Publicar abre a revisão de public/agent-review.ts), sem
+ * handlers próprios aqui. A fila de enriquecimento é um painel autocontido.
  */
 import type { AgentConfig } from "../../app.js";
 import { appData } from "../app-state.js";
 import { EmptyState } from "../components/empty-state.js";
 import { PageHeading } from "../components/page-heading.js";
+import { EnrichmentQueuePanel, type EnrichmentQueueDeps } from "./enrichment-queue-panel.js";
 
 /** Vocabulário que continua definido em app.ts (traduções de enums e nomes de fontes). */
 export type AgentsPageProps = {
@@ -16,9 +18,11 @@ export type AgentsPageProps = {
   roleLabel: (role: string) => string;
   sourceName: (sourceId: string) => string;
   fieldName: (field: string) => string;
+  /** Painel autocontido da fila de enriquecimento (busca e fecha itens por conta própria). */
+  queue: EnrichmentQueueDeps;
 };
 
-function AgentCard({ agent, roleLabel, sourceName, fieldName }: { agent: AgentConfig } & Omit<AgentsPageProps, "title">) {
+function AgentCard({ agent, roleLabel, sourceName, fieldName }: { agent: AgentConfig } & Omit<AgentsPageProps, "title" | "queue">) {
   return (
     <article class="company-card agent-card">
       <div class="company-top">
@@ -54,7 +58,7 @@ function AgentCard({ agent, roleLabel, sourceName, fieldName }: { agent: AgentCo
   );
 }
 
-export function AgentsPage({ title, roleLabel, sourceName, fieldName }: AgentsPageProps) {
+export function AgentsPage({ title, roleLabel, sourceName, fieldName, queue }: AgentsPageProps) {
   const agents = appData().agentConfigs;
   const active = agents.filter((agent) => agent.enabled).length;
   return (
@@ -69,6 +73,7 @@ export function AgentsPage({ title, roleLabel, sourceName, fieldName }: AgentsPa
           ? agents.map((agent) => <AgentCard key={agent.id} agent={agent} roleLabel={roleLabel} sourceName={sourceName} fieldName={fieldName} />)
           : <EmptyState title="Nenhum agente configurado" detail="Crie um coletor ou um agente que complete dados de vagas." />}
       </div>
+      <EnrichmentQueuePanel {...queue} />
     </>
   );
 }
