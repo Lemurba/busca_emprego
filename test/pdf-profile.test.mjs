@@ -286,3 +286,74 @@ test("título com conteúdo na mesma linha e cabeçalho sem nome", async () => {
   assert.equal(facts.some((fact) => fact.type === "full_name"), false, "\"Currículo de João\" não é nome");
   assert.equal(facts.some((fact) => fact.type === "target_role"), false);
 });
+
+test("detalhe \"• Tecnologias: ...\" dentro da experiência não abre seção nova", async () => {
+  const bytes = await resumePdf([[
+    "Ana Lima",
+    "Experiência",
+    "Empresa A — Desenvolvedora (2020 - atual)",
+    "• Construiu APIs em Node.js",
+    "• Stack: Node.js, PostgreSQL, AWS",
+    "Empresa B — Estagiária (2018 - 2020)",
+    "• Tecnologias: Java, Spring",
+    "Projeto: Migração para nuvem",
+    "Empresa C — Analista (2016 - 2018)",
+    "Formação",
+    "USP (2012 - 2016)",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  const values = (type) => facts.filter((fact) => fact.type === type).map((fact) => fact.value);
+  const experience = values("experience");
+  assert.equal(experience.length, 3, JSON.stringify(experience));
+  assert.match(experience[0], /^Empresa A.*Stack: Node\.js, PostgreSQL, AWS$/u);
+  assert.match(experience[1], /^Empresa B.*Tecnologias: Java, Spring; Projeto: Migração para nuvem$/u);
+  assert.match(experience[2], /^Empresa C/u);
+  assert.deepEqual(values("skills"), [], "detalhe de entrada não vira competência");
+  assert.deepEqual(values("projects"), []);
+  assert.deepEqual(values("education"), ["USP (2012 - 2016)"]);
+});
+
+test("formato \"Cargo / Empresa | período\": o cargo seguinte abre a próxima entrada", async () => {
+  const bytes = await resumePdf([[
+    "Experiência",
+    "Desenvolvedor Backend",
+    "Empresa X | 2020 - atual",
+    "Analista de Sistemas",
+    "Empresa Y | 2017 - 2020",
+  ]]);
+  const experience = proposeFacts(extractPdfText(bytes)).filter((fact) => fact.type === "experience").map((fact) => fact.value);
+  assert.deepEqual(experience, ["Desenvolvedor Backend; Empresa X | 2020 - atual", "Analista de Sistemas; Empresa Y | 2017 - 2020"]);
+});
+
+test("Cursos vira certificações, um fato por item; Objetivo no resumo não o divide", async () => {
+  const bytes = await resumePdf([[
+    "Ana Lima",
+    "Resumo",
+    "Desenvolvedora backend.",
+    "Objetivo: atuar com plataformas de dados.",
+    "Cursos",
+    "AWS Cloud Practitioner (2023)",
+    "AWS SAA, CKA; Scrum Foundations, 2022",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  const values = (type) => facts.filter((fact) => fact.type === type).map((fact) => fact.value);
+  assert.deepEqual(values("summary"), ["Desenvolvedora backend. Objetivo: atuar com plataformas de dados."]);
+  assert.deepEqual(values("certifications"), ["AWS Cloud Practitioner (2023)", "AWS SAA", "CKA", "Scrum Foundations, 2022"]);
+});
+
+test("chaves do Object.prototype não são títulos e localização não vira cargo", async () => {
+  const bytes = await resumePdf([[
+    "Maria Souza",
+    "São Paulo, SP",
+    "maria@example.com",
+    "Habilidades",
+    "Java",
+    "Constructor",
+    "toString: Kotlin",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  assert.ok(facts.every((fact) => /^[a-z_]+$/u.test(fact.type)), JSON.stringify(facts.map((fact) => fact.type)));
+  assert.deepEqual(facts.filter((fact) => fact.type === "skills").map((fact) => fact.value), ["Java", "Constructor", "toString: Kotlin"]);
+  assert.equal(facts.find((fact) => fact.type === "full_name")?.value, "Maria Souza");
+  assert.equal(facts.some((fact) => fact.type === "target_role"), false, "\"São Paulo, SP\" é localização");
+});

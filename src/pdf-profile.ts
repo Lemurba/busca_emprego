@@ -481,19 +481,22 @@ export function findPhones(text: string): string[] {
 
 type SectionKind = "summary" | "skills" | "experience" | "education" | "certifications" | "languages" | "projects";
 
-/** Títulos reconhecidos (sem acento, minúsculos). `null` = seção sem fatos (só encerra a anterior). */
-const SECTION_HEADINGS: Record<string, SectionKind | null> = {};
+/**
+ * Títulos reconhecidos (sem acento, minúsculos). `null` = seção sem fatos (só encerra a anterior).
+ * Map, e não objeto literal: "constructor" ou "toString" num currículo não são títulos.
+ */
+const SECTION_HEADINGS = new Map<string, SectionKind | null>();
 const sectionHeadingAliases: Array<[SectionKind | null, string[]]> = [
   ["summary", ["resumo", "resumo profissional", "sobre", "sobre mim", "perfil", "perfil profissional", "objetivo", "objetivo profissional", "summary", "professional summary", "about", "about me", "profile", "objective"]],
   ["skills", ["competencias", "competencias tecnicas", "habilidades", "habilidades tecnicas", "conhecimentos", "conhecimentos tecnicos", "tecnologias", "ferramentas", "stack", "skills", "technical skills", "hard skills", "soft skills"]],
   ["experience", ["experiencia", "experiencias", "experiencia profissional", "experiencias profissionais", "historico profissional", "trajetoria profissional", "experience", "work experience", "professional experience", "employment history", "work history"]],
   ["education", ["formacao", "formacao academica", "educacao", "escolaridade", "education", "academic background"]],
-  ["certifications", ["certificacao", "certificacoes", "certificados", "cursos e certificacoes", "certificacoes e cursos", "licencas e certificados", "certification", "certifications", "licenses and certifications"]],
+  ["certifications", ["certificacao", "certificacoes", "certificados", "cursos e certificacoes", "certificacoes e cursos", "cursos", "cursos complementares", "cursos livres", "licencas e certificados", "certification", "certifications", "licenses and certifications"]],
   ["languages", ["idioma", "idiomas", "linguas", "language", "languages"]],
   ["projects", ["projeto", "projetos", "projetos relevantes", "project", "projects"]],
-  [null, ["contato", "contatos", "contact", "dados pessoais", "informacoes pessoais", "informacoes adicionais", "additional information", "interesses", "interests", "referencias", "references", "voluntariado", "volunteering", "premios", "awards", "publicacoes", "publications", "cursos", "outros"]],
+  [null, ["contato", "contatos", "contact", "dados pessoais", "informacoes pessoais", "informacoes adicionais", "additional information", "interesses", "interests", "referencias", "references", "voluntariado", "volunteering", "premios", "awards", "publicacoes", "publications", "outros"]],
 ];
-for (const [kind, names] of sectionHeadingAliases) for (const name of names) SECTION_HEADINGS[name] = kind;
+for (const [kind, names] of sectionHeadingAliases) for (const name of names) SECTION_HEADINGS.set(name, kind);
 
 const BULLET = /^\s*(?:[•·▪▫◦‣⁃●○■□►▶✓✔*–—-]|\d{1,2}[.)])\s+/u;
 const LIST_SEPARATOR = /\s*[,;|•·▪●]\s*/u;
@@ -505,14 +508,25 @@ function headingKey(value: string): string {
     .replace(/^[\s#*_=>•·-]+|[\s*_:=•·-]+$/gu, "").replace(/\s+/gu, " ").trim();
 }
 
-/** Linha de título: a linha inteira é um nome de seção, ou "Título: conteúdo" na mesma linha. */
-function matchHeading(line: string): { kind: SectionKind | null; rest: string } | null {
+/** Seções de entradas com detalhes: "Tecnologias: ..." ou "Projeto: ..." dentro delas é detalhe da entrada. */
+const ENTRY_SECTIONS = new Set<SectionKind | null | undefined>(["experience", "education", "projects"]);
+
+/**
+ * Linha de título: a linha inteira é um nome de seção, ou "Título: conteúdo" na mesma linha.
+ * Linha com marcador nunca é título ("• Stack: Node.js" é detalhe). A forma "Título: conteúdo"
+ * só vale fora de seções de entradas e, dentro de uma seção, só se mudar de tipo de seção
+ * ("Objetivo: ..." no meio do resumo continua o resumo).
+ */
+function matchHeading(line: string, current: SectionKind | null | undefined): { kind: SectionKind | null; rest: string } | null {
+  if (BULLET.test(line)) return null;
   const whole = headingKey(line);
-  if (whole.length <= 50 && whole in SECTION_HEADINGS) return { kind: SECTION_HEADINGS[whole]!, rest: "" };
+  if (whole.length <= 50 && SECTION_HEADINGS.has(whole)) return { kind: SECTION_HEADINGS.get(whole)!, rest: "" };
+  if (ENTRY_SECTIONS.has(current)) return null;
   const colon = line.indexOf(":");
   if (colon > 0 && colon <= 40) {
     const key = headingKey(line.slice(0, colon));
-    if (key in SECTION_HEADINGS) return { kind: SECTION_HEADINGS[key]!, rest: line.slice(colon + 1).trim() };
+    const kind = SECTION_HEADINGS.get(key);
+    if (kind !== undefined && (current === undefined || kind !== current)) return { kind, rest: line.slice(colon + 1).trim() };
   }
   return null;
 }
@@ -521,15 +535,23 @@ interface SourceLine { text: string; page: number; pageText: string }
 
 const stripBullet = (line: string) => line.replace(BULLET, "").trim();
 
-/** Itens de lista curtos (competências, idiomas): um por linha, e linhas com separadores são divididas. */
-function listItems(lines: SourceLine[]): SourceLine[] {
+/**
+ * Itens de lista curtos (competências, idiomas, certificações): um por linha, e linhas com
+ * separadores são divididas. Com `keepYears`, um pedaço só de números ("AWS SAA, 2023") fica
+ * junto do item anterior em vez de virar um fato próprio.
+ */
+function listItems(lines: SourceLine[], keepYears = false): SourceLine[] {
   const items: SourceLine[] = [];
   for (const line of lines) {
     // Vírgulas dentro de parênteses ("Inglês (avançado, C1)") não separam itens.
+    const lineStart = items.length;
     const protectedText = stripBullet(line.text).replace(/\([^)]*\)/gu, (group) => group.replace(/[,;|]/gu, "\u0000"));
     for (const part of protectedText.split(LIST_SEPARATOR)) {
       const value = part.replaceAll("\u0000", ",").replace(/[.;,]+$/u, "").trim();
-      if (value && /[\p{L}\p{N}]/u.test(value)) items.push({ ...line, text: value });
+      if (!value || !/[\p{L}\p{N}]/u.test(value)) continue;
+      const previous = items.length > lineStart ? items.at(-1) : undefined;
+      if (keepYears && !/\p{L}/u.test(value) && previous) previous.text = `${previous.text}, ${value}`;
+      else items.push({ ...line, text: value });
     }
   }
   return items;
@@ -538,18 +560,26 @@ function listItems(lines: SourceLine[]): SourceLine[] {
 /**
  * Entradas de várias linhas (experiência, formação, projetos): uma linha de cabeçalho (sem marcador)
  * abre a entrada e os marcadores seguintes são detalhes dela. Uma nova linha sem marcador depois de
- * detalhes, ou uma segunda linha com ano/período, abre a próxima entrada.
+ * detalhes, ou uma segunda linha com ano/período, abre a próxima entrada. No formato
+ * "Cargo / Empresa | período", uma linha sem ano seguida de uma linha com ano (ambas sem marcador)
+ * abre a próxima entrada quando a atual já tem o seu período.
  */
+const DETAIL_LABEL = /^[\p{L} ]{2,30}:\s+\S/u;
+
 function entryItems(lines: SourceLine[]): Array<{ first: SourceLine; parts: string[] }> {
   const entries: Array<{ first: SourceLine; parts: string[]; hasBullets: boolean; hasYear: boolean }> = [];
   const allBullets = lines.length > 1 && lines.every((line) => BULLET.test(line.text));
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const bullet = BULLET.test(line.text);
     const text = stripBullet(line.text);
     if (!text) continue;
     const year = YEAR_OR_CURRENT.test(text);
     const current = entries.at(-1);
-    const startsNew = !current || (allBullets ? bullet : !bullet && (current.hasBullets || (year && current.hasYear)));
+    const next = lines[index + 1];
+    const titleBeforePeriod = !year && !!next && !BULLET.test(next.text) && YEAR_OR_CURRENT.test(stripBullet(next.text));
+    // "Projeto: ...", "Tecnologias: ..." sem marcador também são detalhes da entrada atual.
+    const labeled = DETAIL_LABEL.test(text);
+    const startsNew = !current || (allBullets ? bullet : !bullet && !labeled && (current.hasBullets || (year && current.hasYear) || (titleBeforePeriod && current.hasYear)));
     if (startsNew) entries.push({ first: line, parts: [text], hasBullets: false, hasYear: year });
     else {
       current.parts.push(text);
@@ -570,10 +600,14 @@ function looksLikeName(line: string): boolean {
   return words.every((word) => /^(?:d[aeo]s?|e|van|von|del|di)$/u.test(word) || /^\p{Lu}[\p{L}'’.-]*$/u.test(word));
 }
 
-/** Cargo provável: linha curta de texto, sem contato, logo depois do nome. */
+/** Localização (não cargo): "São Paulo, SP", "Brasil", "Remoto"; qualquer vírgula já descarta. */
+const LOCATION_LIKE = /,|(?<!\p{L})(?:brasil|brazil|remoto|remote|h[ií]brido|hybrid)(?!\p{L})/iu;
+const STATE_SUFFIX = /\s[-–/]\s?\p{Lu}{2}$/u;
+
+/** Cargo provável: linha curta de texto, sem contato nem localização, logo depois do nome. */
 function looksLikeRole(line: string): string | null {
   const value = line.split(/\s+[|•·]\s+/u)[0]!.trim();
-  if (!value || value.length > 80 || CONTACT_LIKE.test(value) || !/\p{L}{3}/u.test(value)) return null;
+  if (!value || value.length > 80 || CONTACT_LIKE.test(value) || LOCATION_LIKE.test(value) || STATE_SUFFIX.test(value) || !/\p{L}{3}/u.test(value)) return null;
   if (value.split(/\s+/u).length > 10) return null;
   return value;
 }
@@ -603,7 +637,7 @@ export function proposeFacts(extraction: PdfExtraction): ProposedFact[] {
   const header: SourceLine[] = [];
   const sections: Array<{ kind: SectionKind | null; lines: SourceLine[] }> = [];
   for (const line of lines) {
-    const heading = matchHeading(line.text);
+    const heading = matchHeading(line.text, sections.at(-1)?.kind);
     if (heading) {
       sections.push({ kind: heading.kind, lines: heading.rest ? [{ ...line, text: heading.rest }] : [] });
       continue;
@@ -632,7 +666,7 @@ export function proposeFacts(extraction: PdfExtraction): ProposedFact[] {
     } else if (kind === "skills" || kind === "languages") {
       for (const item of listItems(section.lines)) add(kind, item.text, { page: item.page, pageText: item.pageText, anchor: item.text }, 0.75);
     } else if (kind === "certifications") {
-      for (const line of section.lines) add(kind, stripBullet(line.text), at(line), 0.75);
+      for (const item of listItems(section.lines, true)) add(kind, item.text, { page: item.page, pageText: item.pageText, anchor: item.text }, 0.75);
     } else {
       for (const entry of entryItems(section.lines)) add(kind, entry.parts.join("; "), at(entry.first), 0.75);
     }
