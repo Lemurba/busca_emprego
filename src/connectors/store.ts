@@ -102,6 +102,8 @@ export function recordConnectorCompanyRun(id: string, status: "ok" | "failed" | 
 }
 
 export function queueLlmEnrichment(input: { projectId: string; sourceId: string; sourceJobId: string | null; jobUrl: string; title: string; company: string; roundId: string; reason: string }) {
+  // O painel vira essa URL em link: só HTTP(S) entra na fila (o resto é ignorado, sem derrubar a rodada).
+  if (!/^https?:\/\//iu.test(input.jobUrl)) return null;
   const id = idFor(`connector-enrichment|${input.projectId}|${input.sourceId}|${input.sourceJobId ?? input.jobUrl}`);
   const timestamp = now();
   // Reaparecer numa rodada nova não reabre item já tratado; só atualiza a rodada e o motivo.
@@ -112,12 +114,31 @@ export function queueLlmEnrichment(input: { projectId: string; sourceId: string;
   return id;
 }
 
-export function listLlmEnrichmentQueue(projectId = "busca-emprego", status = "pending") {
-  return db.prepare("SELECT * FROM connector_enrichment_queue WHERE project_id=? AND status=? ORDER BY created_at LIMIT 500").all(projectId, status);
+/**
+ * Itens da fila de enriquecimento por LLM. `job_id` liga o item à vaga já ingerida, para o
+ * agente usar radar_enrich_job direto: pela identidade na fonte (source_id + source_job_id,
+ * coberta por idx_occurrences_identity) e, quando ela não acha, pela URL observada na
+ * ocorrência ou gravada na vaga.
+ */
+export function listLlmEnrichmentQueue(projectId = "busca-emprego", status = "pending", limit = 500) {
+  // COALESCE para no primeiro valor não nulo: a busca por URL só roda quando a identidade falha.
+  return db.prepare(`SELECT q.*, COALESCE(
+      (SELECT o.job_id FROM job_occurrences o WHERE q.source_job_id IS NOT NULL AND o.source_id=q.source_id AND o.source_job_id=q.source_job_id AND o.project_id=q.project_id ORDER BY o.observed_at DESC LIMIT 1),
+      (SELECT o.job_id FROM job_occurrences o WHERE o.project_id=q.project_id AND o.canonical_url=q.job_url ORDER BY o.observed_at DESC LIMIT 1),
+      (SELECT j.id FROM jobs j WHERE j.project_id=q.project_id AND (j.canonical_url=q.job_url OR j.job_url=q.job_url) LIMIT 1)) AS job_id
+    FROM connector_enrichment_queue q WHERE q.project_id=? AND q.status=? ORDER BY q.created_at LIMIT ?`).all(projectId, status, Math.max(1, Math.min(500, Math.trunc(limit) || 500)));
 }
 
-export function resolveLlmEnrichment(id: string, status: "done" | "dismissed", projectId = "busca-emprego") {
-  const result = db.prepare("UPDATE connector_enrichment_queue SET status=?,updated_at=? WHERE id=? AND project_id=?").run(status, now(), id, projectId);
-  if (!result.changes) throw new Error("connector.enrichment.not_found");
+/**
+ * Fecha um item pendente da fila (`done` = enriquecido, `dismissed` = descartado). Item já
+ * tratado não é reaberto nem trocado de estado; a decisão vai para a auditoria com o ator.
+ */
+export function resolveLlmEnrichment(id: string, status: "done" | "dismissed", projectId = "busca-emprego", actor = "system") {
+  if (status !== "done" && status !== "dismissed") throw new Error("connector.enrichment.status.invalid");
+  const exists = db.prepare("SELECT status FROM connector_enrichment_queue WHERE id=? AND project_id=?").get(id, projectId) as { status: string } | undefined;
+  if (!exists) throw new Error("connector.enrichment.not_found");
+  const result = db.prepare("UPDATE connector_enrichment_queue SET status=?,updated_at=? WHERE id=? AND project_id=? AND status='pending'").run(status, now(), id, projectId);
+  if (!result.changes) throw new Error("connector.enrichment.already_resolved");
+  db.prepare("INSERT INTO audit_events (entity_type, entity_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)").run("connector_enrichment", id, "resolved", JSON.stringify({ status, actor }), now());
   return { id, status };
 }

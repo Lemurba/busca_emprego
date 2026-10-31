@@ -113,6 +113,10 @@ try {
     await refusedToService("POST", "/api/agents", { name: "Agente do serviço", role_type: "custom" });
     await refusedToService("POST", "/api/agents/qualquer/publish", { version_id: "v" });
     await refusedToService("POST", "/api/agents/qualquer/rollback", { version_id: "v" });
+    await refusedToService("POST", "/api/agents/qualquer/discard-draft", { version_id: "v" });
+    // Responder pergunta pelo painel e desfazer decisão de duplicata também são decisões humanas.
+    await refusedToService("POST", "/api/human-questions/qualquer/respond", { action: "answer", answer: "Sim" });
+    await refusedToService("POST", "/api/possible-duplicates/qualquer/undo", {});
     // QA-04/TD-07: revisão de fato do perfil, mescla de duplicata, conflito de enriquecimento e exclusão do PDF-base.
     await refusedToService("POST", "/api/profiles/qualquer/facts/fato/review", { state: "confirmed" });
     await refusedToService("POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" });
@@ -135,6 +139,8 @@ try {
       ["POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" }],
       ["POST", "/api/field-conflicts/qualquer/resolve", { choice: "candidate" }],
       ["DELETE", "/api/base-resumes/qualquer", {}],
+      ["POST", "/api/human-questions/qualquer/respond", { action: "answer", answer: "Sim" }],
+      ["POST", "/api/possible-duplicates/qualquer/undo", {}],
     ]) assert.equal((await human(method, path, body)).status, 404, `${method} ${path} com a sessão chega ao recurso`);
   });
 

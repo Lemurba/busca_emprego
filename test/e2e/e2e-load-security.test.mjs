@@ -87,6 +87,15 @@ try {
         assert.equal(response.status, 403, `${method} ${path} must be disabled by default`);
         assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
       }
+      // Responder/pular pelo painel retomaria a execução: com a automação desligada, recusado.
+      // Seguir manualmente continua valendo (chega à busca da pergunta, que não existe aqui).
+      for (const action of ["answer", "skip"]) {
+        const response = await fetch(`${disabledBase}/api/human-questions/qualquer/respond`, { method: "POST", headers: { ...headers, cookie: disabledCookie }, body: JSON.stringify({ action, answer: "Sim" }) });
+        assert.equal(response.status, 403, `respond ${action} must be disabled`);
+        assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
+      }
+      const manual = await fetch(`${disabledBase}/api/human-questions/qualquer/respond`, { method: "POST", headers: { ...headers, cookie: disabledCookie }, body: JSON.stringify({ action: "manual" }) });
+      assert.equal(manual.status, 404);
       // #32: autorizar é decisão humana — o token de serviço é recusado antes do gate.
       const authorize = await fetch(`${disabledBase}/api/applications/missing/authorize-auto`, { method: "POST", headers: authHeaders, body: "{}" });
       assert.equal(authorize.status, 403);
@@ -114,7 +123,14 @@ try {
     const draft = await draftResponse.json();
     assert.ok(draft.draft_version_id);
     assert.equal((await request(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id }) })).status, 403, "publishing an agent is a human gate");
-    assert.equal((await human(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id }) })).status, 200);
+    // Rascunho do token de serviço: a publicação humana exige o checksum do diff revisado.
+    assert.equal((await human(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id }) })).status, 409, "draft not created by a human needs a reviewed diff");
+    const diffResponse = await human(`/api/agents/${agent.id}/versions/${draft.draft_version_id}/diff`);
+    const diff = await diffResponse.json();
+    assert.equal(diffResponse.status, 200, JSON.stringify(diff));
+    assert.equal(diff.origin, "service");
+    assert.deepEqual(diff.changes, [{ field: "prompt", before: "v1", after: "v2" }]);
+    assert.equal((await human(`/api/agents/${agent.id}/publish`, { method: "POST", body: JSON.stringify({ version_id: draft.draft_version_id, checksum: diff.checksum }) })).status, 200);
 
     const total = 500;
     const workers = 20;

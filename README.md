@@ -105,7 +105,8 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `POST` | `/api/applications/{id}/questions` | Pausar candidatura por dúvida humana correlacionada |
 | `GET` / `POST` | `/api/sources` | Configurar fontes e a referência de login (sem segredo) |
 | `GET` | `/api/agents/{id}/versions` | Consultar histórico imutável de configuração |
-| `POST` | `/api/agents/{id}/publish` | Publicar um rascunho para novas execuções |
+| `GET` | `/api/agents/{id}/versions/{versionId}/diff` | Comparar um rascunho com a versão publicada (origem e checksum) |
+| `POST` | `/api/agents/{id}/publish` | Publicar um rascunho revisado para novas execuções |
 | `POST` | `/api/agents/{id}/rollback` | Republicar uma configuração anterior como nova versão |
 | `GET` | `/api/jobs/{id}/provenance` | Consultar evidências e conflitos por campo |
 

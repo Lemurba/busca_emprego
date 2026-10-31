@@ -203,7 +203,11 @@ export const schemas = {
   humanDelivery: z.strictObject({ delivered: z.boolean().optional(), message_ref: identity.nullable().optional(), error: optShort }),
   agentCreate: z.strictObject(agentFields),
   agentPatch: z.strictObject(agentFields),
+  // Resposta dada no dashboard (portão humano): a identidade é a sessão, nunca o corpo.
+  humanDashboardAnswer: z.strictObject({ action: z.enum(["answer", "skip", "manual", "stop"]).optional(), answer: z.string().max(1_000).optional() }),
   agentVersion: versionRef,
+  // Publicação: `checksum` é o da versão revisada no diff (obrigatório para propostas que não são humanas).
+  agentPublish: z.strictObject({ version_id: z.string().max(300).optional(), checksum: z.string().max(128).optional() }),
   sourceUpsert: z.strictObject(sourceFields),
   sourceReadiness: z.strictObject({ status: optShort, reason: optShort }),
   resumeCreate: z.strictObject(resumeFields),

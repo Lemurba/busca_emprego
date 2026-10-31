@@ -28,11 +28,12 @@ Interesse, `APROVO` e `AUTORIZO` são decisões humanas, e o servidor garante is
 | `POST /api/applications/{id}/authorize-auto`, `/revoke-auto`, `/select-manual` | `AUTORIZO`, revogação, modo manual |
 | `POST /api/profiles/{id}/confirm`, `/facts/{factId}/review` | confirmar perfil e revisar cada fato (usados nos currículos e na nota) |
 | `POST /api/profiles`, `POST /api/profiles/{id}/facts`, `PATCH /api/profiles/{id}` com fato `origin: "user"` ou `state: "confirmed"` | declarar fato em nome do usuário ou gravá-lo já confirmado |
-| `POST /api/possible-duplicates/{id}/resolve` | mesclar/separar duplicatas (mesclar é irreversível) |
+| `POST /api/possible-duplicates/{id}/resolve`, `/undo` | mesclar/separar duplicatas e desfazer a decisão (24 h; mesclar só registra a decisão, nenhuma vaga é apagada) |
+| `POST /api/human-questions/{id}/respond` | responder pelo painel a pergunta do executor (inclusive a que não chegou ao Telegram) |
 | `POST /api/field-conflicts/{id}/resolve` | escolher entre o valor atual e o do enriquecimento |
 | `DELETE /api/base-resumes/{id}` | excluir o currículo-base (PDF) |
 | `POST /api/sources/{id}/terms` | aceitar termos de uso de uma fonte |
-| `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback` | criar agente (nasce publicado) e publicar permissões e prompt |
+| `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback`, `/discard-draft` | criar agente (nasce publicado), publicar permissões e prompt (rascunho que não é humano só com o checksum do diff revisado) e descartar rascunho |
 
 O token de serviço continua servindo às rotas de automação (descoberta, enriquecimento, rascunho de currículo, revisão ATS, nota, fila autorizada, claim/submit/fail, perguntas humanas). No perfil ele só **propõe**: fato sem `origin` vindo do serviço (ou de um agente MCP) é gravado como `derived`/`proposed` com o trecho "Informado por service:<nome>", e a resposta de entrevista repassada pelo Hermes (`POST /api/profiles/{id}/interview`) vira fato proposto, sem sobrescrever a declaração humana. O núcleo também recusa revisão e confirmação de perfil a atores `service:*`/`agent:*` (`profile.fact.review.forbidden`, `profile.confirm.forbidden`).
 

@@ -59,6 +59,8 @@ const SAFE_MESSAGES: Record<string, string> = {
   "agent.jobs.create_existing.forbidden": "A vaga já existe; use o enriquecimento.",
   "agent.jobs.enrich.forbidden": "O agente não tem permissão para enriquecer vagas.",
   "agent.job_field.forbidden": "Campo fora dos campos editáveis do agente.",
+  "connector.enrichment.not_found": "Item da fila de enriquecimento não encontrado.",
+  "connector.enrichment.already_resolved": "Este item da fila de enriquecimento já foi fechado.",
   "agent.domain.forbidden": "Domínio fora da lista permitida do agente.",
   "agent.source_url.required": "Informe a URL de origem da vaga.",
   "agent.prompt_optimization.disabled": "Otimização de prompt desativada para este agente.",
@@ -556,6 +558,24 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     requireAllowedDomain(agent, evidence_source_url);
     const enriched = await api.post(`/api/agents/${segment(agent.id)}/jobs/${segment(job_id)}/enrichment`, { patch, evidence_source_url, evidence_excerpt }, actingAs(agent));
     return { result: { ...enriched, job: withUntrustedContent(enriched.job) } };
+  }));
+
+  if (has("radar_list_enrichment_queue")) server.registerTool("radar_list_enrichment_queue", {
+    description: "Lista a fila de enriquecimento por LLM: vagas que a coleta determinística não conseguiu completar (escopo jobs.enrich). Cada item traz job_id (quando a vaga já foi ingerida), job_url e o motivo. Enriqueça com radar_enrich_job e feche o item com radar_resolve_enrichment.",
+    inputSchema: { agent_id: agentId, limit: z.number().int().min(1).max(100).default(25) },
+    annotations: { readOnlyHint: true },
+  }, async ({ agent_id, limit }) => execute(async () => {
+    await agentFor(agent_id, "jobs.enrich");
+    // A API devolve os pendentes em ordem de chegada; o limite da ferramenta corta no cliente.
+    return { items: (await api.get<Json[]>("/api/connectors/enrichment-queue")).slice(0, limit) };
+  }));
+
+  if (has("radar_resolve_enrichment")) server.registerTool("radar_resolve_enrichment", {
+    description: "Fecha um item pendente da fila de enriquecimento (escopo jobs.enrich): done depois de enriquecer a vaga com evidência; dismissed quando não há dado verificável. Item já fechado não é reaberto.",
+    inputSchema: { agent_id: agentId, item_id: z.string().min(1).max(120), status: z.enum(["done", "dismissed"]) },
+  }, async ({ agent_id, item_id, status }) => execute(async () => {
+    const agent = await agentFor(agent_id, "jobs.enrich");
+    return { item: await api.post(`/api/connectors/enrichment-queue/${segment(item_id)}`, { status }, actingAs(agent)) };
   }));
 
   if (has("radar_create_resume")) server.registerTool("radar_create_resume", {

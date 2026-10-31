@@ -223,7 +223,7 @@ export async function runConnectorCollection(options: ConnectorRunOptions = {}) 
     agent_name: "Coleta determinística (conectores)", status: result.ok ? "completed" : "failed", found_count: accepted,
     message: `Rodada ${round.id}: ${accepted} vagas aceitas, ${client.requests} requisições, ${llmQueue.length} para enriquecimento por LLM${stopReason ? `, parada: ${stopReason}` : ""}.`,
     agent_id: options.agentId ?? null, cost: client.cost, latency_ms: result.latency_ms, model_effective: "none"
-  });
+  }, { enforceLimits: false }); // a rodada já aplicou os próprios limites (stop_reason); ver #16
   return result;
 }
 

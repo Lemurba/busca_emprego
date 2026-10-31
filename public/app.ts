@@ -14,6 +14,8 @@ import { type SettingsPref, SettingsPage } from "./ui/pages/settings-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
 import { type AutomationOverview, handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
+import { handleAgentReviewAction } from "./agent-review.js";
+import { type HumanQuestion, handleOpsAction } from "./ops-actions.js";
 
 type Job = {
   id: string;
@@ -88,7 +90,7 @@ type SourceConfig = { id: string; name: string; source_type: string; domain: str
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
 type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; automation?: AutomationOverview; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; recentDuplicateDecisions?: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; automation?: AutomationOverview; stats: Record<string, any> };
 
 /* ------------------------------------------------------------------ */
 /* Vocabulário: um único lugar traduz cada enum para a interface.      */
@@ -135,7 +137,7 @@ const authLabels: Record<string, string> = { none: "Sem login", bearer: "Token (
 const roundStatusLabels: Record<string, string> = { running: "Em execução", completed: "Concluída", failed: "Falhou", cancelled: "Cancelada", queued: "Na fila", partial: "Parcial" };
 const roundStatusTone: Record<string, string> = { completed: "teal", failed: "red", cancelled: "red" };
 const questionStatusLabels: Record<string, string> = { pending: "Aguardando envio", delivered: "Enviada no Telegram", delivery_failed: "Falha no envio", answered: "Respondida" };
-const versionStatusLabels: Record<string, string> = { published: "Publicada", draft: "Rascunho", superseded: "Substituída", archived: "Arquivada" };
+const versionStatusLabels: Record<string, string> = { published: "Publicada", draft: "Rascunho", retired: "Substituída", superseded: "Substituída", archived: "Arquivada" };
 const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Bloqueada", configured: "Aguardando teste", pending: "Aguardando teste", degraded: "Instável" };
 const readinessTone: Record<string, string> = { ready: "teal", blocked: "red" };
 const profileStatusLabels: Record<string, string> = { confirmed: "Confirmado", draft: "Rascunho", needs_review: "Em revisão" };
@@ -612,7 +614,8 @@ const agentsPage = preactPage(AgentsPage, () => ({
   title: pageMeta.agents.label,
   roleLabel: (role: string) => label(roleLabels, role),
   sourceName: (source: string) => portalNames.get(source) ?? source,
-  fieldName: (field: string) => fieldLabels.get(field) ?? field
+  fieldName: (field: string) => fieldLabels.get(field) ?? field,
+  queue: { fetchJson, formatDate, toast, confirm: confirmDialog }
 }));
 const overviewPage = preactPage(OverviewPage, () => ({
   title: pageMeta.overview.label,
@@ -1225,9 +1228,34 @@ function showSourceModal(id?: string) {
     </div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar fonte</button></div></form>`);
 }
 
+function opsActionDeps() {
+  return {
+    escapeHtml, fetchJson, openDialog, confirmDialog, reload: () => loadData(), toast,
+    question: (id: string) => currentData().humanQuestions.find((item: HumanQuestion) => item.id === id && ["pending", "delivered", "delivery_failed"].includes(item.status)),
+    questionContext: (question: HumanQuestion) => {
+      const data = currentData();
+      const jobId = data.applications.find((application) => application.id === question.application_id)?.job_id;
+      const job = data.jobs.find((item) => item.id === jobId);
+      return `${job ? `${job.title} · ${job.company}` : "Candidatura removida"}${question.step ? ` · etapa: ${question.step}` : ""} · ${label(questionStatusLabels, question.status)}`;
+    }
+  };
+}
+
+function agentReviewDeps() {
+  return {
+    escapeHtml, fetchJson, openModal, closeModal, modalRoot, confirmDialog, reload: () => loadData(), toast, formatDate, actorLabel,
+    agentName: (agentId: string) => currentData().agentConfigs.find((agent) => agent.id === agentId)?.name ?? "agente",
+    fieldLabel: (field: string) => fieldLabels.get(field) ?? field
+  };
+}
+
+const versionOriginLabels: Record<string, string> = { human: "editada por você", coordinator: "proposta do coordenador", service: "enviada por automação" };
+
 async function showAgentHistory(agentId: string) {
-  const versions = await fetchJson<Array<{ id: string; version: number; status: string; checksum: string; created_at: string }>>(`/api/agents/${encodeURIComponent(agentId)}/versions`);
-  openModal("Versões do agente", "Restaurar uma versão cria uma nova versão publicada; nada é apagado.", `<div class="version-list">${versions.map((version) => `<article class="ops-item"><div><strong>Versão ${version.version}</strong><span>${escapeHtml(formatDate(version.created_at))}</span></div><div class="button-row"><span class="status-pill ${version.status === "published" ? "teal" : "neutral"}">${escapeHtml(label(versionStatusLabels, version.status))}</span>${version.status !== "published" ? `<button class="secondary-button" data-rollback-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Restaurar</button>` : ""}</div></article>`).join("") || `<p>Nenhuma versão registrada.</p>`}</div>`);
+  const versions = await fetchJson<Array<{ id: string; version: number; status: string; checksum: string; created_at: string; published_at?: string | null; origin?: string }>>(`/api/agents/${encodeURIComponent(agentId)}/versions`);
+  // Só o rascunho atual é publicável (o servidor recusa os superados com agent.version.stale).
+  const currentDraftId = currentData().agentConfigs.find((agent) => agent.id === agentId)?.draft_version_id ?? null;
+  openModal("Versões do agente", "Restaurar uma versão cria uma nova versão publicada; nada é apagado.", `<div class="version-list">${versions.map((version) => `<article class="ops-item"><div><strong>Versão ${version.version}</strong><span>${escapeHtml(formatDate(version.created_at))}${version.origin ? ` · ${escapeHtml(label(versionOriginLabels, version.origin))}` : ""}</span></div><div class="button-row"><span class="status-pill ${version.status === "published" ? "teal" : "neutral"}">${escapeHtml(label(versionStatusLabels, version.status))}</span>${version.status === "draft" && version.id === currentDraftId ? `<button class="secondary-button" data-publish-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Revisar e publicar</button>` : version.status !== "published" && version.published_at ? `<button class="secondary-button" data-rollback-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Restaurar</button>` : ""}</div></article>`).join("") || `<p>Nenhuma versão registrada.</p>`}</div>`);
 }
 
 function showJobDetail(id: string) {
@@ -1898,8 +1926,8 @@ async function handleAction(target: HTMLElement) {
   if (editAgent) { showAgentModal(editAgent); return; }
   const editSource = target.closest<HTMLElement>("[data-edit-source]")?.dataset.editSource;
   if (editSource) { showSourceModal(editSource); return; }
-  const publish = target.closest<HTMLElement>("[data-publish-agent]");
-  if (publish?.dataset.publishAgent && publish.dataset.versionId) { await fetchJson(`/api/agents/${encodeURIComponent(publish.dataset.publishAgent)}/publish`, { method: "POST", body: JSON.stringify({ version_id: publish.dataset.versionId }) }); await loadData(); toast("Nova versão do agente publicada."); return; }
+  // Publicar abre a revisão (diff + origem); publicar/descartar o rascunho saem dela (agent-review.ts).
+  if (await handleAgentReviewAction(target, agentReviewDeps())) return;
   const history = target.closest<HTMLElement>("[data-agent-history]")?.dataset.agentHistory;
   if (history) { await showAgentHistory(history); return; }
   const rollback = target.closest<HTMLElement>("[data-rollback-agent]");
@@ -1912,11 +1940,8 @@ async function handleAction(target: HTMLElement) {
     if (!await confirmDialog("Excluir este agente?", "Agentes com histórico não podem ser excluídos; nesse caso, desmarque “Agente ativo” para pausá-lo.", "Excluir", true)) return;
     await fetchJson(`/api/agents/${encodeURIComponent(deleteAgent)}`, { method: "DELETE" }); closeModal(); await loadData(); toast("Agente excluído."); return;
   }
-  const duplicate = target.closest<HTMLElement>("[data-resolve-duplicate]");
-  if (duplicate?.dataset.resolveDuplicate && duplicate.dataset.resolution) {
-    if (duplicate.dataset.resolution === "merged" && !await confirmDialog("Mesclar as duas vagas?", "Elas passam a ser tratadas como a mesma vaga. Essa decisão não pode ser desfeita pelo painel.", "Mesclar", true)) return;
-    await fetchJson(`/api/possible-duplicates/${encodeURIComponent(duplicate.dataset.resolveDuplicate)}/resolve`, { method: "POST", body: JSON.stringify({ status: duplicate.dataset.resolution }) }); await loadData(); toast("Decisão registrada."); return;
-  }
+  // Duplicatas (decidir/desfazer) e resposta a pergunta pelo painel: public/ops-actions.ts.
+  if (await handleOpsAction(target, opsActionDeps())) return;
   const rule = target.closest<HTMLElement>("[data-preference-rule]");
   if (rule?.dataset.preferenceRule && rule.dataset.nextState) { await fetchJson(`/api/preference-rules/${encodeURIComponent(rule.dataset.preferenceRule)}`, { method: "PATCH", body: JSON.stringify({ state: rule.dataset.nextState }) }); await loadData(); toast(rule.dataset.nextState === "active" ? "Regra reativada." : "Regra pausada."); return; }
   const conflict = target.closest<HTMLElement>("[data-resolve-conflict]");
@@ -1977,7 +2002,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("logout-button")?.addEventListener("click", async () => { if (await confirmDialog("Sair do painel?", "Para voltar, você vai precisar de um novo link de acesso enviado pelo Hermes.", "Sair")) void logout(); });
   document.getElementById("auth-retry")?.addEventListener("click", () => loadData());
   view().addEventListener("click", (event) => { void handleViewClick(event).catch((error) => toast(error instanceof Error ? error.message : "Falha na operação", true)); });
-  modalRoot().addEventListener("input", () => { state.modalDirty = true; });
+  // A caixa "Revisei as mudanças" da revisão de publicação não é edição: fechar não pede descarte.
+  modalRoot().addEventListener("input", (event) => { if (!(event.target as Element | null)?.closest?.("[data-publish-reviewed]")) state.modalDirty = true; });
   modalRoot().addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     if (target === modalRoot() || target.closest("[data-close-modal]")) { void requestCloseModal(); return; }

@@ -170,7 +170,14 @@ try {
     store.updateAgentConfig(lever.id, { prompt: "Prompt humano em rascunho." }, "operator");
     assert.equal(store.listAgentConfigs().find((agent) => agent.id === lever.id).prompt, lever.prompt);
 
-    store.publishAgentConfigVersion(gupy.id, proposal.draft_version_id, "operator");
+    // Proposta do coordenador: origem identificada e publicação só com o checksum do diff revisado.
+    const review = store.getAgentVersionDiff(gupy.id, proposal.draft_version_id);
+    assert.equal(review.origin, "coordinator");
+    assert.equal(review.created_by, `agent:${coordinator.id}`);
+    assert.deepEqual(review.changes.map((change) => change.field), ["prompt"]);
+    assert.throws(() => store.publishAgentConfigVersion(gupy.id, proposal.draft_version_id, "operator"), /agent\.version\.review_required/u);
+    assert.throws(() => store.publishAgentConfigVersion(gupy.id, proposal.draft_version_id, "operator", undefined, "0".repeat(64)), /agent\.version\.review_required/u);
+    store.publishAgentConfigVersion(gupy.id, proposal.draft_version_id, "operator", undefined, review.checksum);
     assert.equal(await promptOf(leitura), proposalInput.prompt, "publicação humana deveria valer");
     assert.equal(store.listAgentConfigs().find((agent) => agent.id === gupy.id).draft_version_id, null);
 

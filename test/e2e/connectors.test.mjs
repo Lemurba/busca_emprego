@@ -387,6 +387,16 @@ try {
       assert.equal(limits.max_cost_per_run, 0.5);
       assert.equal(resolveConnectorLimits({ agentId: agent.id, concurrency: 7 }).concurrency, 7, "opção explícita vence o agente");
       assert.throws(() => resolveConnectorLimits({ agentId: "inexistente" }), /agent.published_version.required/u);
+
+      // A rodada com --agent-id aplica os próprios limites e só registra o resultado: um custo
+      // acima do max_cost_per_run do agente (liberado por --max-cost) não vira exceção depois
+      // da ingestão nem marca a execução do agente como abortada.
+      const round = await runConnectorCollection({ http, agentId: agent.id, maxCostPerRun: 50, costPerRequest: 1, maxEnrichments: 0 });
+      assert.ok(round.cost > 0.5, "a rodada gastou mais que o máximo do agente");
+      assert.equal(round.stop_reason, null);
+      const run = store.listAgentRuns().find((item) => item.agent_id === agent.id);
+      assert.equal(run.status, "completed");
+      assert.match(run.message, /^Rodada /u);
     }
 
     // Script de cron: sem empresas curadas e com --quiet, sai 0 em silêncio (tick silencioso do Hermes).
