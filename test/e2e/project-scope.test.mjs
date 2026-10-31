@@ -101,6 +101,24 @@ test("projeto padrão: perfil e vaga ficam em busca-emprego", async () => {
   fromDefault.profile = profile.id;
   fromDefault.baseResume = expect(await server.human("POST", "/api/base-resumes", pdfUpload), 201).id;
   fromDefault.sharedJob = expect(await server.service("POST", "/api/jobs", jobBody("compartilhada")), 201).id;
+  // N3: regra de preferência (feedback "Não tenho interesse") e conflito de campo do projeto padrão.
+  const rejected = expect(await server.service("POST", "/api/jobs", jobBody("regra")), 201);
+  fromDefault.rule = expect(await server.human("POST", `/api/jobs/${rejected.id}/feedback`, { mode: "total", reason_code: "company", detail_key: "company", explanation: "Não quero esta empresa", confirmation: "SEM INTERESSE" }), 201).rule_id;
+  assert.ok(fromDefault.rule, "o feedback total cria uma regra");
+  await server.stop();
+  const db = new DatabaseSync(dbPath);
+  try {
+    const evidence = db.prepare(`INSERT INTO evidence_records (id,project_id,job_id,source_url,field_path,observed_value_hash,observed_value_json,confidence,origin,retrieved_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    const at = new Date().toISOString();
+    evidence.run("ev-escopo-atual", "busca-emprego", job.id, "https://example.com/a", "title", "h1", JSON.stringify("Analista padrao"), 0.8, "agent", at);
+    evidence.run("ev-escopo-candidata", "busca-emprego", job.id, "https://example.com/b", "title", "h2", JSON.stringify("Outro título"), 0.8, "agent", at);
+    db.prepare("INSERT INTO field_conflicts (id,job_id,field_path,current_evidence_id,candidate_evidence_id,status,reason,created_at) VALUES (?,?,?,?,?,'pending',?,?)")
+      .run("conflito-escopo", job.id, "title", "ev-escopo-atual", "ev-escopo-candidata", "source_disagreement", at);
+  } finally {
+    db.close();
+  }
+  fromDefault.conflict = "conflito-escopo";
 });
 
 test("outro RADAR_PROJECT_ID: sementes próprias, perfil com fatos e listagens filtradas", async () => {
@@ -136,6 +154,9 @@ test("outro RADAR_PROJECT_ID: ids do projeto padrão respondem 404; mesmo PDF e 
   await missing("GET", `/api/base-resumes/${fromDefault.baseResume}/extraction`, "base_resume.not_found");
   await missing("GET", `/api/base-resumes/${fromDefault.baseResume}/file`, "base_resume.not_found");
   await missing("POST", "/api/resumes", "job.not_found", { job_id: fromDefault.job, title: "CV", content: "x" });
+  // N3: conflito de campo e regra de preferência de outro projeto também respondem 404.
+  assert.equal(expect(await server.human("POST", `/api/field-conflicts/${fromDefault.conflict}/resolve`, { choice: "candidate" }), 404).error, "field_conflict.not_found");
+  assert.equal(expect(await server.human("PATCH", `/api/preference-rules/${fromDefault.rule}`, { state: "paused" }), 404).error, "preference_rule.not_found");
   // O mesmo PDF e a mesma vaga manual entram no projeto novo (antes: PDF_DUPLICATE e job.already_exists).
   const baseResume = expect(await server.human("POST", "/api/base-resumes", pdfUpload), 201);
   assert.notEqual(baseResume.id, fromDefault.baseResume);
@@ -151,9 +172,13 @@ test("de volta ao projeto padrão: nada do outro projeto vaza", async () => {
   const server = await startServer(null);
   const bootstrap = expect(await server.human("GET", "/api/bootstrap"), 200);
   assert.ok(bootstrap.jobs.every((job) => job.project_id === "busca-emprego"));
-  assert.deepEqual(bootstrap.jobs.map((job) => job.company).sort(), ["Empresa compartilhada", "Empresa padrao"]);
+  assert.deepEqual(bootstrap.jobs.map((job) => job.company).sort(), ["Empresa compartilhada", "Empresa padrao", "Empresa regra"]);
   assert.ok(bootstrap.profiles.every((profile) => profile.project_id === "busca-emprego"));
   assert.ok(bootstrap.agentConfigs.every((agent) => agent.project_id === "busca-emprego"));
+  // No próprio projeto, o conflito e a regra continuam intactos e acessíveis.
+  assert.equal(bootstrap.preferences.rules.find((rule) => rule.id === fromDefault.rule)?.state, "active");
+  expect(await server.human("POST", `/api/field-conflicts/${fromDefault.conflict}/resolve`, { choice: "current" }), 200);
+  expect(await server.human("PATCH", `/api/preference-rules/${fromDefault.rule}`, { state: "paused" }), 200);
   await server.stop();
   const db = new DatabaseSync(dbPath);
   try {

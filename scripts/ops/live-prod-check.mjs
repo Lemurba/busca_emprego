@@ -101,6 +101,10 @@ try {
     check("agent.status com token → 201", run.status === 201, `status ${run.status}`);
     check("execução presa à versão publicada", run.data?.config_version_id === scout.published_version_id, `version ${run.data?.config_version_id}`);
 
+    // Vaga de agente só entra de fonte pronta: termos aceitos no painel e teste de acesso (QAF-03).
+    const gupy = asArray((await call("GET", "/api/sources")).data).find((source) => source?.id === "gupy");
+    check("fonte Gupy pronta (termos aceitos e teste de acesso)", gupy?.effectiveReadiness?.status === "ready", `${gupy?.effectiveReadiness?.status ?? "não encontrada"} ${gupy?.effectiveReadiness?.reason ?? ""}`.trim());
+
     const stamp = Date.now();
     const jobUrl = `https://${asArray(scout.allowed_domains)[0]}/teste-onboarding/${stamp}`;
     const discovered = await call("POST", "/api/agent-events", {

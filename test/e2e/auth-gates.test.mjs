@@ -101,6 +101,10 @@ try {
     await refusedToService("POST", `/api/applications/${applicationId}/revoke-auto`, {});
     await refusedToService("POST", `/api/applications/${applicationId}/select-manual`, {});
     await refusedToService("PATCH", `/api/applications/${applicationId}`, { status: "submitted" });
+    // N2: devolver o currículo aprovado para revisão desfaz o APROVO e revoga o AUTORIZO.
+    await refusedToService("PATCH", `/api/resumes/${resumeId}`, { status: "review" });
+    assert.equal((await svc("GET", `/api/resumes/${resumeId}`)).data.status, "approved", "a recusa não desfaz o APROVO");
+    assert.equal((await svc("GET", "/api/authorized-applications")).data.length, 1, "a recusa não revoga o AUTORIZO");
   });
 
   await test("#10: demais portões humanos também recusam o token de serviço", async () => {
@@ -122,6 +126,9 @@ try {
     await refusedToService("POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" });
     await refusedToService("POST", "/api/field-conflicts/qualquer/resolve", { choice: "candidate" });
     await refusedToService("DELETE", "/api/base-resumes/qualquer", {});
+    // N1: excluir agente ou fonte é irreversível, como excluir o currículo-base.
+    await refusedToService("DELETE", "/api/agents/qualquer", {});
+    await refusedToService("DELETE", "/api/sources/qualquer", {});
     // Fato declarado (origin=user) ou já confirmado vindo do serviço é decisão humana.
     await refusedToService("POST", "/api/profiles", { facts: [{ type: "skills", value: "SQL", origin: "user" }] });
     await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "user" });
@@ -368,6 +375,56 @@ try {
       await client.close();
       for (const name of ["RADAR_API_URL", "RADAR_INTERNAL_SERVICE_TOKEN", "RADAR_FORWARDED_PROTO"]) delete process.env[name];
     }
+  });
+
+  await test("N1: o serviço não religa uma fonte que a pessoa desligou", async () => {
+    const source = (await svc("GET", "/api/sources")).data.find((item) => item.id === "workable");
+    const body = (enabled) => ({ name: source.name, source_type: source.source_type, domain: source.domain, auth_strategy: source.auth_strategy, enabled });
+    assert.equal((await human("PUT", `/api/sources/${source.id}`, body(false))).status, 200);
+    await refusedToService("PUT", `/api/sources/${source.id}`, body(true));
+    // Sem `enabled`, o upsert religaria a fonte: também é recusado.
+    await refusedToService("PUT", `/api/sources/${source.id}`, { ...body(true), enabled: undefined });
+    await refusedToService("POST", "/api/sources", { ...body(true), id: source.id });
+    assert.equal((await svc("GET", "/api/sources")).data.find((item) => item.id === source.id).enabled, false);
+    // Manter desligada continua permitido ao serviço; religar, só pela sessão.
+    assert.equal((await svc("PUT", `/api/sources/${source.id}`, body(false))).status, 200);
+    assert.equal((await human("PUT", `/api/sources/${source.id}`, body(true))).status, 200);
+  });
+
+  await test("QAF-03/QAF-10/QAF-01/QAF-11: job.discovered só de fonte pronta, gravada pelo id, com prazo e coordenadas", async () => {
+    const agents = (await svc("GET", "/api/agents")).data;
+    const scout = agents.find((agent) => agent.role_type === "source_scout" && agent.source_ids.includes("ashby"));
+    assert.ok(scout, "coletor do Ashby semeado");
+    const discover = (slug, extra = {}) => svc("POST", "/api/agent-events", { event: "job.discovered", agent_id: scout.id, job: {
+      title: `Engenheira ${slug}`, company: "Ashby QA", source: "Ashby", source_url: `https://jobs.ashbyhq.com/xqa/${slug}`, ...extra,
+    } });
+    // Termos não aceitos: a mesma recusa do lote (ROUND_SOURCES_NOT_READY), sem gravar a vaga.
+    const refused = await discover("1");
+    assert.equal(refused.status, 422, JSON.stringify(refused.data));
+    assert.equal(refused.data.error, "ROUND_SOURCES_NOT_READY");
+    const batch = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: "ashby", items: [{ job_url: "https://jobs.ashbyhq.com/xqa/2", title: "X", company: "Y" }] });
+    assert.equal(batch.data.error, "ROUND_SOURCES_NOT_READY", "o lote recusa do mesmo jeito");
+    // Termos aceitos sem teste de acesso ainda não basta.
+    assert.equal((await human("POST", "/api/sources/ashby/terms", {})).status, 200);
+    assert.equal((await discover("1")).data.error, "ROUND_SOURCES_NOT_READY");
+    assert.equal((await svc("POST", "/api/sources/ashby/readiness", { status: "ready", reason: "teste manual" })).status, 200);
+    const created = await discover("1", { deadline_at: "2026-11-15", latitude: -25.43, longitude: -49.27 });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.source, "ashby", "o nome de exibição vira o id da fonte, como nos lotes");
+    assert.equal(created.data.deadline_at, "2026-11-15");
+    assert.equal(created.data.latitude, -25.43);
+    assert.equal(created.data.longitude, -49.27);
+    // Sem nome reconhecido, a fonte vem do domínio da URL entre as fontes do agente.
+    const byDomain = await discover("3", { source: "Coletor Ashby (Hermes)" });
+    assert.equal(byDomain.status, 201, JSON.stringify(byDomain.data));
+    assert.equal(byDomain.data.source, "ashby");
+    // Prazo e coordenadas inválidos são recusados no esquema do item.
+    assert.equal((await discover("4", { deadline_at: "15/11/2026" })).status, 422);
+    assert.equal((await discover("5", { latitude: 200, longitude: 0 })).status, 422);
+    // O lote também guarda o prazo.
+    const ready = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: "ashby", items: [{ job_url: "https://jobs.ashbyhq.com/xqa/6", title: "Dados", company: "Banco QA", deadline_at: "2026-11-20T23:59:00-03:00" }] });
+    assert.equal(ready.status, 200, JSON.stringify(ready.data));
+    assert.equal((await svc("GET", `/api/jobs/${ready.data.items[0].job_id}`)).data.deadline_at, "2026-11-20T23:59:00-03:00");
   });
 
   await test("#20: 20 falhas de um IP não trancam outro IP nem o token válido", async () => {

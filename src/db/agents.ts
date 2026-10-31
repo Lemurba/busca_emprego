@@ -270,8 +270,10 @@ export function getAgentVersionDiff(agentId: string, versionId: string, projectI
     : undefined;
   const before = (published ? JSON.parse(published.config_json) : {}) as Record<string, unknown>;
   const after = JSON.parse(String(version.config_json)) as Record<string, unknown>;
+  // QAF-16: listas (fontes, domínios, ferramentas, campos) são conjuntos: só a ordem trocada não é mudança.
+  const comparable = (value: unknown) => JSON.stringify(Array.isArray(value) ? [...value].map((item) => JSON.stringify(item)).sort() : value ?? null);
   const changes = [...new Set([...Object.keys(after), ...Object.keys(before)])]
-    .filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(after[field] ?? null))
+    .filter((field) => comparable(before[field]) !== comparable(after[field]))
     .map((field) => ({ field, before: before[field] ?? null, after: after[field] ?? null }));
   const createdBy = String(version.created_by);
   // A justificativa da proposta fica na auditoria (`prompt_proposed`), ligada à versão criada.

@@ -1,24 +1,45 @@
 // Vagas vindas de agentes: descoberta pelo caminho único de ingestão e enriquecimento com evidência,
 // respeitando domínios e campos permitidos pela versão publicada do agente.
 import type { Job } from "../types.js";
-import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "../domain.js";
+import type { AgentConfig } from "../types.js";
+import { agentUrlAllowed, canonicalizeJobUrl, validateCoordinates, validateSalary } from "../domain.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { agentEditableJobFields } from "./agent-configs.js";
 import { idFor, now } from "./util.js";
 import { addEvidence, getJob, selectEvidence, updateJob } from "./jobs.js";
 import { assertAgentUrlAllowed, publishedAgentConfig } from "./agents.js";
 import { ingestSourceItems } from "./ingestion.js";
+import { listSourceConfigsWithReadiness } from "./sources.js";
 import { DomainError } from "../errors.js";
 
+/**
+ * QAF-03/QAF-10: a fonte cadastrada da vaga descoberta por agente. O agente pode mandar o id
+ * (`linkedin-jobs`) ou o nome de exibição (`LinkedIn Jobs`); sem nenhum dos dois, vale a fonte
+ * do agente (`source_ids`) cujo domínio é o da URL da vaga. A vaga é gravada com o id da fonte
+ * (o mesmo dos lotes e conectores) e só entra se a fonte estiver pronta (termos aceitos e
+ * teste de acesso), a mesma regra da rodada (`ROUND_SOURCES_NOT_READY`).
+ */
+function resolveAgentSource(agent: Pick<AgentConfig, "source_ids">, input: Partial<Job> & { source: string }, projectId: string) {
+  const sources = listSourceConfigsWithReadiness(projectId);
+  const declared = String(input.source).trim().toLowerCase();
+  const urls = [input.source_url, input.job_url, input.linkedin_post_url, input.application_url].filter(Boolean).map(String);
+  const linked = agent.source_ids.length ? sources.filter((source) => agent.source_ids.includes(source.id)) : sources;
+  const source = sources.find((item) => item.id === declared || item.name.trim().toLowerCase() === declared)
+    ?? linked.find((item) => urls.some((url) => agentUrlAllowed([item.domain], url)));
+  if (!source) throw new DomainError("ROUND_NO_SOURCES");
+  if (source.effectiveReadiness.status !== "ready") throw new DomainError("ROUND_SOURCES_NOT_READY");
+  return source;
+}
+
 /** Converte a vaga descrita por um agente no item de fonte de validateSourceBatch (campos desconhecidos são ignorados). */
-function agentJobItem(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
+function agentJobItem(sourceId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
   const raw = input as unknown as Record<string, unknown>;
   const item: Record<string, unknown> = {
-    source_id: input.source, title: input.title, company: input.company, source_url: input.source_url,
+    source_id: sourceId, title: input.title, company: input.company, source_url: input.source_url,
     job_url: input.job_url || input.linkedin_post_url || input.application_url || input.source_url,
   };
   if (raw.location != null) item.location_text = raw.location;
-  for (const field of ["source_job_id", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period", "posted_at", "deadline_at", "opening_status", "opening_checked_at", "linkedin_post_url", "application_url"]) {
+  for (const field of ["source_job_id", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period", "posted_at", "deadline_at", "opening_status", "opening_checked_at", "linkedin_post_url", "application_url", "latitude", "longitude", "requirements_json"]) {
     if (raw[field] != null && raw[field] !== "") item[field] = raw[field];
   }
   return item;
@@ -35,9 +56,10 @@ export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { sour
   if (!input.source_url?.trim()) throw new DomainError("agent.source_url.required");
   if (!String(input.source ?? "").trim() || !String(input.title ?? "").trim() || !String(input.company ?? "").trim()) throw new DomainError("job.required_fields.invalid");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
+  const source = resolveAgentSource(agent, input, projectId);
   // Job, evidence, occurrence and provenance are created together or not at all.
   return tx(() => {
-    const [result] = ingestSourceItems(input.source, [agentJobItem(input)], { projectId, agentId });
+    const [result] = ingestSourceItems(source.id, [agentJobItem(source.id, input)], { projectId, agentId });
     if (!result) throw new DomainError("job.persist.failed");
     audit("job", result.job_id, result.action === "sighting" ? "sighted_by_agent" : "created_by_agent", { agent_id: agentId, actor: `agent:${agentId}`, action: result.action, reason: result.reason });
     return { ...result, job: getJob(result.job_id) };

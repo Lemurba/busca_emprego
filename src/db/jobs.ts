@@ -506,8 +506,9 @@ export function restoreJob(id: string, actor = "user") {
   return getJob(id);
 }
 
-export function resolveFieldConflict(conflictId: string, choice: "current" | "candidate", actor: string) {
-  const conflict = db.prepare("SELECT * FROM field_conflicts WHERE id=? AND status='pending'").get(conflictId) as Record<string, unknown> | undefined;
+export function resolveFieldConflict(conflictId: string, choice: "current" | "candidate", actor: string, projectId = storeProjectId()) {
+  // N3: o conflito pertence ao projeto da vaga; de outro projeto, ele não existe (404).
+  const conflict = db.prepare("SELECT c.* FROM field_conflicts c JOIN jobs j ON j.id=c.job_id WHERE c.id=? AND c.status='pending' AND j.project_id=?").get(conflictId, projectId) as Record<string, unknown> | undefined;
   if (!conflict) throw new DomainError("field_conflict.not_found");
   const evidenceId = choice === "candidate" ? String(conflict.candidate_evidence_id) : String(conflict.current_evidence_id ?? "");
   const evidence = db.prepare("SELECT * FROM evidence_records WHERE id=?").get(evidenceId) as Record<string, unknown> | undefined;

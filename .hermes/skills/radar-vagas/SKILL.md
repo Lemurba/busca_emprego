@@ -48,7 +48,7 @@ Ferramentas (cada servidor tem o próprio `tools.include` em `hermes/config.exam
 | `radar_list_agents`, `radar_list_sources`, `radar_get_job` | leitura | — (vaga oculta só com `include_suppressed`) |
 | `radar_list_authorized_applications`, `radar_list_open_questions` | leitura | — (fila exige automação ligada) |
 | `radar_verify_application` | leitura | `application.prepare` + domínio permitido |
-| `radar_discover_job` | escrita | `jobs.create` + domínios permitidos |
+| `radar_discover_job` | escrita | `jobs.create` + domínios permitidos + fonte pronta (termos aceitos e teste de acesso) |
 | `radar_ingest_batch` | escrita | `jobs.create` + domínios permitidos (fonte pronta e perfil confirmado) |
 | `radar_record_agent_run` | escrita | agente publicado e ativo (só as próprias execuções) |
 | `radar_enrich_job` | escrita | `jobs.enrich` + domínio da evidência |

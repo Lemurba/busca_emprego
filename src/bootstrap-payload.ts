@@ -209,7 +209,8 @@ export type PossibleDuplicate = {
 };
 export type DuplicateDecision = PossibleDuplicate & { undo_until: string };
 
-export type SourceConfig = SourceConfigRecord & { effectiveReadiness: { status: string; reason: string }; connector: boolean };
+/** `connector_companies`: empresas ativas do conector (null para fonte que não é de conector). */
+export type SourceConfig = SourceConfigRecord & { effectiveReadiness: { status: string; reason: string }; connector: boolean; connector_companies: number | null };
 
 export type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
 

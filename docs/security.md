@@ -32,6 +32,9 @@ Interesse, `APROVO` e `AUTORIZO` são decisões humanas, e o servidor garante is
 | `POST /api/human-questions/{id}/respond` | responder pelo painel a pergunta do executor (inclusive a que não chegou ao Telegram) |
 | `POST /api/field-conflicts/{id}/resolve` | escolher entre o valor atual e o do enriquecimento |
 | `DELETE /api/base-resumes/{id}` | excluir o currículo-base (PDF) |
+| `DELETE /api/agents/{id}`, `DELETE /api/sources/{id}` | excluir agente ou fonte (irreversível; o serviço pode pausar) |
+| `PUT /api/sources/{id}` ou `POST /api/sources` que religa uma fonte desligada | voltar a buscar numa fonte que a pessoa desligou (o serviço pode atualizá-la e desligá-la) |
+| `PATCH /api/resumes/{id}` de um currículo aprovado | devolver para revisão, o que desfaz o `APROVO` e revoga o `AUTORIZO` |
 | `POST /api/sources/{id}/terms` | aceitar termos de uso de uma fonte |
 | `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback`, `/discard-draft` | criar agente (nasce publicado), publicar permissões e prompt (rascunho que não é humano só com o checksum do diff revisado) e descartar rascunho |
 

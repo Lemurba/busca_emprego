@@ -265,7 +265,8 @@ export const schemas = {
   // Rotas de agente do MCP (#10): o agente vem do caminho; o corpo nunca escolhe outra identidade.
   agentRunReport: z.strictObject(agentRunFields),
   // Lote de uma fonte; sem round_id a rota inicia a rodada. Itens validados em validateSourceBatch.
-  agentBatch: z.strictObject({ source_id: id, round_id: optId, items: z.array(z.unknown()).max(1_000), next_cursor: optShort }),
+  // Até 25 itens por lote (o mesmo limite de validateSourceBatch); o resto vem em lotes seguintes com `next_cursor`.
+  agentBatch: z.strictObject({ source_id: id, round_id: optId, items: z.array(z.unknown()).max(25), next_cursor: optShort }),
   // Campos do patch: o domínio decide o que o agente pode editar (agent.job_field.forbidden).
   agentEnrichment: z.strictObject({ patch: z.record(z.string(), z.unknown()), evidence_source_url: z.string().max(4_000), evidence_excerpt: optText }),
 } as const;

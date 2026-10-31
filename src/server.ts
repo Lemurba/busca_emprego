@@ -136,6 +136,7 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
  * humana pelo painel e o descarte de rascunho de agente. Fatos `origin=user` ou já
  * confirmados vindos do serviço são recusados em `assertServiceOnlyProposes`.
  * #49: "Confirmar todos os pendentes", descarte de rascunho e nova versão do perfil.
+ * N1: exclusão de agente e de fonte (irreversível; criar, publicar e aceitar termos já são humanos).
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
   return method === "POST" && (
@@ -151,7 +152,7 @@ function isHumanOnlyRequest(method: string | undefined, pathname: string) {
     || /^\/api\/agents\/[^/]+\/(?:publish|rollback|discard-draft)$/u.test(pathname)
   )
     || method === "PATCH" && /^\/api\/applications\/[^/]+$/u.test(pathname)
-    || method === "DELETE" && /^\/api\/(?:jobs|base-resumes|profiles)\/[^/]+$/u.test(pathname)
+    || method === "DELETE" && /^\/api\/(?:jobs|base-resumes|profiles|agents|sources)\/[^/]+$/u.test(pathname)
     || method === "PUT" && pathname === "/api/settings/automation"
     || method === "GET" && /^\/api\/applications\/[^/]+\/evidence\/[^/]+$/u.test(pathname);
 }
@@ -241,6 +242,16 @@ function assertServiceLeavesContext(actor: string, input: { context?: unknown; c
   if (isServiceActor(actor) && (input.context != null || input.context_json != null)) {
     throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
   }
+}
+
+/**
+ * N1: religar uma fonte que a pessoa desligou é decisão humana. O serviço pode atualizar a
+ * fonte (e desligá-la), mas não muda `enabled` de falso para verdadeiro (403).
+ */
+function assertServiceKeepsSourceOff(actor: string, sourceId: string, input: { enabled?: boolean | null }) {
+  if (!isServiceActor(actor) || input.enabled === false) return;
+  const current = listSourceConfigsWithReadiness(projectId).find((source) => source.id === sourceId);
+  if (current && !current.enabled) throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
 }
 
 function assertAutomationEnabled(req: IncomingMessage, pathname: string) {
@@ -414,8 +425,17 @@ const routes: Route[] = [
 
   // Fontes
   { method: "GET", pattern: r("/api/sources"), handler: ({ res }) => ok(res, 200, listSourceConfigsWithReadiness(projectId)) },
-  { method: "POST", pattern: r("/api/sources"), handler: ({ actor, res, body }) => ok(res, 201, upsertSourceConfig(validateBody(schemas.sourceUpsert, body), actor, projectId)) },
-  { method: "PUT", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, upsertSourceConfig({ ...validateBody(schemas.sourceUpsert, body), id: params[0]! }, actor, projectId)) },
+  { method: "POST", pattern: r("/api/sources"), handler: ({ actor, res, body }) => {
+    const input = validateBody(schemas.sourceUpsert, body);
+    // POST também atualiza uma fonte existente (upsert): a mesma regra do PUT para religar.
+    assertServiceKeepsSourceOff(actor, String(input.id ?? "").trim().toLowerCase(), input);
+    ok(res, 201, upsertSourceConfig(input, actor, projectId));
+  } },
+  { method: "PUT", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.sourceUpsert, body);
+    assertServiceKeepsSourceOff(actor, params[0]!, input);
+    ok(res, 200, upsertSourceConfig({ ...input, id: params[0]! }, actor, projectId));
+  } },
   { method: "POST", pattern: r("/api/sources/{id}/readiness"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.sourceReadiness, body);
     ok(res, 200, setSourceReadiness(params[0]!, String(input.status ?? ""), String(input.reason ?? ""), actor, projectId));
@@ -538,7 +558,12 @@ const routes: Route[] = [
   // Checagem de fatos (#31): resolver um fato é declaração humana (rota só da sessão, ver isHumanOnlyRequest).
   { method: "GET", pattern: r("/api/resumes/{id}/facts"), handler: ({ res, params }) => ok(res, 200, getResumeFactChecks(params[0]!)) },
   { method: "POST", pattern: r("/api/resumes/{id}/facts/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, resolveResumeFact(params[0]!, params[1]!, validateBody(schemas.resumeFactAction, body), actor, projectId)) },
-  { method: "PATCH", pattern: r("/api/resumes/{id}"), handler: ({ res, params, body }) => ok(res, 200, updateResume(params[0]!, validateBody(schemas.resumePatch, body) as never)) },
+  { method: "PATCH", pattern: r("/api/resumes/{id}"), handler: ({ actor, res, params, body }) => {
+    const patch = validateBody(schemas.resumePatch, body);
+    // N2: tirar um currículo de "aprovado" desfaz o APROVO e revoga o AUTORIZO: só a sessão humana.
+    if (isServiceActor(actor) && getResume(params[0]!)?.status === "approved") throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
+    ok(res, 200, updateResume(params[0]!, patch as never, actor));
+  } },
 
   // Currículos-base (upload JSON com PDF em base64; único corpo de até 8 MB)
   { method: "GET", pattern: r("/api/base-resumes"), handler: ({ res }) => ok(res, 200, listBaseResumes(projectId)) },
@@ -611,7 +636,7 @@ const routes: Route[] = [
 
   // Preferências e perguntas humanas
   { method: "GET", pattern: r("/api/preferences"), handler: ({ res }) => ok(res, 200, listPreferenceState(projectId)) },
-  { method: "PATCH", pattern: r("/api/preference-rules/{id}"), handler: ({ res, params, body }) => ok(res, 200, setPreferenceRuleState(params[0]!, String(validateBody(schemas.preferenceRule, body).state ?? ""))) },
+  { method: "PATCH", pattern: r("/api/preference-rules/{id}"), handler: ({ res, params, body }) => ok(res, 200, setPreferenceRuleState(params[0]!, String(validateBody(schemas.preferenceRule, body).state ?? ""), projectId)) },
   { method: "GET", pattern: r("/api/human-questions"), handler: ({ req, res }) => ok(res, 200, listHumanQuestions(new URL(req.url ?? "/", "http://radar.invalid").searchParams.get("application_id") || undefined)) },
   { method: "POST", pattern: r("/api/human-questions/{id}/delivery"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.humanDelivery, body);
@@ -646,7 +671,7 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/field-conflicts/{id}/resolve"), handler: ({ actor, res, params, body }) => {
     const choice = String(validateBody(schemas.fieldConflictResolve, body).choice ?? "");
     if (choice !== "current" && choice !== "candidate") throw new HttpError(422, "field_conflict.choice.invalid", "Escolha manter o valor atual ou usar a nova fonte.");
-    ok(res, 200, resolveFieldConflict(params[0]!, choice, actor));
+    ok(res, 200, resolveFieldConflict(params[0]!, choice, actor, projectId));
   } },
 ];
 

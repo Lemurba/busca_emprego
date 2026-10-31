@@ -325,6 +325,22 @@ test("formato \"Cargo / Empresa | período\": o cargo seguinte abre a próxima e
   assert.deepEqual(experience, ["Desenvolvedor Backend; Empresa X | 2020 - atual", "Analista de Sistemas; Empresa Y | 2017 - 2020"]);
 });
 
+test("QAF-13: detalhe sem marcador fica na entrada certa quando a próxima tem título completo", async () => {
+  const bytes = await resumePdf([[
+    "Mariana Souza Lima",
+    "Experiencia",
+    "Engenheira de Software Senior - Acme Pagamentos (2021-2026)",
+    "Liderou a migracao do monolito de pagamentos para microsservicos",
+    "Desenvolvedora Backend - Initech (2018-2021)",
+    "APIs REST em Node.js e PostgreSQL",
+  ]]);
+  const experience = proposeFacts(extractPdfText(bytes)).filter((fact) => fact.type === "experience").map((fact) => fact.value);
+  assert.deepEqual(experience, [
+    "Engenheira de Software Senior - Acme Pagamentos (2021-2026); Liderou a migracao do monolito de pagamentos para microsservicos",
+    "Desenvolvedora Backend - Initech (2018-2021); APIs REST em Node.js e PostgreSQL",
+  ]);
+});
+
 test("Cursos vira certificações, um fato por item; Objetivo no resumo não o divide", async () => {
   const bytes = await resumePdf([[
     "Ana Lima",

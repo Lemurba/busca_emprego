@@ -4,9 +4,12 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { openTempStore } from "./helpers/temp-db.mjs";
+import { readySource } from "./helpers/ready-source.mjs";
 
 const { store, cleanup } = await openTempStore("radar-fontes-ats", "test.sqlite");
 after(cleanup);
+// Vagas de agente só entram de fonte pronta (termos aceitos e teste de acesso), QAF-03.
+readySource(store, { id: "fixture", domain: "jobs.example" });
 
 test("QA-18: job.discovered com opening_status grava opening_checked_at", () => {
   const scout = store.createAgentConfig({
@@ -135,6 +138,32 @@ test("QA-06: conteúdo ATS imprime todos os fatos usados, sem JSON nem rótulo d
   assert.doesNotMatch(content, /Link: Twitter/u);
   assert.match(content, /^Autorização de trabalho: Brasil, Portugal · sem necessidade de patrocínio de visto$/mu);
   assert.doesNotMatch(content, /\b(?:true|false)\b/u);
+});
+
+test("QAF-02: perfil do PDF (full_name/target_role) abre o currículo com nome e cargo; o teste de leitura exige o nome no topo", async () => {
+  const { factualAtsContent, factValueText } = await import("../src/ats-content.ts");
+  const { analyzeExtractedText, expectedContacts } = await import("../src/resume-parse-check.ts");
+  const facts = [
+    { type: "contact_email", value: "mariana@example.com", state: "confirmed" },
+    { type: "target_role", value: "Engenheira de Software Backend", state: "confirmed" },
+    { type: "full_name", value: "Mariana Souza Lima", state: "confirmed" },
+    { type: "skills", value: ["Node.js"], state: "confirmed" },
+  ];
+  const content = factualAtsContent(facts);
+  assert.equal(content.split("\n").slice(0, 2).join("\n"), "Mariana Souza Lima\nEngenheira de Software Backend");
+  assert.doesNotMatch(content, /Full name|Target role|INFORMAÇÕES ADICIONAIS/u);
+  const contacts = expectedContacts(content, facts);
+  assert.equal(contacts.name, "Mariana Souza Lima");
+  const ok = analyzeExtractedText({ title: "CV", content }, content, contacts);
+  assert.equal(ok.checks.find((check) => check.key === "name").ok, true);
+  // Sem o nome no topo, o teste de leitura falha (e o APROVO fica bloqueado por pdf.parse_failed).
+  const nameless = content.split("\n").slice(1).join("\n");
+  const failed = analyzeExtractedText({ title: "CV", content: nameless }, nameless, contacts);
+  assert.equal(failed.ok, false);
+  assert.match(failed.missing.join(" "), /Nome Mariana Souza Lima no topo/u);
+  // QAF-14: o mesmo texto legível serve à revisão do perfil (sem chaves do JSON Resume).
+  assert.equal(factValueText("education", { institution: "University of Oklahoma", area: "Information Technology", studyType: "Bachelor", startDate: "2011-06-01" }), "Bachelor em Information Technology — University of Oklahoma (2011-06-01 – atual)");
+  assert.equal(factValueText("professional_link", { network: "SoundCloud", username: "dandymusicnl", url: "" }), "SoundCloud: dandymusicnl");
 });
 
 test("QA-06: nova geração não substitui rascunho manual ou editado; rascunho substituído não aceita revisão nem fatos", async () => {

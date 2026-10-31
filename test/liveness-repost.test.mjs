@@ -8,9 +8,12 @@ import { descriptionFingerprint, findReposts, hammingDistance, repostBucket } fr
 import { atsUrl } from "./helpers/final-confirmation.mjs";
 import { markJobOpen } from "./helpers/liveness.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
+import { readySource } from "./helpers/ready-source.mjs";
 
 process.env.HERMES_LINKED_RECIPIENT_ID = "telegram-user";
 const { store, cleanup } = await openTempStore("radar-liveness-repost");
+// Vagas de agente só entram de fonte pronta (QAF-03).
+readySource(store, { id: "fixture", domain: "jobs.example.test" });
 after(cleanup);
 
 let counter = 0;

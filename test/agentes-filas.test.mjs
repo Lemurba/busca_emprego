@@ -105,6 +105,11 @@ test("publicação de agente: diff contra a versão publicada, origem e checksum
   assert.equal(codeOf(() => store.rollbackAgentConfig(agent.id, service.draft_version_id, "human:dashboard")), "agent.version.not_restorable");
   assert.equal(store.rollbackAgentConfig(agent.id, diff.published.version_id, "human:dashboard").timeout_seconds, 120);
   assert.equal(codeOf(() => store.getAgentVersionDiff(agent.id, "inexistente")), "agent.version.not_found");
+
+  // QAF-16: só a ordem das listas trocada não aparece como mudança.
+  const listed = enrichmentAgent("Agente com listas", { allowed_domains: ["a.example.test", "b.example.test"], editable_fields: ["description", "benefits"] });
+  const reordered = store.updateAgentConfig(listed.id, { allowed_domains: ["b.example.test", "a.example.test"], editable_fields: ["benefits", "description"], timeout_seconds: 240 }, "human:dashboard");
+  assert.deepEqual(store.getAgentVersionDiff(listed.id, reordered.draft_version_id).changes.map((change) => change.field), ["timeout_seconds"]);
 });
 
 test("#16: concorrência, tempo limite, custo e tokens valem para execuções de agentes LLM", () => {

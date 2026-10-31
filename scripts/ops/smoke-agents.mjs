@@ -221,6 +221,26 @@ try {
 
   // ---------- 2. coletores ----------
   section("2. coletores (source_scout × 16): descoberta + bloqueios de capacidade");
+  // Vaga de agente só entra de fonte pronta (QAF-03): sem termos aceitos, a descoberta é recusada
+  // como o lote; depois do aceite (sessão humana) e do teste de acesso, entra.
+  const seededSources = expect("GET /api/sources", await api("GET", "/api/sources"), 200);
+  await t("fonte sem termos aceitos recusa job.discovered (422 ROUND_SOURCES_NOT_READY)", async () => {
+    const [scout] = scoutAgents;
+    const domain = scout.allowed_domains[0];
+    const r = await api("POST", "/api/agent-events", {
+      event: "job.discovered", agent_id: scout.id,
+      job: { title: "Antes do aceite", company: "Smoke Teste LTDA", source: scout.name, source_url: `https://${domain}/smoke/antes-do-aceite` },
+    });
+    expect("discover sem termos", r, 422);
+    assert.equal(r.data?.error, "ROUND_SOURCES_NOT_READY");
+  });
+  await t("termos aceitos e teste de acesso registrado nas 16 fontes", async () => {
+    for (const source of seededSources) {
+      expect(`termos ${source.id}`, await api("POST", `/api/sources/${source.id}/terms`, {}), 200);
+      const ready = expect(`prontidão ${source.id}`, await api("POST", `/api/sources/${source.id}/readiness`, { status: "ready", reason: "smoke" }), 200);
+      assert.equal(ready.effectiveReadiness.status, "ready", `${source.id} não ficou pronta`);
+    }
+  });
   const jobsByScout = {};
   for (const [index, scout] of scoutAgents.entries()) {
     const domain = scout.allowed_domains[0];
@@ -239,6 +259,7 @@ try {
       assert.ok(job.id, "vaga criada sem id");
       assert.equal(job.decision, "pending");
       assert.equal(job.status, "found");
+      assert.ok(scout.source_ids.includes(job.source), `vaga gravada com a fonte ${job.source}, não com o id da fonte do coletor (QAF-10)`);
       jobsByScout[scout.id] = job.id;
       const prov = expect(`${scout.name} provenance`, await api("GET", `/api/jobs/${job.id}/provenance`), 200);
       assert.ok(prov.evidence.length > 0, "sem registros de evidência");
@@ -267,6 +288,14 @@ try {
   const anyOtherJob = jobsByScout[scoutAgents.find((a) => a.id !== gupyScout.id).id];
 
   // ---------- 3. enriquecimento ----------
+  // A seção 9 começa sem fonte pronta: o teste de acesso volta a "configurada" (os termos ficam).
+  await t("teste de acesso das fontes volta a pendente para a rodada da seção 9", async () => {
+    for (const source of seededSources) {
+      const reset = expect(`prontidão ${source.id}`, await api("POST", `/api/sources/${source.id}/readiness`, { status: "configured", reason: "" }), 200);
+      assert.notEqual(reset.effectiveReadiness.status, "ready");
+    }
+  });
+
   section("3. enriquecimento de vaga (job_enrichment): evidência, conflito e bloqueios");
   await t("salary_min/max na lista de campos editáveis do agente", () => {
     assert.ok(salaryAgent.editable_fields.includes("salary_min"));

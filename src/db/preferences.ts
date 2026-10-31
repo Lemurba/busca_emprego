@@ -165,9 +165,10 @@ export function listPreferenceState(projectId = storeProjectId()): PreferenceSta
   return { rules, values, suggestions } as unknown as PreferenceState;
 }
 
-export function setPreferenceRuleState(id: string, state: string) {
+export function setPreferenceRuleState(id: string, state: string, projectId = storeProjectId()) {
   if (!['active', 'paused'].includes(state)) throw new DomainError("preference_rule.state.invalid");
-  const rule = db.prepare("SELECT project_id,state FROM preference_rules WHERE id=?").get(id) as { project_id: string; state: string } | undefined;
+  // N3: regra de outro projeto não existe para este (404).
+  const rule = db.prepare("SELECT project_id,state FROM preference_rules WHERE id=? AND project_id=?").get(id, projectId) as { project_id: string; state: string } | undefined;
   if (!rule) throw new DomainError("preference_rule.not_found");
   // Uma regra desfeita junto com o feedback de origem não volta a valer por aqui.
   if (rule.state === "undone") throw new DomainError("preference_rule.undone");

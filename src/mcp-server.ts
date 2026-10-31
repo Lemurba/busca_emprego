@@ -394,6 +394,9 @@ const jobFields = {
   job_url: z.string().url().optional(),
   application_url: z.string().url().optional(),
   posted_at: z.string().optional(),
+  deadline_at: z.string().optional(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
   requirements_json: explicitRequirements.optional(),
 };
 
@@ -449,7 +452,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_discover_job")) server.registerTool("radar_discover_job", {
-    description: "Registra uma vaga descoberta usando permissões do agente coletor publicado (escopo jobs.create; URLs dentro dos domínios permitidos). Vaga já conhecida (mesma URL, ou mesma empresa + título + local, ou mesma descrição) vira nova ocorrência, não erro.",
+    description: "Registra uma vaga descoberta usando permissões do agente coletor publicado (escopo jobs.create; URLs dentro dos domínios permitidos). Só de fonte pronta (termos aceitos pela pessoa e teste de acesso; senão ROUND_SOURCES_NOT_READY); `source` é o id ou o nome da fonte. Vaga já conhecida (mesma URL, ou mesma empresa + título + local, ou mesma descrição) vira nova ocorrência, não erro.",
     inputSchema: { agent_id: agentId, ...jobFields },
   }, async ({ agent_id, ...job }) => execute(async () => {
     const agent = await agentFor(agent_id, "jobs.create");

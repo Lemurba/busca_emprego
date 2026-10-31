@@ -19,8 +19,13 @@ const SECTIONS: ReadonlyArray<{ heading: string; types: readonly string[] }> = [
   { heading: "PROJETOS", types: ["projects", "project"] },
 ];
 
-/** Topo do currículo, sem título de seção. */
-const HEADER_TYPES = new Set(["name", "role"]);
+/**
+ * Topo do currículo, sem título de seção: nome e cargo. O import de JSON Resume grava
+ * `name`/`role`; o extrator de PDF, `full_name`/`target_role` (QAF-02).
+ */
+const HEADER_NAME_TYPES = ["name", "full_name"] as const;
+const HEADER_ROLE_TYPES = ["role", "target_role"] as const;
+const HEADER_TYPES = new Set<string>([...HEADER_NAME_TYPES, ...HEADER_ROLE_TYPES]);
 
 /**
  * Preferências de busca (onde e como a pessoa aceita trabalhar) servem aos eliminatórios,
@@ -33,6 +38,7 @@ const LINE_LABELS: Record<string, string> = {
   contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link", location: "Localização",
   seniority: "Senioridade", years_experience: "Anos de experiência", work_authorization: "Autorização de trabalho",
   achievement: "Conquista", achievements: "Conquistas",
+  name: "Nome", full_name: "Nome", role: "Cargo", target_role: "Cargo pretendido",
 };
 
 function text(value: unknown): string {
@@ -133,6 +139,15 @@ function contactLine(type: string, value: unknown, line: string) {
   return `${LINE_LABELS[type] ?? humanType(type)}: ${line}`;
 }
 
+/**
+ * QAF-14: valor de um fato em texto legível (o mesmo do currículo ATS), para a revisão do perfil
+ * no painel: "Bachelor em Information Technology — University of Oklahoma (2011-06-01 – 2014-01-01)",
+ * nunca "institution: … · studyType: …".
+ */
+export function factValueText(type: string, value: unknown): string {
+  return itemLines(type, value).join(" · ");
+}
+
 export function factualAtsContent(facts: readonly Fact[]): string {
   const byType = new Map<string, Fact[]>();
   for (const fact of facts) {
@@ -142,7 +157,7 @@ export function factualAtsContent(facts: readonly Fact[]): string {
   }
   const take = (type: string) => { const items = byType.get(type) ?? []; byType.delete(type); return items; };
   const blocks: string[] = [];
-  const header = [...take("name"), ...take("role")].flatMap((fact) => itemLines(String(fact.type), fact.value));
+  const header = [...HEADER_NAME_TYPES.flatMap((type) => take(type)), ...HEADER_ROLE_TYPES.flatMap((type) => take(type))].flatMap((fact) => itemLines(String(fact.type), fact.value));
   if (header.length) blocks.push(header.join("\n"));
   for (const section of SECTIONS) {
     const lines = section.types.flatMap((type) => take(type).flatMap((fact) => {

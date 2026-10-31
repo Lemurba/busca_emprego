@@ -20,7 +20,14 @@ export function listSourceConfigs(projectId = storeProjectId()): SourceConfigRec
  */
 export function listSourceConfigsWithReadiness(projectId = storeProjectId()) {
   // `connector`: fonte de conector determinístico (src/connectors), que o painel testa de verdade.
-  return listSourceConfigs(projectId).map((source) => ({ ...source, effectiveReadiness: sourceReadiness(source), connector: Boolean(connectorById(source.id)) }));
+  // QAF-08: `connector_companies` conta as empresas ativas do conector; sem nenhuma, o teste de
+  // acesso não tem o que testar e o painel explica isso em vez de oferecer o botão.
+  const companies = new Map((db.prepare("SELECT connector, COUNT(*) AS count FROM connector_companies WHERE project_id=? AND enabled=1 GROUP BY connector").all(projectId) as { connector: string; count: number }[])
+    .map((row) => [row.connector, Number(row.count)]));
+  return listSourceConfigs(projectId).map((source) => {
+    const connector = Boolean(connectorById(source.id));
+    return { ...source, effectiveReadiness: sourceReadiness(source), connector, connector_companies: connector ? companies.get(source.id) ?? 0 : null };
+  });
 }
 
 function sourceReadiness(source: SourceConfigRecord): { status: string; reason: string } {

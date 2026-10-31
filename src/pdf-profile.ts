@@ -561,6 +561,19 @@ function listItems(lines: SourceLine[], keepYears = false): SourceLine[] {
  */
 const DETAIL_LABEL = /^[\p{L} ]{2,30}:\s+\S/u;
 
+/**
+ * QAF-13: título completo numa linha só ("Cargo - Empresa (2018-2021)"): antes do período há
+ * cargo e empresa separados por " - ", " — ", " @ " ou " | ". Uma linha assim abre a própria
+ * entrada, então a linha anterior a ela é detalhe da entrada atual, não o cargo da próxima
+ * (diferente de "Empresa X | 2020 - atual", que só traz a empresa antes do período).
+ */
+function completeTitle(text: string): boolean {
+  const period = YEAR_OR_CURRENT.exec(text);
+  if (!period) return false;
+  const prefix = text.slice(0, period.index).replace(/[\s(|,–—-]+$/u, "");
+  return /\S\s[-–—@|]\s\S/u.test(prefix);
+}
+
 function entryItems(lines: SourceLine[]): Array<{ first: SourceLine; parts: string[] }> {
   const entries: Array<{ first: SourceLine; parts: string[]; hasBullets: boolean; hasYear: boolean }> = [];
   const allBullets = lines.length > 1 && lines.every((line) => BULLET.test(line.text));
@@ -571,7 +584,7 @@ function entryItems(lines: SourceLine[]): Array<{ first: SourceLine; parts: stri
     const year = YEAR_OR_CURRENT.test(text);
     const current = entries.at(-1);
     const next = lines[index + 1];
-    const titleBeforePeriod = !year && !!next && !BULLET.test(next.text) && YEAR_OR_CURRENT.test(stripBullet(next.text));
+    const titleBeforePeriod = !year && !!next && !BULLET.test(next.text) && YEAR_OR_CURRENT.test(stripBullet(next.text)) && !completeTitle(stripBullet(next.text));
     // "Projeto: ...", "Tecnologias: ..." sem marcador também são detalhes da entrada atual.
     const labeled = DETAIL_LABEL.test(text);
     const startsNew = !current || (allBullets ? bullet : !bullet && !labeled && (current.hasBullets || (year && current.hasYear) || (titleBeforePeriod && current.hasYear)));

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { openTempStore } from "./helpers/temp-db.mjs";
+import { readySource } from "./helpers/ready-source.mjs";
 
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 
@@ -87,12 +88,15 @@ test("Production foundation feedback, validation, and persisted workflow", async
   assert.match(scout.prompt, /uma pergunta por vez/i);
   assert.match(scout.prompt, /“Outro”/);
   assert.equal(scout.hermes_prompt_optimization, true);
+  // A fonte do coletor precisa estar pronta (QAF-03); a vaga fica com o id dela (QAF-10).
+  readySource(store, { id: "company-sites", name: "site autorizado", domain: "company.example.test" });
   const discovered = store.createJobFromAgent(scout.id, {
     title: "Analista EHS", company: "Empresa", source: "site autorizado", source_url: "https://company.example.test/jobs/1",
     job_url: "https://company.example.test/jobs/1", linkedin_post_url: "https://www.linkedin.com/posts/example-1",
     description: "Descrição integral encontrada.", benefits: "Benefícios encontrados."
   });
   assert.equal(discovered.job_url, "https://company.example.test/jobs/1");
+  assert.equal(discovered.source, "company-sites", "o nome de exibição vira o id da fonte");
   assert.match(discovered.description, /integral/);
   // Rever a vaga não é erro nem sobrescreve o cartão: vira nova ocorrência da vaga canônica.
   const resighted = store.createJobFromAgent(scout.id, {

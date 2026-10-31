@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { sha256Hex } from "../hash.js";
 import type { Job } from "../types.js";
-import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, companyKey, extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "../domain.js";
+import { canonicalizeJobUrl, validateCoordinates, compareExactIdentity, compareFuzzyDuplicate, companyKey, extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "../domain.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { jobDedupKey, jobDescriptionHash } from "./dedup-keys.js";
 import { idFor, now, parseObject } from "./util.js";
@@ -13,6 +13,7 @@ import { applySuppression } from "./preferences.js";
 import { getRound } from "./sources.js";
 import { mapJob } from "./mappers.js";
 import { DomainError } from "../errors.js";
+import { isIsoDeadline } from "../deadline.js";
 import type { DuplicateDecision, PossibleDuplicate } from "../bootstrap-payload.js";
 
 export function json(value: unknown): string {
@@ -27,7 +28,7 @@ const sourceItemFields = new Set([
   "source_id", "source_job_id", "title", "company", "location_text", "work_model", "seniority", "description", "benefits",
   "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period",
   "posted_at", "deadline_at", "opening_status", "opening_checked_at", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs",
-  "requirements_json"
+  "requirements_json", "latitude", "longitude"
 ]);
 
 /**
@@ -55,6 +56,13 @@ export function validateSourceBatch(sourceId: string, batch: Record<string, unkn
     if (String(item.source_id ?? sourceId) !== sourceId || !String(item.job_url ?? "").trim() || !String(item.title ?? "").trim() || !String(item.company ?? "").trim()) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.required`);
     const opening = String(item.opening_status ?? "unknown");
     if (!["open", "closed", "unknown"].includes(opening)) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.opening_status`);
+    // QAF-11: coordenadas (como em POST /api/jobs) só em par e dentro dos limites.
+    if (item.latitude != null || item.longitude != null) {
+      const coordinates = validateCoordinates({ latitude: item.latitude == null ? null : Number(item.latitude), longitude: item.longitude == null ? null : Number(item.longitude) });
+      if (coordinates.fieldErrors.length) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.coordinates`);
+    }
+    // QAF-01: prazo no mesmo formato aceito por POST /api/jobs (AAAA-MM-DD ou data-hora com fuso).
+    if (item.deadline_at != null && String(item.deadline_at).trim() !== "" && !isIsoDeadline(String(item.deadline_at))) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.deadline_at`);
     if (item.opening_checked_at != null && (!ISO_DATE_TIME.test(String(item.opening_checked_at)) || Number.isNaN(Date.parse(String(item.opening_checked_at))))) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.opening_checked_at`);
     for (const field of ["job_url", "source_url", "linkedin_post_url", "application_url"] as const) {
       if (item[field]) canonicalizeJobUrl(String(item[field]));
@@ -189,6 +197,8 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
     requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
     additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
     application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), opening_checked_at: openingCheckedAt(item), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at),
+    latitude: item.latitude == null ? null : Number(item.latitude), longitude: item.longitude == null ? null : Number(item.longitude),
+    deadline_at: item.deadline_at == null || String(item.deadline_at).trim() === "" ? null : String(item.deadline_at).trim(),
     ...(item.requirements_json == null ? {} : { requirements_json: normalizeJobRequirements(item.requirements_json) })
   };
   // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.

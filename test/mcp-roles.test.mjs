@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { startRadarServer } from "./helpers/radar-server.mjs";
+import { markSourcesReady } from "./helpers/ready-source.mjs";
 
 // Issues #11 (rascunho de prompt não vale até publicação; conteúdo web não confiável)
 // e #12 (servidor MCP por papel, agente fixo por processo).
@@ -23,6 +24,8 @@ const [{ createRadarMcpServer, RADAR_MCP_ROLES, RADAR_MCP_TOOLS }, store] = awai
 ]);
 // Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
 store.openStore();
+// Vagas de agente só entram de fonte pronta (QAF-03).
+markSourcesReady(store, ["gupy", "lever"]);
 // #10: o MCP chama a API HTTP do dashboard (servidor real sobre o mesmo banco do teste).
 const api = await startRadarServer({ dbPath: process.env.RADAR_DB_PATH });
 process.env.RADAR_API_URL = api.url;

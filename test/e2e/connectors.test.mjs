@@ -320,6 +320,7 @@ try {
     const enriched = store.listJobs().find((job) => job.source === "smartrecruiters");
     assert.equal(enriched.salary_min, 10000, "campos do JSON-LD chegam à vaga pelo caminho de ingestão");
     assert.match(enriched.description, /Responsabilidades/u);
+    assert.equal(enriched.deadline_at, "2026-12-01T00:00:00.000Z", "QAF-01: o prazo lido pelo conector chega à vaga");
     assert.equal(run.enrichment.jsonld, 1);
     assert.equal(run.enrichment.needs_llm, 1, "o Designer (Lever) sem descrição nem dado estruturado vai para a fila de LLM");
     const queue = connectorStore.listLlmEnrichmentQueue();

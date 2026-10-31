@@ -67,7 +67,8 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
   return getResume(id);
 }
 
-export function updateResume(id: string, patch: Partial<Resume>) {
+/** `actor` vai para o fluxo e a auditoria: quem desfaz um APROVO fica registrado como quem fez (N2). */
+export function updateResume(id: string, patch: Partial<Resume>, actor = "user") {
   if (!db.prepare("SELECT id FROM resumes WHERE id = ?").get(id)) throw new DomainError("resume.not_found");
   if (patch.status === "approved") throw new DomainError("resume.approval.human_required", 400);
   const allowed = ["base_resume_id", "title", "status", "content", "keywords", "changes"] as const;
@@ -88,14 +89,14 @@ export function updateResume(id: string, patch: Partial<Resume>) {
       // Removing the approval returns the job to the resume stage, unless another approved resume remains.
       const otherApproved = db.prepare("SELECT id FROM resumes WHERE job_id=? AND status='approved' AND id<>? LIMIT 1").get(current.job_id, id);
       if (!otherApproved) {
-        abortApplyingJob(current.job_id, "resume_changed", "user");
+        abortApplyingJob(current.job_id, "resume_changed", actor);
         const job = db.prepare("SELECT status FROM jobs WHERE id=?").get(current.job_id) as { status: JobStatus } | undefined;
-        if (job && ["resume_approved", "ready_to_apply"].includes(job.status)) applyWorkflowCommand(current.job_id, "revise_resume", { actor: "user", data: { reason: "approved_resume_edited", resume_id: id } });
+        if (job && ["resume_approved", "ready_to_apply"].includes(job.status)) applyWorkflowCommand(current.job_id, "revise_resume", { actor, data: { reason: "approved_resume_edited", resume_id: id } });
       }
     }
     refreshResumeCoverage(id);
     refreshResumeFactChecks(id);
-    audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
+    audit("resume", id, "updated", { changed_fields: Object.keys(patch), actor });
   });
   return getResume(id);
 }

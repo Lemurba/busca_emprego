@@ -9,6 +9,7 @@ import { markJobOpen } from "./helpers/liveness.mjs";
 import { FIELDS_SUMMARY, TINY_PNG_BASE64 } from "./helpers/final-confirmation.mjs";
 import { confirmedProfile } from "./helpers/profile.mjs";
 import { recordApiCalls, startRadarServer } from "./helpers/radar-server.mjs";
+import { markSourcesReady } from "./helpers/ready-source.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-mcp-test-"));
 process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
@@ -22,6 +23,8 @@ const [{ createRadarMcpServer, RADAR_MCP_TOOLS, RADAR_MCP_ROLES }, store] = awai
 ]);
 // Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
 store.openStore();
+// Vagas de agente só entram de fonte pronta (QAF-03).
+markSourcesReady(store, ["gupy"]);
 
 // #10: o MCP fala só com a API HTTP do dashboard (servidor real, mesmo banco do teste).
 const api = await startRadarServer({ dbPath: process.env.RADAR_DB_PATH });
