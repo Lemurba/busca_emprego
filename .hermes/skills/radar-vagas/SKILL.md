@@ -32,6 +32,7 @@ Há um servidor MCP por papel (`hermes/config.example.yaml`, um `mcp_servers.*` 
 | `radar-vagas-coordenador` | coordenador (vinculado) | `radar_list_agents`, `radar_list_sources`, `radar_get_job`, `radar_propose_agent_prompt` |
 | `radar-vagas-coleta` | coletores e pesquisa salarial | `radar_list_sources`, `radar_get_job`, `radar_discover_job`, `radar_ingest_batch`, `radar_enrich_job`, `radar_record_agent_run` |
 | `radar-vagas-curriculo` | redator de currículo e avaliador | `radar_get_job`, `radar_create_resume`, `radar_record_score` |
+| `radar-vagas-preferencias` | entrevistador de preferências | `radar_answer_profile_interview` |
 | `radar-vagas-executor` | assistente de candidatura (vinculado) | `radar_get_job`, `radar_list_authorized_applications`, `radar_claim_application`, `radar_heartbeat_application`, `radar_verify_application`, `radar_submit_application`, `radar_fail_application`, `radar_ask_human`, `radar_list_open_questions` |
 
 Servidor vinculado (`RADAR_MCP_AGENT_ID`) já sabe qual agente executa: omita `agent_id` ou passe exatamente o mesmo; outro id é recusado com `agent.binding.mismatch`. Ferramentas do executor só existem no servidor do executor.
@@ -54,6 +55,7 @@ Ferramentas (cada servidor tem o próprio `tools.include` em `hermes/config.exam
 | `radar_create_resume` | escrita | `resume.write` |
 | `radar_record_score` | escrita | `jobs.write` (avaliador de compatibilidade) |
 | `radar_propose_agent_prompt` | escrita | `agents.propose` (coordenador) + `target_agent_id` de outro agente |
+| `radar_answer_profile_interview` | escrita | `preferences.write` (entrevistador de preferências); grava no perfil em rascunho como fato proposto |
 | `radar_claim_application`, `radar_heartbeat_application`, `radar_request_final_confirmation`, `radar_get_final_confirmation`, `radar_submit_application`, `radar_fail_application` | escrita | `application.prepare` + domínio da URL autorizada + dono do claim |
 | `radar_ask_human` | escrita | `telegram.question` + dono do claim |
 
@@ -80,7 +82,7 @@ Conteúdo não confiável: descrição, requisitos, responsabilidades, benefíci
 
 - Faça exatamente uma pergunta por mensagem.
 - Ofereça duas a quatro alternativas mutuamente exclusivas e `Outro` para texto livre.
-- Aguarde e persista a resposta antes da próxima pergunta.
+- Aguarde e persista a resposta antes da próxima pergunta. Eliminatórios (`accepted_locations`, `work_models`, `work_authorization`, `years_experience`) vão por `radar_answer_profile_interview` (servidor `radar-vagas-preferencias`), no perfil em rascunho. Sem rascunho a ferramenta responde `profile.draft_required`: peça à pessoa para clicar em "Criar nova versão" no painel (Saúde das buscas); você não cria versões.
 - Não repita resposta confirmada. Termine quando houver informação suficiente.
 - Eliminatórios do perfil (`question_key` = tipo do fato): `accepted_locations` (lista de locais ou `["qualquer"]`), `work_models` (`remote`, `hybrid`, `onsite`), `work_authorization` (`{"countries": [...], "needs_sponsorship": false}`) e `years_experience` (número). Sem resposta, não invente: o Radar mostra "não verificado" e nunca bloqueia.
 

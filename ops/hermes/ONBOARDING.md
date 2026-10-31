@@ -105,7 +105,7 @@ RADAR_INTERNAL_SERVICE_TOKEN=<valor>
 Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste cada servidor:
 
 ```sh
-for papel in coordenador coleta curriculo executor; do hermes mcp test "radar-vagas-$papel"; done
+for papel in coordenador coleta curriculo preferencias executor; do hermes mcp test "radar-vagas-$papel"; done
 ```
 
 Um servidor MCP por papel (mesmo `dist/src/mcp-server.js`, separado por `RADAR_MCP_ROLE`):
@@ -115,6 +115,7 @@ Um servidor MCP por papel (mesmo `dist/src/mcp-server.js`, separado por `RADAR_M
 | `radar-vagas-coordenador` | `coordenador` | `coordinator` (escopo `agents.propose`) | obrigatório |
 | `radar-vagas-coleta` | `coleta` | `source_scout`, `job_enrichment` | opcional (um bloco por coletor isola portais) |
 | `radar-vagas-curriculo` | `curriculo` | `resume_writer`, `match_evaluator` | opcional |
+| `radar-vagas-preferencias` | `preferencias` | `preference_learner` (escopo `preferences.write`; respostas da entrevista viram fatos propostos no rascunho do perfil) | opcional |
 | `radar-vagas-executor` | `executor` | `application_assistant` | obrigatório |
 
 Cada processo registra só as ferramentas do papel (`tools.include` igual a `RADAR_MCP_ROLES` em `src/mcp-tools.ts`); `claim`/`verify`/`submit`/`fail`/`ask_human` existem apenas no executor. Com vínculo, `agent_id` divergente no argumento é recusado (`agent.binding.mismatch`); agente de outro papel é recusado com `agent.role.forbidden`. Sem `RADAR_MCP_ROLE` o processo sobe em `leitura` (só `radar_list_agents`, `radar_list_sources`, `radar_get_job`).

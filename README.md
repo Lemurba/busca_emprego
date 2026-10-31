@@ -65,12 +65,23 @@ No Kanban atual, os cartões permanecem compactos. Ao abrir um cartão, o usuár
 
 PDFs de até 5 MB são guardados no SQLite local e podem ser selecionados, baixados e vinculados a currículos ATS. Os PDFs não são enviados para a API de eventos dos agentes; use o identificador do currículo-base e a rota `/api/base-resumes/{id}/file` quando a integração precisar lê-lo.
 
+### Perfil profissional (onboarding)
+
+Buscas, nota de aderência e currículos usam só o **perfil confirmado**. Para criá-lo:
+
+1. Em *Currículos*, envie o PDF e clique em **Criar perfil a partir deste PDF** (ou importe um JSON Resume). O painel abre a revisão do rascunho em *Saúde das buscas*.
+2. Revise cada informação proposta (valor, origem e evidência: página/trecho do PDF ou JSON Pointer) com **Confirmar** ou **Rejeitar**, ou use **Confirmar todos os pendentes** (só os que têm evidência).
+3. Responda os eliminatórios (locais, modelos de trabalho, autorização de trabalho, anos de experiência) na entrevista do rascunho. Respostas repassadas pelo Hermes (`radar_answer_profile_interview`) chegam como propostas e precisam da sua confirmação.
+4. **Confirmar perfil** fica desabilitado, com o motivo, enquanto houver pendentes. Ao confirmar, nasce o snapshot que as rodadas e o redator usam.
+
+Para mudar algo depois, **Criar nova versão** copia o perfil ativo para um rascunho N+1; **Descartar rascunho** apaga rascunhos que não serão usados. Confirmar, revisar, descartar e criar versão são decisões humanas: o token de serviço recebe `403`.
+
 ### Importar e exportar em JSON Resume
 
 O Radar lê e grava currículos no formato aberto [JSON Resume v1](https://jsonresume.org/schema), sem trocar o modelo interno: o documento vira **fatos do perfil profissional**, e a exportação é montada a partir dos fatos confirmados.
 
 - **Importar** (`POST /api/profiles/import/json-resume`, corpo = o próprio documento, até 1 MB; na tela *Currículos*, botão “Importar JSON Resume”): cria uma **nova versão do perfil em rascunho** com `source: json_resume` e sem PDF-base. Cada trecho vira um fato `origin: import`, `state: proposed`, cuja evidência é o JSON Pointer de origem (`/work/0`, `/skills/1`...). Mapeamento: `basics.name` → `name`, `label` → `role`, `email` → `contact_email`, `phone` → `contact_phone`, `url` e `profiles[]` → `professional_link`, `summary` → `summary`, `location` → `location`; `work[]` → `experience` (`company`, `position`, datas, `summary`, `highlights[]`), `education[]` → `education`, `certificates[]` → `certifications`, `skills[]` → `skills`, `languages[]` → `languages`, `projects[]` → `projects`. Outras seções (`volunteer`, `awards`, `publications`...) são ignoradas. Datas aceitas: `YYYY`, `YYYY-MM` ou `YYYY-MM-DD`; URLs só `http(s)`. Documento inválido responde `422 profile.import.invalid` com o caminho do erro em `message` e `details[].path`; documento sem nada aproveitável, `422 profile.import.empty`.
-- **Confirmar**: o fluxo é o de sempre (revisar cada fato e confirmar o perfil, que gera o snapshot). Fato `import` só é confirmável com o JSON Pointer como evidência.
+- **Confirmar**: o fluxo é o de sempre (revisar cada fato e confirmar o perfil, que gera o snapshot). Fato `import` só é confirmável com o JSON Pointer como evidência. Depois do import o painel abre direto a revisão do rascunho.
 - **Gerar currículo ATS**: perfis `json_resume` dispensam o PDF-base (`base_resume_id` opcional em `/api/resumes/generate`, sem exigir extração). Perfis de PDF continuam exigindo o PDF extraído.
 - **Exportar um currículo** (`GET /api/resumes/{id}/files/json`, botão “JSON Resume” ao lado de PDF/DOCX): `basics`, `education`, `certificates`, `languages`, `skills` e `projects` vêm dos fatos confirmados do snapshot gravado no currículo (ou, sem ele, do perfil confirmado atual); `work[]` vem dos fatos de experiência, com `highlights` tirados das linhas do conteúdo salvo agrupadas sob a linha que cita a empresa (melhor esforço; experiência sem linhas próprias mantém os destaques do fato). Linhas não atribuídas vão para `meta.radar.unmapped[]`. `meta.radar` traz `resume_id`, `version`, `status`, `content_sha256` (SHA-256 do conteúdo), `approved_at` (se aprovado), `exported_at` e o snapshot usado. Exportar não altera o currículo.
 - **Exportar o perfil-mestre** (`GET /api/profiles/{id}/export/json-resume`, link na tela *Operações*): só fatos confirmados.
@@ -117,7 +128,7 @@ O dashboard é a fonte de verdade. O Hermes usa o servidor MCP deste projeto e a
 | Caminho | Uso |
 | --- | --- |
 | `.hermes/skills/radar-vagas/SKILL.md` | Skill de projeto (fonte única); ativada com `hermes skills trust <raiz>` |
-| `hermes/config.example.yaml` | Fragmentos do `config.yaml`: um `mcp_servers.radar-vagas-<papel>` por papel (coordenador, coleta, currículo, executor; `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`, `tools.include`, `trust: untrusted`), `browser.cdp_url` |
+| `hermes/config.example.yaml` | Fragmentos do `config.yaml`: um `mcp_servers.radar-vagas-<papel>` por papel (coordenador, coleta, currículo, preferências, executor; `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`, `tools.include`, `trust: untrusted`), `browser.cdp_url` |
 | `hermes/plugin/` | Pacote portátil Agent Plugins v1 opcional (`plugin.json`, `mcp.json` sem credenciais, `skills/` gerada por `scripts/ops/build-hermes-plugin.mjs`) |
 | `hermes/cron/radar-watchdog.sh` | Watchdog para `hermes cron create "every 10m" --no-agent --script radar-watchdog.sh --deliver telegram` |
 
@@ -125,7 +136,7 @@ O dashboard é a fonte de verdade. O Hermes usa o servidor MCP deste projeto e a
 npm ci && npm run build
 hermes skills trust /opt/data/dashboard/busca_emprego
 # mescle hermes/config.example.yaml em /opt/data/config.yaml e então:
-for papel in coordenador coleta curriculo executor; do hermes mcp test "radar-vagas-$papel"; done
+for papel in coordenador coleta curriculo preferencias executor; do hermes mcp test "radar-vagas-$papel"; done
 ```
 
 Cada papel roda em um processo MCP próprio (`RADAR_MCP_ROLE`): o processo registra só as ferramentas do papel e só aceita agentes daquele papel; as ferramentas do executor (`claim`/`submit`/`fail`) existem apenas em `radar-vagas-executor`. `RADAR_MCP_AGENT_ID` prende o processo a um agente e recusa `agent_id` divergente (obrigatório para coordenador e executor). Rascunhos de prompt (`radar_propose_agent_prompt`, escopo `agents.propose` do coordenador) só valem depois de publicados no dashboard, e textos de vagas copiados da web voltam no envelope `untrusted_content`.
