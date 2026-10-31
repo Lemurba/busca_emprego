@@ -58,7 +58,7 @@ O app nunca se candidata sozinho: cada etapa de decisão acima é uma ação exp
 
 ## Agentes, permissões e navegação
 
-O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfis de usuário: quem tem a sessão do dashboard administra agentes. O token interno pode editar, pausar e propor prompts, mas criar, publicar, fazer rollback e descartar rascunho são decisões humanas (`403` para o token). Cada alteração gera uma versão imutável em rascunho; a publicação mostra a diferença contra a versão publicada e a origem do rascunho, e cada execução guarda a versão/snapshot publicado.
+O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfis de usuário: quem tem a sessão do dashboard administra agentes. O token interno pode editar, pausar, excluir e propor prompts, mas criar, publicar, fazer rollback e descartar rascunho são decisões humanas (`403` para o token), assim como aceitar os termos de uma fonte e mudar o kill-switch e os limites da automação. O token também administra fontes (criar, editar, excluir, prontidão, teste de fumaça) e as empresas curadas dos conectores. Cada alteração gera uma versão imutável em rascunho; a publicação mostra a diferença contra a versão publicada e a origem do rascunho, e cada execução guarda a versão/snapshot publicado.
 
 As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. Esses limites funcionais valem além da autenticação HTTP.
 
@@ -126,7 +126,7 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `POST` | `/api/resumes/{id}/approve` | Registrar aprovação humana da versão salva |
 | `GET` / `POST` | `/api/base-resumes` | Consultar a biblioteca ou enviar um PDF-base |
 | `POST` | `/api/profiles/import/json-resume` | Importar um JSON Resume como novo perfil em rascunho |
-| `POST` | `/api/base-resumes/{id}/create-profile` | Criar o perfil em rascunho a partir do PDF-base (só a sessão) |
+| `POST` | `/api/base-resumes/{id}/create-profile` | Criar o perfil em rascunho a partir do PDF-base (sessão ou token; o serviço só propõe, a confirmação é só da sessão) |
 | `GET` | `/api/profiles/drafts` | Rascunhos de perfil com fatos, pendências e eliminatórios em falta |
 | `POST` | `/api/profiles/{id}/facts/{factId}/review`, `/facts/review-all` | Confirmar ou rejeitar informações do rascunho (só a sessão) |
 | `POST` | `/api/profiles/{id}/confirm` | Confirmar o perfil e gerar o snapshot (só a sessão) |

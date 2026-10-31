@@ -30,11 +30,36 @@ function registeredRoutes() {
   return routes;
 }
 
+const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * A rota conta como documentada quando alguma linha do documento (linha de tabela ou parágrafo)
+ * traz o caminho inteiro, sem continuar em outro segmento (`/api/jobs` não vale por
+ * `/api/jobs/{}/score`), e o método na mesma linha. Aceita as formas combinadas do documento:
+ * "`GET` / `POST /api/...`", "`GET /api/...` / `PUT`" e "PUT/DELETE /api/...".
+ */
+function documented(lines, { method, path }) {
+  const bounded = new RegExp(`${escape(normalize(path))}(?![A-Za-z0-9/_{-])`, "u");
+  const verb = new RegExp(`(?<![A-Za-z])${method}(?![A-Za-z])`, "u");
+  return lines.some((line) => bounded.test(line) && verb.test(line));
+}
+
+test("o critério de documentação exige o método e o caminho inteiro", () => {
+  const lines = ["| `GET /api/jobs/{}/score` | Nota |", "| `POST /api/rounds` | Inicia |", "`GET` / `POST /api/resumes/{}/parse-check`"];
+  assert.equal(documented(lines, { method: "GET", path: "/api/jobs/{id}/score" }), true);
+  assert.equal(documented(lines, { method: "POST", path: "/api/jobs/{id}/score" }), false, "método novo num caminho documentado");
+  assert.equal(documented(lines, { method: "GET", path: "/api/jobs/{id}/sc" }), false, "prefixo de um caminho documentado");
+  assert.equal(documented(lines, { method: "GET", path: "/api/jobs/{id}" }), false, "caminho curto dentro de um longo");
+  assert.equal(documented(lines, { method: "DELETE", path: "/api/rounds" }), false);
+  assert.equal(documented(lines, { method: "GET", path: "/api/resumes/{id}/parse-check" }), true);
+  assert.equal(documented(lines, { method: "POST", path: "/api/resumes/{id}/parse-check" }), true);
+});
+
 test("toda rota registrada está documentada em docs/agent-api.md", () => {
   const routes = registeredRoutes();
   assert.ok(routes.length > 100, `esperava a tabela completa de rotas, achei ${routes.length}`);
-  const doc = normalize(read("docs/agent-api.md"));
-  const missing = routes.filter(({ path }) => !doc.includes(normalize(path))).map(({ method, path }) => `${method} ${path}`);
+  const lines = normalize(read("docs/agent-api.md")).split("\n");
+  const missing = routes.filter((route) => !documented(lines, route)).map(({ method, path }) => `${method} ${path}`);
   assert.deepEqual(missing, [], "rotas sem documentação em docs/agent-api.md");
 });
 

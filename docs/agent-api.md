@@ -17,14 +17,14 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 
 - Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes (porta canônica 8787; a instalação pode trocar `PORT` no `.env.local`).
 - Autenticação: toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` com o valor de `RADAR_INTERNAL_SERVICE_TOKEN` **ou** o cookie `radar_session` do dashboard (obtido em `GET /auth?token=<RADAR_DASHBOARD_TOKEN>`). Sem credencial: `401`. Sem token interno configurado no servidor: `503 internal_token_not_configured`.
-- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil e revisão de fatos (`/api/profiles/{id}/confirm`, `/facts/{factId}/review`, `/facts/review-all`), descarte de rascunho (`DELETE /api/profiles/{id}`) e nova versão do perfil (`/api/profiles/{id}/new-version`), fato de perfil `origin: "user"` ou já `confirmed`, mesclagem de duplicatas e o desfazer (`/api/possible-duplicates/{id}/resolve`, `/undo`), resposta a pergunta humana pelo painel (`/api/human-questions/{id}/respond`), resolução de conflito (`/api/field-conflicts/{id}/resolve`), exclusão do currículo-base (`DELETE /api/base-resumes/{id}`), termos de fonte e criação/publicação/rollback/descarte de rascunho de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
+- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `/unsuppress`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil e revisão de fatos (`/api/profiles/{id}/confirm`, `/facts/{factId}/review`, `/facts/review-all`), descarte de rascunho (`DELETE /api/profiles/{id}`) e nova versão do perfil (`/api/profiles/{id}/new-version`), fato de perfil `origin: "user"` ou já `confirmed`, mesclagem de duplicatas e o desfazer (`/api/possible-duplicates/{id}/resolve`, `/undo`), resposta a pergunta humana pelo painel (`/api/human-questions/{id}/respond`), resolução de conflito (`/api/field-conflicts/{id}/resolve`), exclusão do currículo-base (`DELETE /api/base-resumes/{id}`), termos de fonte e criação/publicação/rollback/descarte de rascunho de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
 - Auditoria: o ator gravado vem da credencial — `human:dashboard` (sessão), `service:<nome>` (token; `<nome>` do header opcional `x-radar-service-name`, padrão `internal`) e `agent:<agent_id>` (MCP). `GET /api/jobs/{id}/history` devolve transições e decisões da vaga com o ator.
 - O `Host` precisa estar em `RADAR_ALLOWED_HOSTS`; rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
 - Não envie `Authorization` nem `X-Project-Id`: o projeto vem da instalação (`RADAR_PROJECT_ID`, padrão `busca-emprego`) e a única credencial de agente é `x-radar-service-token`.
-- Escopo de projeto: listagens, bootstrap, fila do executor (`GET /api/authorized-applications`) e o painel de automação mostram só o projeto da instalação. Rotas por id (`/api/jobs/{id}…`, `/api/resumes/{id}…`, `/api/applications/{id}…`, `/api/base-resumes/{id}…`, `/api/profiles/{id}…`, `/api/human-questions/{id}…`, `/api/agents/{id}/jobs/{jobId}…`) e ids no corpo (`job_id`, `resume_id`, `application_id`, `base_resume_id`, `profile_id`) de outro projeto respondem `404 <recurso>.not_found`, como um id inexistente. O mesmo PDF-base e a mesma vaga manual podem existir em projetos diferentes. O kill-switch, os limites e o uso diário da automação são da instalação (valem para todos os projetos: protegem a mesma pessoa).
+- Escopo de projeto: listagens, bootstrap, fila do executor (`GET /api/authorized-applications`) e o painel de automação mostram só o projeto da instalação. Rotas por id (`/api/jobs/{id}…`, `/api/resumes/{id}…`, `/api/applications/{id}…`, `/api/base-resumes/{id}…`, `/api/profiles/{id}…`, `/api/human-questions/{id}…`, `/api/agents/{id}/jobs/{jobId}…`) e ids no corpo (`job_id`, `resume_id`, `application_id`, `base_resume_id`, `profile_id`) de outro projeto respondem `404 <recurso>.not_found`, sem revelar que o recurso existe. Um id inexistente segue para a rota: a maioria também responde `404 <recurso>.not_found`, algumas respondem o genérico `404 not_found` e algumas sub-listas respondem `200` vazio (ver a nota ao fim deste documento). O mesmo PDF-base e a mesma vaga manual podem existir em projetos diferentes. O kill-switch, os limites e o uso diário da automação são da instalação (valem para todos os projetos: protegem a mesma pessoa).
 - Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. O servidor confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
 - O aplicativo não cria dados exemplificativos: o banco inicia vazio e só recebe vagas de agentes, rodadas ou uso real do dashboard. A anonimização legada permanece opt-in e deve ficar desabilitada em produção.
 
@@ -61,7 +61,7 @@ As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.cre
 | `jobs.enrich` | Propor atualização descritiva com proveniência por campo | Sobrescrever silenciosamente dado humano/mais confiável |
 | `salary.lookup` | Consultar e registrar salário com moeda, período, confiança e evidência | Inventar valor ou converter sem taxa/configuração auditada |
 
-Administrar configurações exige a sessão do dashboard; o token interno só edita, pausa e exclui agentes, e cada edição dele vira um rascunho que precisa de revisão humana para ser publicado. As capacidades acima limitam a execução dos agentes; não há perfis de usuário dentro do dashboard.
+Só a sessão do dashboard cria, publica, faz rollback e descarta rascunho de agente, aceita os termos de uma fonte e altera o kill-switch e os limites da automação (`PUT /api/settings/automation`); com o token interno essas rotas respondem `403 human_session_required`. O token interno edita, pausa e exclui agentes e propõe prompts (cada edição dele vira um rascunho que precisa de revisão humana para ser publicado), e também cria, edita e exclui fontes, registra prontidão e roda o teste de fumaça, e administra as empresas curadas dos conectores. As capacidades acima limitam a execução dos agentes; não há perfis de usuário dentro do dashboard.
 
 ## Regras de preenchimento
 
@@ -152,7 +152,7 @@ Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browse
 
 ### `GET /api/jobs/{id}`
 
-Retorna a vaga pelo identificador, incluindo `description`, `responsibilities`, `requirements`, `benefits`, `additional_information`, `linkedin_post_url`, `job_url` e `application_url`. Vaga inexistente ou de outro projeto → `404 job.not_found`.
+Retorna a vaga pelo identificador, incluindo `description`, `responsibilities`, `requirements`, `benefits`, `additional_information`, `linkedin_post_url`, `job_url` e `application_url`. Vaga de outro projeto → `404 job.not_found`; vaga inexistente → `404 not_found`.
 
 ### `POST /api/jobs`
 
@@ -531,14 +531,14 @@ Todas as rotas que alteram dados validam o corpo com um schema estrito (`src/htt
 | --- | --- |
 | `GET /api/rounds` | Rodadas do projeto, mais recente primeiro (perfil usado, fontes, estado e contadores) |
 | `POST /api/rounds` | `{ source_ids?, run_id? }`. Abre a rodada presa ao snapshot do perfil confirmado e às fontes **prontas** (`effectiveReadiness.status = ready`); fontes pedidas que não estão prontas ficam de fora. Sem perfil → `422 PROFILE_CONFIRMATION_REQUIRED`; sem fonte ativa → `422 ROUND_NO_SOURCES`; nenhuma pronta → `422 ROUND_SOURCES_NOT_READY`. No painel: *Saúde das buscas* → *Rodadas de busca* → “Iniciar rodada” |
-| `GET /api/rounds/{id}` | Uma rodada; de outro projeto ou inexistente → `404 round.not_found` |
+| `GET /api/rounds/{id}` | Uma rodada; de outro projeto ou inexistente → `404 not_found` |
 | `GET /api/rounds/{id}/duplicates` | Possíveis duplicatas que envolvem vagas observadas nesta rodada |
 | `POST /api/rounds/{id}/status` | (token interno) estado de uma fonte na rodada: `{ source_id, status, cursor?, error_code?, batch_number?, received_count?, accepted_count? }` |
 | `POST /api/rounds/{id}/batch` | (token interno) lote da fonte; formato descrito na tabela do perfil acima. Cada item passa pela mesma deduplicação multi-chave, supressão por regra e registro de ocorrência da ingestão do MCP |
 
 ### Rotas de agente do servidor MCP
 
-Usadas pelo `dist/src/mcp-server.js` (#10), só com o token interno e com o agente no caminho (o header `x-radar-agent-id` vira o ator `agent:<id>` da auditoria). O servidor confere que o agente existe no projeto, tem versão publicada, está habilitado e tem o escopo e os domínios exigidos.
+Usadas pelo `dist/src/mcp-server.js` (#10), com o agente no caminho (o header `x-radar-agent-id` vira o ator `agent:<id>` da auditoria). Ingestão (`/jobs`), lote (`/batches`), execuções (`/runs`) e enriquecimento (`/jobs/{jobId}/enrichment`) aceitam só o token interno, e o servidor confere que o agente existe no projeto, tem versão publicada, está habilitado e tem o escopo e os domínios exigidos. O catálogo publicado (`GET /api/agents/published`, `GET /api/agents/{id}/published`) e as propostas de prompt (`POST /api/agents/{id}/prompt-proposals`) aceitam a sessão do dashboard ou o token interno.
 
 | Método e rota | Uso |
 | --- | --- |
@@ -563,7 +563,7 @@ Usadas pelo `dist/src/mcp-server.js` (#10), só com o token interno e com o agen
 | `GET` / `POST /api/resumes/{id}/parse-check` | Teste de leitura do PDF gerado (extrai o texto e confere contato, seções e palavras-chave); `POST` roda de novo. O diálogo do `APROVO` mostra o resultado e não habilita “Aprovar” quando o parser não lê o PDF |
 | `GET /api/jobs/{id}/occurrences` | Onde e em que rodadas a vaga foi vista |
 | `GET /api/jobs/{id}/score` | Nota mais recente da vaga, ou `null` |
-| `POST /api/jobs/{id}/unsuppress` | Reexibe uma vaga ocultada por regra “Não tenho interesse” (visão Ocultadas) |
+| `POST /api/jobs/{id}/unsuppress` | Só com a sessão do painel (token → `403 human_session_required`): reexibe uma vaga ocultada por regra “Não tenho interesse” (visão Ocultadas) |
 | `POST /api/jobs/{id}/check-liveness` | “Verificar agora”: verificação determinística da vaga no servidor (ver `docs/operations-runbook.md` §4); responde a verificação e a vaga |
 | `GET /api/liveness/due?limit=` | (token interno) vagas com verificação vencida, para `scripts/ops/check-liveness.mjs` (padrão 50) |
 | `GET /api/possible-duplicates` | Possíveis duplicatas ainda pendentes de decisão |
@@ -592,7 +592,7 @@ repete o sufixo em `details.reason`. Qualquer erro que não seja de domínio (fa
 | `400` | JSON ou corpo inválido, ou portão humano sem a confirmação digitada | `invalid_json`, `invalid_body`, `resume.approval.confirmation_required` (APROVO), `application.authorization.confirmation_required` (AUTORIZO), `decision.confirmation_required` (TENHO INTERESSE / SEM TEMPO), `application.status.invalid`, `resume.interest_required` |
 | `401` | Sessão ou token ausente | `unauthorized` |
 | `403` | Decisão humana pedida pelo token de serviço, capacidade negada, agente desabilitado, URL fora de `allowed_domains`, automação pausada | `human_session_required`, `profile.confirm.forbidden`, `agent.domain.forbidden`, `application.internal_route_required`, `AUTOMATION_DISABLED` |
-| `404` | Rota ou registro desconhecido, ou de outro projeto | `not_found` (rota), `job.not_found`, `resume.not_found`, `application.not_found`, `base_resume.not_found`, `profile.not_found`, `round.not_found`, `human_question.not_found` |
+| `404` | Rota ou registro desconhecido, ou de outro projeto | `not_found` (rota, ou id inexistente nas rotas listadas na nota ao fim), `job.not_found`, `resume.not_found`, `application.not_found`, `base_resume.not_found`, `profile.not_found`, `round.not_found`, `human_question.not_found` |
 | `409` | Conflito de versão, idempotência, estado ou transição | `VERSION_CONFLICT`, `ILLEGAL_TRANSITION`, `PDF_DUPLICATE`, `application.already_exists`, `profile.draft_exists`, `resume.unverified_facts`, `resume.pdf_parse_failed`, `agent.version.review_required` |
 | `413` | Conteúdo maior que o limite | `payload_too_large`, `PDF_TOO_LARGE` |
 | `422` | Schema, evidência, configuração, domínio ou precondição inválidos | `validation.<campo>`, `PRECONDITION_FAILED`, `PROFILE_SNAPSHOT_REQUIRED`, `PDF_SIGNATURE_INVALID`, `job.salary.invalid:<campos>`, `profile.draft_required` |
@@ -604,4 +604,4 @@ existe mais o código genérico `radar.rule_violation` para frases sem código. 
 `ERROR_MESSAGES` (`src/errors.ts`); o MCP só troca a redação de alguns códigos para o agente. Todo código estável
 lançado em `src/` precisa de mensagem nesse dicionário (conferido por `test/error-contract.test.mjs`).
 
-Rotas por id respondem `404 <recurso>.not_found` para id inexistente ou de outro projeto. Só consultas que podem legitimamente não ter dado respondem `200` com `null`: `GET /api/profile/active` sem perfil confirmado e `GET /api/jobs/{id}/score` sem nota. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.
+Um recurso de outro projeto responde `404 <recurso>.not_found` em qualquer rota por id. Para um id inexistente, a resposta depende da rota: `GET /api/jobs/{id}`, `GET /api/profiles/{id}`, `GET /api/rounds/{id}`, `GET /api/rounds/{id}/duplicates`, os downloads `GET /api/resumes/{id}/files/(pdf|docx|json)`, `GET /api/base-resumes/{id}/file`, `DELETE /api/base-resumes/{id}` e `GET /api/applications/{id}/evidence/{evidenceId}` respondem o genérico `404 not_found`; as sub-listas `GET /api/jobs/{id}/occurrences`, `/history`, `/feedback` e `GET /api/profiles/{id}/facts` respondem `200 []`, e `GET /api/jobs/{id}/score` responde `200 null` (também quando a vaga não existe); as demais respondem `404 <recurso>.not_found`. `GET /api/profile/active` sem perfil confirmado responde `200 null`. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.
