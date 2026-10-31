@@ -60,22 +60,49 @@ export function companyKey(company: string, legalSuffixes: readonly string[] = D
 // Parâmetros de rastreamento removidos de qualquer domínio (além de utm_*).
 const TRACKING_PARAMETERS = new Set(["gclid", "fbclid", "msclkid", "dclid", "yclid", "igshid", "mc_cid", "mc_eid", "_hsenc", "_hsmi"]);
 
+function isPrivateIpv4(octets: readonly number[]): boolean {
+  const [a, b, c] = octets;
+  // 192.0.0.0/24 (atribuições IETF) e 198.18.0.0/15 (benchmark) também não são destinos públicos.
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31)
+    || (a === 192 && b === 168) || (a === 100 && b! >= 64 && b! <= 127) || a! >= 224
+    || (a === 192 && b === 0 && c === 0) || (a === 198 && (b === 18 || b === 19));
+}
+
+/** Os 8 grupos de 16 bits de um IPv6 já validado por isIP (aceita "::" e IPv4 embutido no fim). */
+function ipv6Groups(host: string): number[] {
+  let text = host.split("%")[0]!;
+  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/u.exec(text);
+  if (v4) {
+    const [, a, b, c, d] = v4.map(Number);
+    text = `${text.slice(0, v4.index)}${((a! << 8) | b!).toString(16)}:${((c! << 8) | d!).toString(16)}`;
+  }
+  const [head, tail] = text.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const fill = tail === undefined ? [] : Array.from({ length: 8 - left.length - right.length }, () => "0");
+  return [...left, ...fill, ...right].map((group) => parseInt(group, 16));
+}
+
 /** Blocks literal private/link-local destinations before any connector fetches them. */
 export function isPrivateDestination(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/gu, "").toLowerCase();
   if (["localhost", "localhost.localdomain", "broadcasthost"].includes(host) || host.endsWith(".localhost") || host.endsWith(".local")) return true;
   const version = isIP(host);
-  if (version === 4) {
-    const octets = host.split(".").map(Number);
-    const [a, b] = octets;
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-  }
+  if (version === 4) return isPrivateIpv4(host.split(".").map(Number));
   if (version === 6) {
-    const normalized = host.replace(/^0:0:0:0:0:ffff:/u, "::ffff:");
-    return normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd")
-      || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")
-      || normalized.startsWith("::ffff:");
+    const groups = ipv6Groups(host);
+    const embedded = (high: number, low: number) => isPrivateIpv4([high >> 8, high & 0xff, low >> 8, low & 0xff]);
+    const [g0, g1, g2, g3, g4, g5, g6, g7] = groups as [number, number, number, number, number, number, number, number];
+    const zeroPrefix = groups.slice(0, 5).every((group) => group === 0);
+    if (zeroPrefix && g5 === 0 && g6 === 0 && (g7 === 0 || g7 === 1)) return true; // :: e ::1
+    if (zeroPrefix && (g5 === 0xffff || g5 === 0)) return true; // IPv4 mapeado/compatível
+    if ((g0 & 0xfe00) === 0xfc00 || (g0 & 0xffc0) === 0xfe80 || (g0 & 0xff00) === 0xff00) return true; // ULA, link-local, multicast
+    // NAT64: 64:ff9b::/96 embute o IPv4 no fim; 64:ff9b:1::/48 é de uso local e nunca é público.
+    if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return embedded(g6, g7);
+    if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return true;
+    // 6to4: 2002::/16 embute o IPv4 nos bits 16-47.
+    if (g0 === 0x2002) return embedded(g1, g2);
+    return false;
   }
   return false;
 }

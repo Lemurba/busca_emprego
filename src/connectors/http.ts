@@ -81,6 +81,8 @@ export class ConnectorHttpClient {
   requests = 0;
   cost = 0;
   private readonly domains = new Map<string, DomainState>();
+  /** Início (relógio monotônico) da tentativa que produziu cada resposta: o prazo da requisição cobre o corpo. */
+  private readonly startedAt = new WeakMap<Response, number>();
   private readonly options: Required<Omit<ConnectorHttpOptions, "signal" | "maxCost">> & Pick<ConnectorHttpOptions, "signal" | "maxCost">;
 
   constructor(options: ConnectorHttpOptions = {}) {
@@ -139,12 +141,19 @@ export class ConnectorHttpClient {
     throw new ConnectorHttpError("connector.redirect.too_many");
   }
 
-  /** Corpo em streaming: para no limite (sem ler o resto) e respeita o tempo da requisição. */
+  /**
+   * Corpo em streaming: para no limite (sem ler o resto) e respeita o mesmo prazo da requisição,
+   * contado do início da tentativa (cabeçalhos + corpo cabem em requestTimeoutMs).
+   */
   private async readBody(response: Response): Promise<string> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
+    const started = this.startedAt.get(response) ?? performance.now();
+    const remaining = Math.max(0, this.options.requestTimeoutMs - (performance.now() - started));
+    const timer = setTimeout(() => controller.abort(), remaining);
     const onAbort = () => controller.abort();
-    this.options.signal?.addEventListener("abort", onAbort, { once: true });
+    // O prazo global pode ter vencido entre os cabeçalhos e a leitura: aborta já.
+    if (this.options.signal?.aborted) controller.abort();
+    else this.options.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const { bytes } = await readBodyCapped(response, this.options.maxBodyBytes, { onLimit: "error", signal: controller.signal });
       return new TextDecoder("utf-8").decode(bytes);
@@ -192,6 +201,7 @@ export class ConnectorHttpClient {
       const wait = state.nextAt - this.options.clock();
       if (wait > 0) await this.options.sleep(wait, this.options.signal);
       this.reserve();
+      const started = performance.now();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
       const onAbort = () => controller.abort();
@@ -227,6 +237,7 @@ export class ConnectorHttpClient {
       // Resposta boa: o atraso decai pela metade até o valor-base.
       state.delayMs = Math.max(this.options.baseDelayMs, Math.floor(state.delayMs / 2));
       state.nextAt = this.options.clock() + state.delayMs;
+      this.startedAt.set(response, started);
       return response;
     }
   }

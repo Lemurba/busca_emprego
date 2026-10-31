@@ -4,9 +4,12 @@
  * Sem internet: o DNS é falso e os corpos são streams locais.
  */
 import assert from "node:assert/strict";
+import { Readable } from "node:stream";
 import { describe, test } from "node:test";
-import { ConnectorHttpClient, ConnectorHttpError } from "../src/connectors/http.ts";
-import { pinnedHttpsFetch, pinnedLookup, readBodyCapped, safeFetch, SafeHttpError } from "../src/safe-http.ts";
+import { gzipSync } from "node:zlib";
+import { ConnectorBudgetError, ConnectorHttpClient, ConnectorHttpError } from "../src/connectors/http.ts";
+import { isPrivateDestination } from "../src/domain.ts";
+import { decoderFor, pinnedHttpsFetch, pinnedLookup, readBodyCapped, safeFetch, SafeHttpError } from "../src/safe-http.ts";
 
 const PUBLIC = { address: "93.184.216.34", family: 4 };
 const PRIVATE = { address: "10.0.0.7", family: 4 };
@@ -78,6 +81,17 @@ describe("DNS fixado (anti-rebinding)", () => {
   });
 });
 
+describe("faixas especiais tratadas como destino privado", () => {
+  test("NAT64, 6to4 e faixas IETF/benchmark que embutem ou alcançam a rede interna", () => {
+    for (const host of ["64:ff9b::7f00:1", "64:ff9b::a00:7", "64:ff9b:1::1", "2002:7f00:1::", "2002:a9fe:a9fe::1", "192.0.0.1", "198.18.0.1", "198.19.255.255", "[::1]", "::ffff:127.0.0.1", "ff02::1"]) {
+      assert.equal(isPrivateDestination(host), true, host);
+    }
+    for (const host of ["64:ff9b::808:808", "2002:808:808::1", "2606:2800:220:1::1", "198.20.0.1", "93.184.216.34"]) {
+      assert.equal(isPrivateDestination(host), false, host);
+    }
+  });
+});
+
 describe("corpo em streaming com limite", () => {
   test("modo erro: para no limite sem ler o resto (corpo infinito)", async () => {
     const { stream, state } = endlessBody(1024);
@@ -100,6 +114,24 @@ describe("corpo em streaming com limite", () => {
     assert.equal(read.truncated, true);
     const small = await readBodyCapped(new Response("abc"), 2500);
     assert.deepEqual([new TextDecoder().decode(small.bytes), small.truncated], ["abc", false]);
+  });
+
+  test("sinal já abortado: cancela o stream antes de recusar", async () => {
+    const { stream, state } = endlessBody(1024);
+    await assert.rejects(readBodyCapped(new Response(stream), 4096, { signal: AbortSignal.abort() }), (error) => error.kind === "timeout");
+    assert.equal(state.cancelled, true);
+  });
+
+  test("gzip: descomprimido no stream e o limite vale para os bytes descomprimidos", async () => {
+    const decode = (bytes) => new Response(Readable.toWeb(Readable.from([bytes]).pipe(decoderFor("gzip", "https://x.example.com/"))));
+    const json = JSON.stringify({ jobs: ["a", "b"] });
+    const read = await readBodyCapped(decode(gzipSync(json)), 4096, { onLimit: "error" });
+    assert.equal(new TextDecoder().decode(read.bytes), json);
+    // 1 MB de zeros comprime para ~1 KB: o limite de 4 KB recusa pelo tamanho real.
+    await assert.rejects(readBodyCapped(decode(gzipSync(Buffer.alloc(1024 * 1024))), 4096, { onLimit: "error" }), (error) => error.kind === "too_large");
+    assert.equal(decoderFor("identity", "u"), null);
+    assert.equal(decoderFor(undefined, "u"), null);
+    assert.throws(() => decoderFor("zstd-desconhecido", "u"), (error) => error instanceof SafeHttpError);
   });
 
   test("leitura travada aborta pelo sinal", async () => {
@@ -137,6 +169,22 @@ describe("cliente dos conectores usa o transporte seguro", () => {
   test("corpo travado respeita o timeout da requisição", async () => {
     const http = client(async () => new Response(stalledBody()), { requestTimeoutMs: 30 });
     await assert.rejects(http.getText("https://lento.example.com/"), (error) => error.code === "connector.request_timeout");
+  });
+
+  test("o prazo da requisição cobre cabeçalhos e corpo juntos", async () => {
+    // Cabeçalhos demoram ~60 ms de 100 ms: o corpo travado só tem o restante, não outros 100 ms.
+    const http = client(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); return new Response(stalledBody()); }, { requestTimeoutMs: 100 });
+    const started = performance.now();
+    await assert.rejects(http.getText("https://lento.example.com/"), (error) => error.code === "connector.request_timeout");
+    assert.ok(performance.now() - started < 150, `levou ${Math.round(performance.now() - started)} ms`);
+  });
+
+  test("prazo global vencido entre cabeçalhos e corpo para na hora", async () => {
+    const run = new AbortController();
+    const http = client(async () => { run.abort(); return new Response(stalledBody()); }, { requestTimeoutMs: 3000, signal: run.signal });
+    const started = performance.now();
+    await assert.rejects(http.getText("https://lento.example.com/"), (error) => error instanceof ConnectorBudgetError && error.code === "connector.timeout");
+    assert.ok(performance.now() - started < 1000);
   });
 
   test("o transporte recebe os IPs fixados", async () => {
