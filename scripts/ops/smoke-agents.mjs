@@ -369,16 +369,20 @@ try {
   });
   let profileId = "";
   let snapshotId = "";
+  // O servidor gera o id de cada fato; o redator cita o id do fato de habilidades.
+  let skillFactId = "";
   await t("perfil criado com fatos do usuário (estado confirmed)", async () => {
     const r = await api("POST", "/api/profiles", {
       base_resume_id: baseResumeId,
       facts: [
-        { id: "fact-skill", type: "skills", value: ["Analista de Dados", "SQL", "Power BI"], origin: "user", state: "confirmed" },
-        { id: "fact-exp", type: "experience", value: ["5 anos em análise de dados industriais"], origin: "user", state: "confirmed" },
+        { type: "skills", value: ["Analista de Dados", "SQL", "Power BI"], origin: "user", state: "confirmed" },
+        { type: "experience", value: ["5 anos em análise de dados industriais"], origin: "user", state: "confirmed" },
       ],
     });
     const profile = expect("criar perfil", r, 201);
     profileId = profile.id;
+    skillFactId = profile.facts.find((f) => f.type === "skills")?.id ?? "";
+    assert.ok(skillFactId, "fato de habilidades sem id");
     assert.equal(profile.status, "draft");
     assert.ok(profile.facts.some((f) => f.state === "confirmed"));
   });
@@ -431,7 +435,7 @@ try {
     expect("interesse", await api("POST", `/api/jobs/${job0}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" }), 200);
     const r = await api("POST", "/api/resumes/generate", {
       job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId,
-      facts_used: ["fact-skill"], keywords: ["SQL"], gaps: ["Power BI avançado fica como lacuna"],
+      facts_used: [skillFactId], keywords: ["SQL"], gaps: ["Power BI avançado fica como lacuna"],
     });
     const resume = expect("gerar ATS", r, 201);
     resumeA = resume.id;
@@ -440,7 +444,7 @@ try {
   });
   await t("gerar currículo sem interesse na vaga é bloqueado", async () => {
     const r = await api("POST", "/api/resumes/generate", {
-      job_id: anyOtherJob, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: ["fact-skill"],
+      job_id: anyOtherJob, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: [skillFactId],
     });
     assert.ok(r.status >= 400 && r.status < 500, `esperava 4xx, veio ${r.status}`);
   });
@@ -451,7 +455,7 @@ try {
   });
   await t("revisor detecta conteúdo inventado e bloqueia aprovação", async () => {
     const gen = expect("gerar 2", await api("POST", "/api/resumes/generate", {
-      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: ["fact-skill"], keywords: ["SQL"],
+      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: [skillFactId], keywords: ["SQL"],
     }), 201);
     expect("editar", await api("PATCH", `/api/resumes/${gen.id}`, { status: "review", content: "skills: Analista de Dados\ncertificacao: INVENTADA" }), 200);
     const review = expect("review fail", await api("POST", `/api/resumes/${gen.id}/review`, { verdict: "pass" }), 200);
