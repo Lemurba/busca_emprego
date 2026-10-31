@@ -7,7 +7,7 @@ Para uma instalação nova, siga primeiro [`ops/hermes/ONBOARDING.md`](../ops/he
 ## 1. Premissas e topologia suportada
 
 - Uma única instância HTTP do Radar por arquivo SQLite. Dois servidores jamais devem abrir o mesmo `RADAR_DB_PATH` por volume compartilhado.
-- Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI usa Node 24).
+- Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI roda em Node 22.16 e 24).
 - Código e dados no volume persistente `/opt/data` (padrão `/opt/data/dashboard/busca_emprego`, banco em `data/radar.sqlite`); `/opt/hermes` é do root e somente leitura na imagem oficial.
 - Porta canônica 8787, escutando em `RADAR_BIND_HOST` (padrão `127.0.0.1`). Uma instalação pode trocar a porta em `.env.local`. Não publicar diretamente na internet.
 - Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`). Interesse, `APROVO`, candidatura, `AUTORIZO`, revogação e demais portões humanos exigem a sessão e respondem `403 human_session_required` ao token de serviço.
@@ -75,7 +75,7 @@ Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver pr
    node scripts/ops/health-check.mjs
    ```
 
-6. Gerar o link de sessão como `radar` (`s6-setuidgid radar node scripts/ops/dashboard-link.mjs --send`), abrir o dashboard pelo link recebido e criar uma vaga sintética removível. Confirmar que `/api/bootstrap` sem cookie nem token responde 401, que `POST /api/jobs/<id>/decision` só com o token de serviço responde 403 e que `ls -l .env.local data/` mostra dono `radar` e modo 600.
+6. Gerar o link de sessão como `radar` (`s6-setuidgid radar node scripts/ops/dashboard-link.mjs --send`), abrir o dashboard pelo link recebido e conferir que as páginas carregam (sem criar vagas ou perfis fictícios: o banco de produção só recebe dados reais). Confirmar que `/api/bootstrap` sem cookie nem token responde 401, que `POST /api/jobs/<id>/decision` só com o token de serviço responde 403 e que `ls -l .env.local data/` mostra dono `radar` e modo 600.
 7. Executar `RADAR_PUBLIC_URL=<url do dashboard> node scripts/ops/verify-environment.mjs --environment production`. O verificador aceita HTTP somente em endereço privado/localhost.
 8. Verificar o Telegram do gateway do Hermes (`TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL`): `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e `node scripts/ops/notify-human-questions.mjs` (simulação; `--send` entrega via `hermes send`).
 9. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não ativar agendamentos ou candidatura automática com falhas, skips ou gates sem aprovação registrada.
@@ -141,9 +141,29 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 
 - verificar API, SQLite e volume com `health-check.mjs`;
 - verificar logs sem CV, tokens, URLs privadas ou conteúdo de prompts;
-- verificar fila/latência/falhas de fonte quando essas métricas forem implementadas;
-- executar uma busca controlada sem candidatura automática;
+- verificar filas, idade do backup e a última rodada em `GET /api/metrics` (painel “Saúde da instalação”); latência e falhas por fonte ainda não têm métrica;
+- concluir o primeiro uso (§4.1) e executar uma rodada controlada sem candidatura automática;
 - ligar a candidatura automática (`RADAR_AUTO_APPLICATION_ENABLED=true`) somente depois de Telegram entregando e `test/e2e/executor.test.mjs` verde; com o gate ligado, a fila autorizada exige o token interno e a vaga só é marcada como candidatada com evidência observável do portal.
+
+### 4.1 Primeiro uso (onboarding pelo painel)
+
+Uma instalação nova só busca vagas depois de dois portões humanos, ambos na sessão do dashboard. A sequência completa está no README ([Primeiro uso](../README.md#primeiro-uso-onboarding)); em resumo: link de sessão → PDF-base ou JSON Resume → revisão e **Confirmar perfil** → **Aceitar termos** e teste de acesso das fontes → **Iniciar rodada** → interesse e **Gerar currículo ATS** → `APROVO` → envio manual ou `AUTORIZO`.
+
+Diagnóstico quando o fluxo para:
+
+| Resposta | Onde aparece | O que fazer |
+| --- | --- | --- |
+| `403 human_session_required` | qualquer portão humano chamado com o token de serviço (Hermes, scripts) | É o comportamento esperado: a ação precisa ser feita pela pessoa no painel |
+| `409 profile.draft_exists` | criar perfil do PDF, importar JSON Resume, nova versão | Já há um rascunho: revise-o ou descarte-o em *Saúde das buscas* |
+| `422 PROFILE_FACTS_UNCONFIRMED` / `PROFILE_EMPTY` | Confirmar perfil | Revise as informações pendentes (ou confirme ao menos uma) |
+| `409 profile.draft_stale` | Confirmar perfil | O rascunho é mais velho que o perfil ativo: descarte e use **Criar nova versão** |
+| `422 BASE_RESUME_EXTRACTION_REQUIRED` | Gerar currículo ATS com perfil de PDF | O PDF-base não tem texto extraível (digitalizado como imagem); no painel, **Criar perfil a partir deste PDF** já fica desabilitado nesse caso. Use um PDF com texto ou um JSON Resume |
+| `422 PROFILE_CONFIRMATION_REQUIRED` | Iniciar rodada | Confirme o perfil antes |
+| `422 ROUND_NO_SOURCES` / `ROUND_SOURCES_NOT_READY` | Iniciar rodada | Nenhuma fonte ativa, ou nenhuma pronta: aceite os termos e teste o acesso em *Configurações* (o motivo de cada fonte aparece na coluna de prontidão) |
+| `422 source.smoke_test.company_required` | Testar acesso de um conector | Cadastre e ative uma empresa do conector em *Configurações* → *Empresas por conector* |
+| `422 PROFILE_SNAPSHOT_REQUIRED` | nota de aderência, Gerar currículo ATS | Sem perfil confirmado não há snapshot |
+| `409 resume.unverified_facts` | `APROVO` | Confirme, corrija ou remova cada afirmação pendente na checagem de fatos do currículo |
+| `422 job.liveness.stale` / `application.domain.not_ats` | `AUTORIZO` | Use “Verificar agora” na vaga; link fora de ATS de empresa só aceita envio manual |
 
 ## 5. Backup, retenção e restore
 

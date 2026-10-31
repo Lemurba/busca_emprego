@@ -183,6 +183,18 @@ O dashboard pode ser publicado de duas formas:
 1. **Host/porta próprios** (padrão): `RADAR_BASE_PATH=/` e `RADAR_PUBLIC_URL=http://<host>:<PORT>` (ou `https://radar.local` atrás de um proxy dedicado). O cookie usa `Path=/`.
 2. **Subcaminho no proxy do Hermes**: inclua `ops/hermes/nginx-radar.conf.example` no virtual host TLS existente e, no `.env.local`, defina `RADAR_BASE_PATH=/plugins/busca-emprego/` (o mesmo prefixo do `location`), `RADAR_PUBLIC_URL=https://<host-do-hermes>/plugins/busca-emprego`, `RADAR_ALLOWED_HOSTS=<host-do-hermes>` e `RADAR_TRUST_PROXY_TLS=true`. O HTML recebe `<base href="/plugins/busca-emprego/">`, todos os assets e chamadas `api/...` são relativos a ela, `/auth` redireciona para o prefixo e o cookie fica com `Path=/plugins/busca-emprego` (não vaza para o resto do host). O servidor aceita o caminho com ou sem o prefixo, então funciona com `proxy_pass` que remove o prefixo (o exemplo) ou que o repassa.
 
+### Primeiro uso
+
+Com o link aberto, o onboarding é feito pela pessoa no painel; o Hermes não consegue fazê-lo por ela, porque cada passo de decisão é um portão humano (`403 human_session_required` para o token de serviço). A ordem é a do README ([Primeiro uso](../../README.md#primeiro-uso-onboarding)):
+
+1. *Currículos*: enviar o PDF-base e **Criar perfil a partir deste PDF** (ou **Importar JSON Resume**).
+2. *Saúde das buscas*: revisar cada informação do rascunho, responder os eliminatórios e **Confirmar perfil** (gera o snapshot).
+3. *Configurações*: **Aceitar termos** das fontes que serão usadas e testar o acesso (conectores: **Testar acesso**; fontes de agentes: registrar o teste).
+4. *Saúde das buscas* → *Rodadas de busca*: **Iniciar rodada**. Os coletores do Hermes (`radar-vagas-coleta`) e os conectores enviam os lotes para essa rodada.
+5. Na vaga: **Tenho interesse** → **Gerar currículo ATS** → revisar e `APROVO` → envio manual ou `AUTORIZO` (exige vaga confirmada aberta nas últimas 24 h e link de ATS de empresa).
+
+Enquanto não houver perfil confirmado, `POST /api/rounds` responde `422 PROFILE_CONFIRMATION_REQUIRED` e `radar_record_score` responde `422 PROFILE_SNAPSHOT_REQUIRED`; sem fonte pronta, `422 ROUND_SOURCES_NOT_READY`. O entrevistador do papel `preferencias` (`radar_answer_profile_interview`) só **propõe** respostas no rascunho: a pessoa confirma no painel.
+
 ## 9. Watchdog
 
 ```sh
@@ -213,8 +225,8 @@ O backup agendado (`hermes/cron/radar-backup.sh`: backup, teste de restore, cóp
 
 1. `curl -fsS http://127.0.0.1:${PORT:-8787}/api/health` e `/api/ready`.
 2. `node scripts/ops/smoke-agents.mjs` (instância isolada) e `node scripts/ops/live-prod-check.mjs` (produção).
-3. `hermes mcp test radar-vagas-<papel>` para os quatro papéis; numa sessão, `skills_list` mostra `radar-vagas`.
-4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido.
+3. `hermes mcp test radar-vagas-<papel>` para os cinco papéis; numa sessão, `skills_list` mostra `radar-vagas`.
+4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido; seguir o [Primeiro uso](#primeiro-uso) até a primeira rodada.
 5. `node scripts/ops/notify-human-questions.mjs` (simulação) e `node scripts/ops/telegram-diagnose.mjs`.
 6. `node test/e2e/executor.test.mjs` (após `npm run build`) antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
 7. `hermes cron run <job_id>` do watchdog com o app no ar: nenhuma mensagem.

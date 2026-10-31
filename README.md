@@ -41,9 +41,24 @@ node test/e2e/executor.test.mjs                  # guarda do protocolo do execut
 
 O gate `RADAR_AUTO_APPLICATION_ENABLED` vem desligado; ligue-o somente com o executor testado. Com ele ligado, a fila autorizada exige o token interno.
 
+## Primeiro uso (onboarding)
+
+O banco nasce vazio e nenhuma busca roda antes de dois portões humanos: o **perfil confirmado** e o **aceite dos termos** de pelo menos uma fonte. Sem eles, `POST /api/rounds` responde `422 PROFILE_CONFIRMATION_REQUIRED` ou `422 ROUND_SOURCES_NOT_READY`. A sequência, toda pelo painel:
+
+1. **Link de sessão.** Gere o link como o usuário do dashboard (`node scripts/ops/dashboard-link.mjs`, ou `--send` para recebê-lo pelo Telegram do Hermes) e abra-o no navegador: `GET /auth` troca o token pelo cookie de sessão. Os passos abaixo são portões humanos e só valem com essa sessão; o token de serviço recebe `403 human_session_required`.
+2. **Currículo-base.** Em *Currículos*, envie o PDF (até 5 MB) e clique em **Criar perfil a partir deste PDF** (`POST /api/base-resumes/{id}/create-profile`), ou use **Importar JSON Resume** (`POST /api/profiles/import/json-resume`). Nasce um perfil v1 em rascunho; só existe um rascunho por vez (`409 profile.draft_exists`).
+3. **Revisão e confirmação do perfil.** O painel abre o rascunho em *Saúde das buscas*. Confirme ou rejeite cada informação proposta (ou **Confirmar todos os pendentes**, só para as que têm evidência), responda os eliminatórios da entrevista e clique em **Confirmar perfil**. O botão fica desabilitado, com o motivo, enquanto houver pendentes (`422 PROFILE_FACTS_UNCONFIRMED`). A confirmação gera o snapshot usado pelas rodadas, pela nota de aderência e pelo redator. Detalhes em [Perfil profissional](#perfil-profissional-onboarding).
+4. **Termos das fontes.** Em *Configurações*, cada fonte mostra a prontidão calculada (a mesma da rodada) e o que falta. **Aceitar termos** (`POST /api/sources/{id}/terms`) registra que você leu os termos do site; o aceite é refeito se o domínio mudar. Nas fontes de conector determinístico, **Testar acesso** roda o teste no servidor; nas fontes de agentes, registre o teste de acesso. Só as fontes `ready` entram na rodada.
+5. **Primeira rodada.** Em *Saúde das buscas* → *Rodadas de busca*, **Iniciar rodada** (`POST /api/rounds`) lista as fontes prontas e as ignoradas, abre a rodada presa ao snapshot do perfil e deixa a coleta para os agentes do Hermes (e para os conectores). As vagas chegam como `found`/`pending`.
+6. **Interesse e currículo ATS.** Na vaga, **Tenho interesse** (digitando `TENHO INTERESSE`) e depois **Gerar currículo ATS** (`POST /api/resumes/generate`), que usa só informações confirmadas do perfil. O texto pode ser editado e passa de novo pela checagem de fatos.
+7. **APROVO.** **Revisar e aprovar currículo** e digitar `APROVO`. Afirmação sem informação confirmada bloqueia a aprovação (`409 resume.unverified_facts`). Aprovar não envia nada.
+8. **Envio.** Escolha **Vou me candidatar manualmente** (e registre o envio depois) ou **Autorizar envio automático** digitando `AUTORIZO` para aquela vaga e aquela versão do currículo. O AUTORIZO exige a vaga confirmada aberta nas últimas 24 h (“Verificar agora”, `422 job.liveness.stale`) e link de ATS de empresa (`422 application.domain.not_ats`). O envio automático só existe com `RADAR_AUTO_APPLICATION_ENABLED=true` e um executor do Hermes, que para antes do clique final e pede o `ENVIAR` no painel.
+
+O app nunca se candidata sozinho: cada etapa de decisão acima é uma ação explícita na sessão do dashboard.
+
 ## Agentes, permissões e navegação
 
-O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfis de usuário: quem tem sessão do dashboard (ou o token interno) administra agentes. Cada alteração gera uma versão imutável em rascunho; publicação e rollback são explícitos, e cada execução guarda a versão/snapshot publicado.
+O dashboard permite criar, editar, habilitar, pausar e personalizar agentes. Não há perfis de usuário: quem tem a sessão do dashboard administra agentes. O token interno pode editar, pausar e propor prompts, mas criar, publicar, fazer rollback e descartar rascunho são decisões humanas (`403` para o token). Cada alteração gera uma versão imutável em rascunho; a publicação mostra a diferença contra a versão publicada e a origem do rascunho, e cada execução guarda a versão/snapshot publicado.
 
 As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs.enrich`, `jobs.read` e `salary.lookup`. `source_ids` escolhe conectores; `allowed_domains` controla hosts. `browser_enabled=true` exige uma allowlist não vazia, e toda URL criada, enriquecida ou usada como evidência precisa pertencer a ela. Esses limites funcionais valem além da autenticação HTTP.
 
@@ -84,7 +99,7 @@ O Radar lê e grava currículos no formato aberto [JSON Resume v1](https://jsonr
 - **Confirmar**: o fluxo é o de sempre (revisar cada fato e confirmar o perfil, que gera o snapshot). Fato `import` só é confirmável com o JSON Pointer como evidência. Depois do import o painel abre direto a revisão do rascunho.
 - **Gerar currículo ATS**: perfis `json_resume` dispensam o PDF-base (`base_resume_id` opcional em `/api/resumes/generate`, sem exigir extração). Perfis de PDF continuam exigindo o PDF extraído.
 - **Exportar um currículo** (`GET /api/resumes/{id}/files/json`, botão “JSON Resume” ao lado de PDF/DOCX): `basics`, `education`, `certificates`, `languages`, `skills` e `projects` vêm dos fatos confirmados do snapshot gravado no currículo (ou, sem ele, do perfil confirmado atual); `work[]` vem dos fatos de experiência, com `highlights` tirados das linhas do conteúdo salvo agrupadas sob a linha que cita a empresa (melhor esforço; experiência sem linhas próprias mantém os destaques do fato). Linhas não atribuídas vão para `meta.radar.unmapped[]`. `meta.radar` traz `resume_id`, `version`, `status`, `content_sha256` (SHA-256 do conteúdo), `approved_at` (se aprovado), `exported_at` e o snapshot usado. Exportar não altera o currículo.
-- **Exportar o perfil-mestre** (`GET /api/profiles/{id}/export/json-resume`, link na tela *Operações*): só fatos confirmados.
+- **Exportar o perfil-mestre** (`GET /api/profiles/{id}/export/json-resume`, botão “Exportar JSON Resume” no bloco *Perfil profissional* de *Saúde das buscas*): só fatos confirmados.
 
 Fatos de texto livre extraídos do PDF são exportados como texto (ex.: `skills` vira um grupo “Habilidades”); a fidelidade campo a campo vale para fatos importados.
 
@@ -111,6 +126,14 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `POST` | `/api/resumes/{id}/approve` | Registrar aprovação humana da versão salva |
 | `GET` / `POST` | `/api/base-resumes` | Consultar a biblioteca ou enviar um PDF-base |
 | `POST` | `/api/profiles/import/json-resume` | Importar um JSON Resume como novo perfil em rascunho |
+| `POST` | `/api/base-resumes/{id}/create-profile` | Criar o perfil em rascunho a partir do PDF-base (só a sessão) |
+| `GET` | `/api/profiles/drafts` | Rascunhos de perfil com fatos, pendências e eliminatórios em falta |
+| `POST` | `/api/profiles/{id}/facts/{factId}/review`, `/facts/review-all` | Confirmar ou rejeitar informações do rascunho (só a sessão) |
+| `POST` | `/api/profiles/{id}/confirm` | Confirmar o perfil e gerar o snapshot (só a sessão) |
+| `POST` / `DELETE` | `/api/profiles/{id}/new-version`, `/api/profiles/{id}` | Nova versão a partir do confirmado; descartar rascunho (só a sessão) |
+| `POST` | `/api/sources/{id}/terms`, `/smoke-test` | Aceitar os termos da fonte (só a sessão); testar o acesso de um conector |
+| `GET` / `POST` | `/api/rounds` | Listar rodadas; iniciar uma rodada com as fontes prontas |
+| `POST` | `/api/resumes/generate` | Gerar o currículo ATS só com informações confirmadas do perfil |
 | `GET` | `/api/resumes/{id}/files/json` | Baixar o currículo em JSON Resume (também `pdf`/`docx`) |
 | `GET` | `/api/profiles/{id}/export/json-resume` | Exportar os fatos confirmados do perfil em JSON Resume |
 | `GET` | `/api/authorized-applications` | Entregar ao executor apenas candidaturas explicitamente autorizadas |
@@ -149,7 +172,7 @@ Com `trust: untrusted`, toda ferramenta MCP que grava pede aprovação humana an
 
 ## Operação
 
-O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` cobre domínio, migrações e restore; `npm run test:e2e` sobe o servidor real para E2E HTTP, segurança e carga de 10 fontes/500 resultados/20 workers (veja [Desenvolvimento e testes](#desenvolvimento-e-testes)). Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md) e a [`auditoria com previsão`](docs/implementation-audit-2026-09-17.md). A ativação continua bloqueada até configurar skill, MCP, navegador, cofre e Telegram do Hermes conforme o onboarding e executar os testes no mesmo artefato de produção.
+O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e health/readiness para SQLite, sem criar outro Docker ou outra versão do aplicativo. `npm test` cobre domínio, migrações e restore; `npm run test:e2e` sobe o servidor real para E2E HTTP, segurança e carga de 10 fontes/500 resultados/20 workers (veja [Desenvolvimento e testes](#desenvolvimento-e-testes)). Consulte o [`runbook de instalação`](docs/operations-runbook.md), o [`checklist de release`](docs/release-checklist.md), a [`auditoria de 30/10/2026`](docs/auditoria-2026-10-30.md) (com o status da aplicação de cada achado) e a [`triagem do backlog`](docs/backlog-triagem-2026-10-30.md). Os SDDs e as auditorias anteriores em `docs/` são históricos. A ativação continua bloqueada até configurar skill, MCP, navegador, cofre e Telegram do Hermes conforme o onboarding e executar os testes no mesmo artefato de produção.
 
 ## Desenvolvimento e testes
 
