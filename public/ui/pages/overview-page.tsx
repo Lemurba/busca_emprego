@@ -72,9 +72,10 @@ function DonutChart({ jobs, lifecycleMeta, lifecycleOrder }: { jobs: Job[] } & P
           const count = counts.get(value) ?? 0;
           const selected = isChartSelected("lifecycle", value);
           return (
-            <button key={value} class={`legend-item chart-control ${selected ? "selected" : ""}`} type="button" data-chart-filter-type="lifecycle" data-chart-filter-value={value} data-chart-filter-label={meta.plural} aria-pressed={selected ? "true" : "false"} aria-label={`${meta.plural}: ${count} vaga${count === 1 ? "" : "s"}. Filtrar`}>
+            <button key={value} class={`legend-item chart-control ${selected ? "selected" : ""}`} type="button" data-chart-filter-type="lifecycle" data-chart-filter-value={value} data-chart-filter-label={meta.plural} aria-pressed={selected ? "true" : "false"}>
               <i class={`legend-dot tone-dot-${value}`} aria-hidden="true" />
               <span><strong>{count}</strong>{meta.plural}</span>
+              <span class="visually-hidden">. Filtrar</span>
             </button>
           );
         })}

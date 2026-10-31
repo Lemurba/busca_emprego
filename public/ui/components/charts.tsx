@@ -51,11 +51,12 @@ export function ChartBars({ entries, type, color = "", labels = {}, groupLabel =
             data-chart-filter-label={displayLabel}
             data-tooltip={`${displayLabel}: ${value} ${plural(value)} (${percentage}%)`}
             aria-pressed={selected ? "true" : "false"}
-            aria-label={`${displayLabel}: ${value} ${plural(value)}, ${percentage}%. Filtrar`}
           >
+            {/* Sem aria-label: o nome acessível parte do texto visível (WCAG 2.5.3, axe label-content-name-mismatch). */}
             <span>{displayLabel}</span>
             <progress class={`bar-track ${color}`} value={value} max={max} aria-hidden="true" />
             <strong>{value}</strong>
+            <span class="visually-hidden"> {plural(value)}, {percentage}%. Filtrar</span>
           </button>
         );
       })}
