@@ -34,6 +34,17 @@
         "RADAR_MCP_ROLE": "curriculo"
       }
     },
+    "radar-vagas-preferencias": {
+      "command": "node",
+      "args": [
+        "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
+      ],
+      "env": {
+        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_ENVIRONMENT": "production",
+        "RADAR_MCP_ROLE": "preferencias"
+      }
+    },
     "radar-vagas-executor": {
       "command": "node",
       "args": [

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createProfileNewVersion, deleteDraftProfile, reviewAllProfileFacts, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
 import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { dbPath } from "./db.js";
@@ -123,6 +123,7 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
  * QA-04/TD-07: revisão de fato do perfil, mescla de duplicatas (irreversível), resolução de
  * conflito de enriquecimento e exclusão do currículo-base. Fatos `origin=user` ou já
  * confirmados vindos do serviço são recusados em `assertServiceOnlyProposes`.
+ * #49: "Confirmar todos os pendentes", descarte de rascunho e nova versão do perfil.
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
   return method === "POST" && (
@@ -130,14 +131,14 @@ function isHumanOnlyRequest(method: string | undefined, pathname: string) {
     || /^\/api\/jobs\/[^/]+\/(?:decision|decision\/undo|feedback|restore|unsuppress)$/u.test(pathname)
     || /^\/api\/resumes\/[^/]+\/(?:approve|facts\/[^/]+)$/u.test(pathname)
     || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual|confirm-final|cancel-final)$/u.test(pathname)
-    || /^\/api\/profiles\/[^/]+\/(?:confirm|facts\/[^/]+\/review)$/u.test(pathname)
+    || /^\/api\/profiles\/[^/]+\/(?:confirm|new-version|facts\/review-all|facts\/[^/]+\/review)$/u.test(pathname)
     || /^\/api\/possible-duplicates\/[^/]+\/resolve$/u.test(pathname)
     || /^\/api\/field-conflicts\/[^/]+\/resolve$/u.test(pathname)
     || /^\/api\/sources\/[^/]+\/terms$/u.test(pathname)
     || /^\/api\/agents\/[^/]+\/(?:publish|rollback)$/u.test(pathname)
   )
     || method === "PATCH" && /^\/api\/applications\/[^/]+$/u.test(pathname)
-    || method === "DELETE" && /^\/api\/(?:jobs|base-resumes)\/[^/]+$/u.test(pathname)
+    || method === "DELETE" && /^\/api\/(?:jobs|base-resumes|profiles)\/[^/]+$/u.test(pathname)
     || method === "PUT" && pathname === "/api/settings/automation"
     || method === "GET" && /^\/api\/applications\/[^/]+\/evidence\/[^/]+$/u.test(pathname);
 }
@@ -270,6 +271,8 @@ const routes: Route[] = [
     attachment(res, "application/json; charset=utf-8", `perfil-v${profile.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
   } },
   { method: "GET", pattern: r("/api/profile/active"), handler: ({ res }) => ok(res, 200, getProfile(listProfiles(projectId).find((profile) => profile.status === "confirmed")?.id ?? "", projectId)) },
+  // #49: confirma de uma vez os fatos pendentes com evidência; os sem evidência voltam em `skipped`.
+  { method: "POST", pattern: r("/api/profiles/{id}/facts/review-all"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewAllProfileFacts(params[0]!, String(validateBody(schemas.profileFactReview, body).state ?? "confirmed"), actor, projectId)) },
   { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(validateBody(schemas.profileFactReview, body).state ?? ""), actor, params[0]!)) },
   { method: "GET", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params }) => ok(res, 200, listProfileFacts(params[0]!)) },
   { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ actor, res, params, body }) => {
@@ -277,6 +280,8 @@ const routes: Route[] = [
     assertServiceOnlyProposes(actor, [input]);
     ok(res, 201, addProfileFact(params[0]!, input, actor, projectId));
   } },
+  { method: "POST", pattern: r("/api/profiles/{id}/new-version"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 201, createProfileNewVersion(params[0]!, actor, projectId)); } },
+  { method: "DELETE", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteDraftProfile(params[0]!, actor, projectId)); } },
   { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)); } },
   // Resposta vinda do serviço (Hermes) vira fato proposto para revisão humana (ver answerProfileInterview).
   { method: "POST", pattern: r("/api/profiles/{id}/interview"), handler: ({ actor, res, params, body }) => {

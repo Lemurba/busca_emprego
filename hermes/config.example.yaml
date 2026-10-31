@@ -105,6 +105,23 @@ mcp_servers:
       resources: false
       prompts: false
 
+  radar-vagas-preferencias:
+    # Entrevistador de preferências (preferences.write): respostas dos eliminatórios viram fatos
+    # propostos no rascunho do perfil; valem só depois de confirmadas no dashboard.
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    env:
+      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      RADAR_ENVIRONMENT: production
+      RADAR_MCP_ROLE: preferencias
+    trust: untrusted
+    tools:
+      include:
+        # escrita
+        - radar_answer_profile_interview
+      resources: false
+      prompts: false
+
   radar-vagas-executor:
     # Executor de candidatura autorizada: único servidor com claim/submit/fail.
     command: node

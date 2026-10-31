@@ -17,7 +17,7 @@ import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./live
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
 import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
-import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements, parseJobRequirementsColumn } from "./blockers.js";
+import { BLOCKER_FACT_TYPES, evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements, parseJobRequirementsColumn } from "./blockers.js";
 import { computeCoverage } from "./coverage.js";
 import { expectedContacts, runResumeParseCheck as runParseCheck } from "./resume-parse-check.js";
 import { mapMatchScoreRow, normalizeCriterionInputs, readResumeParseCheck, resumeParseFindings, resumeScoringFields, storeResumeCoverage, storeResumeParseCheck } from "./db/scoring.js";
@@ -311,6 +311,8 @@ export function getBootstrap(projectId = "busca-emprego") {
     preferences: listPreferenceState(projectId),
     humanQuestions: listHumanQuestions(),
     profiles: listProfiles(projectId),
+    // #49: rascunhos com fatos e pendências para a revisão no dashboard.
+    draftProfiles: listDraftProfiles(projectId),
     activeProfile,
     rounds: listSearchRounds(projectId),
     possibleDuplicates: listPossibleDuplicates(projectId),
@@ -1686,6 +1688,117 @@ export function confirmProfessionalProfile(id: string, actor = "user", projectId
   return { ...getProfile(id, projectId), facts: listProfileFacts(id), snapshot: getLatestProfileSnapshot(id) };
 }
 
+/** Fatos que ainda pedem decisão humana; enquanto houver algum, o perfil não é confirmado (PROFILE_FACTS_UNCONFIRMED). */
+const PENDING_FACT_STATES = ["proposed", "needs_review"];
+
+function isPendingFact(fact: { state?: unknown }): boolean {
+  return PENDING_FACT_STATES.includes(String(fact.state));
+}
+
+/** Fato que pode ser confirmado como está: declaração humana ou com evidência (página ou trecho). */
+function factHasEvidence(fact: { origin?: unknown; evidence_page?: unknown; evidence_excerpt?: unknown }): boolean {
+  return fact.origin === "user" || fact.evidence_page != null || Boolean(String(fact.evidence_excerpt ?? "").trim());
+}
+
+/**
+ * Rascunhos de perfil para a revisão no dashboard (#49): cada um com os fatos, a contagem de
+ * pendentes (mesma regra que bloqueia `confirmProfessionalProfile`) e os eliminatórios ainda sem
+ * fato confirmado (perguntas da entrevista). Mais recente primeiro.
+ */
+export function listDraftProfiles(projectId = "busca-emprego"): any[] {
+  return listProfiles(projectId).filter((profile) => profile.status === "draft").map((profile) => {
+    const facts = listProfileFacts(profile.id);
+    const confirmedTypes = new Set(facts.filter((fact) => fact.state === "confirmed").map((fact) => String(fact.type)));
+    return {
+      ...profile,
+      facts,
+      pending: facts.filter(isPendingFact).length,
+      pending_without_evidence: facts.filter((fact) => isPendingFact(fact) && !factHasEvidence(fact)).length,
+      missing_blockers: BLOCKER_FACT_TYPES.filter((type) => !confirmedTypes.has(type)),
+    };
+  });
+}
+
+/**
+ * "Confirmar todos os pendentes" (#49): confirma, numa transação, os fatos `proposed`/`needs_review`
+ * do rascunho que têm evidência. Os sem evidência ficam pendentes (a pessoa revisa um a um) e
+ * voltam em `skipped`. Decisão humana: atores automatizados recebem `profile.fact.review.forbidden`.
+ */
+export function reviewAllProfileFacts(profileId: string, state: string, actor = "user", projectId = "busca-emprego") {
+  if (isAutomatedActor(actor)) throw new Error("profile.fact.review.forbidden");
+  if (state !== "confirmed") throw new Error("profile.fact.state.invalid");
+  const profile = getProfile(profileId, projectId);
+  if (!profile) throw new Error("profile.not_found");
+  if (profile.status !== "draft") throw new Error("profile.draft_required");
+  const pending = listProfileFacts(profileId).filter(isPendingFact);
+  const ready = pending.filter(factHasEvidence);
+  const timestamp = now();
+  tx(() => {
+    const update = db.prepare("UPDATE profile_facts SET state='confirmed',updated_at=? WHERE id=? AND profile_id=?");
+    for (const fact of ready) update.run(timestamp, fact.id, profileId);
+    audit("profile", profileId, "facts_reviewed_all", { actor, state, confirmed: ready.length, skipped: pending.length - ready.length });
+  });
+  return { ...getProfile(profileId, projectId), facts: listProfileFacts(profileId), confirmed: ready.length, skipped: pending.length - ready.length };
+}
+
+/**
+ * Descarta um rascunho de perfil (#49, QA-10: imports de JSON Resume deixavam rascunhos órfãos).
+ * Só rascunho: perfil confirmado ou aposentado tem snapshot e histórico e nunca é apagado.
+ * Fatos e entrevistas saem junto (ON DELETE CASCADE).
+ */
+export function deleteDraftProfile(id: string, actor = "user", projectId = "busca-emprego") {
+  if (isAutomatedActor(actor)) throw new Error("profile.delete.forbidden");
+  const profile = getProfile(id, projectId);
+  if (!profile) throw new Error("profile.not_found");
+  if (profile.status !== "draft") throw new Error("profile.draft_required");
+  tx(() => {
+    db.prepare("DELETE FROM professional_profiles WHERE id=? AND project_id=? AND status='draft'").run(id, projectId);
+    audit("profile", id, "draft_deleted", { actor, version: profile.version, source: profile.source });
+  });
+  return { id, deleted: true };
+}
+
+/**
+ * Cópia de um perfil como novo rascunho (versão N+1): mesmo currículo-base, mesma origem
+ * (`pdf`/`json_resume`), contexto sem `confirmed_facts` (recalculado na confirmação) e os fatos
+ * copiados com o estado e a evidência que tinham. Roda dentro da transação de quem chama.
+ */
+function cloneProfileAsDraft(source: any, actor: string, projectId: string) {
+  const context = { ...(source?.context ?? {}) } as Record<string, unknown>;
+  delete context.confirmed_facts;
+  const draft = createProfessionalProfile({ base_resume_id: source?.base_resume_id ?? null, context }, actor, projectId, { source: source?.source === "json_resume" ? "json_resume" : "pdf" }) as { id: string; version: number };
+  const idMap = new Map<string, string>();
+  if (source) {
+    const copy = db.prepare(`INSERT INTO profile_facts (id,profile_id,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,updated_at)
+      SELECT ?,?,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,? FROM profile_facts WHERE id=?`);
+    for (const item of listProfileFacts(source.id)) {
+      const newId = idFor(`profile-fact|${draft.id}|${item.id}`);
+      copy.run(newId, draft.id, now(), item.id);
+      idMap.set(String(item.id), newId);
+    }
+  }
+  return { draft, idMap };
+}
+
+/**
+ * "Criar nova versão" (#49): o perfil confirmado não aceita fatos nem respostas da entrevista
+ * (`profile.draft_required`); para mudar algo, a pessoa abre um rascunho N+1 a partir dele, revisa
+ * e confirma de novo. Só um rascunho por vez por este caminho (`profile.draft_exists`).
+ */
+export function createProfileNewVersion(id: string, actor = "user", projectId = "busca-emprego"): any {
+  if (isAutomatedActor(actor)) throw new Error("profile.new_version.forbidden");
+  const profile = getProfile(id, projectId);
+  if (!profile) throw new Error("profile.not_found");
+  if (profile.status !== "confirmed") throw new Error("profile.confirmed_required");
+  if (listProfiles(projectId).some((item) => item.status === "draft")) throw new Error("profile.draft_exists");
+  const draftId = tx(() => {
+    const { draft } = cloneProfileAsDraft(profile, actor, projectId);
+    audit("profile", draft.id, "new_version_created", { actor, from_profile_id: id, from_version: profile.version, version: draft.version });
+    return draft.id;
+  });
+  return { ...getProfile(draftId, projectId), facts: listProfileFacts(draftId) };
+}
+
 export function getActiveProfile(projectId = "busca-emprego"): any {
   const row = db.prepare("SELECT * FROM professional_profiles WHERE project_id=? AND status='confirmed' ORDER BY version DESC LIMIT 1").get(projectId) as Record<string, unknown> | undefined;
   if (!row) return null;
@@ -1929,19 +2042,8 @@ const CLAIM_FACT_TYPES: Record<string, string> = {
 function createProfileVersionWithFact(fact: { type: string; value: string; evidence_excerpt: string }, actor: string, projectId: string) {
   return tx(() => {
     const active = getActiveProfile(projectId);
-    const idMap = new Map<string, string>();
-    const context = { ...(active?.context ?? {}) } as Record<string, unknown>;
-    delete context.confirmed_facts; // recalculado na confirmação
-    const draft = createProfessionalProfile({ base_resume_id: active?.base_resume_id ?? null, context }, actor, projectId) as { id: string; version: number };
-    if (active) {
-      const copy = db.prepare(`INSERT INTO profile_facts (id,profile_id,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,updated_at)
-        SELECT ?,?,type,value_json,evidence_page,evidence_excerpt,origin,confidence,state,created_at,? FROM profile_facts WHERE id=?`);
-      for (const item of listProfileFacts(active.id)) {
-        const newId = idFor(`profile-fact|${draft.id}|${item.id}`);
-        copy.run(newId, draft.id, now(), item.id);
-        idMap.set(String(item.id), newId);
-      }
-    }
+    // Mesma cópia da "nova versão" (#49): preserva a origem (json_resume não vira pdf, QA-10).
+    const { draft, idMap } = cloneProfileAsDraft(active, actor, projectId);
     const added = addProfileFact(draft.id, { type: fact.type, value: fact.value, origin: "user", state: "confirmed", evidence_excerpt: fact.evidence_excerpt }, actor);
     const confirmed = confirmProfessionalProfile(draft.id, actor, projectId);
     audit("profile", draft.id, "version_from_resume_fact", { actor, from_profile_id: active?.id ?? null, version: draft.version, fact_id: added.id });
