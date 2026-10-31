@@ -528,7 +528,7 @@ function listItems(lines: SourceLine[]): SourceLine[] {
     // Vírgulas dentro de parênteses ("Inglês (avançado, C1)") não separam itens.
     const protectedText = stripBullet(line.text).replace(/\([^)]*\)/gu, (group) => group.replace(/[,;|]/gu, "\u0000"));
     for (const part of protectedText.split(LIST_SEPARATOR)) {
-      const value = part.replace(/\u0000/gu, ",").replace(/[.;,]+$/u, "").trim();
+      const value = part.replaceAll("\u0000", ",").replace(/[.;,]+$/u, "").trim();
       if (value && /[\p{L}\p{N}]/u.test(value)) items.push({ ...line, text: value });
     }
   }

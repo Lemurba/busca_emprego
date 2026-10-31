@@ -191,7 +191,7 @@ async function resumePdf(pages) {
   const font = await document.embedFont(StandardFonts.Helvetica);
   for (const lines of pages) {
     const page = document.addPage();
-    lines.forEach((line, index) => page.drawText(line, { x: 50, y: 780 - index * 18, size: 11, font }));
+    for (const [index, line] of lines.entries()) page.drawText(line, { x: 50, y: 780 - index * 18, size: 11, font });
   }
   return document.save();
 }
