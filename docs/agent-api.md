@@ -559,7 +559,7 @@ Usadas pelo `dist/src/mcp-server.js` (#10), só com o token interno e com o agen
 | `GET /api/profile/active` | Perfil confirmado com fatos e snapshot, ou `null` |
 | `GET /api/profiles/{id}/export/json-resume` | JSON Resume com os fatos confirmados (anexo `perfil-vN.json`); botão “Exportar JSON Resume” em *Saúde das buscas* |
 | `GET /api/base-resumes/{id}/extraction` | Extração do PDF-base: `extraction_status`, `extracted_text`, `extraction_error`, `page_count`, `extracted_at` |
-| `GET /api/resumes/{id}/files/pdf`, `/docx`, `/json` | Currículo em PDF, DOCX ou JSON Resume (anexo) |
+| `GET /api/resumes/{id}/files/pdf`, `GET /api/resumes/{id}/files/docx`, `GET /api/resumes/{id}/files/json` | Currículo em PDF, DOCX ou JSON Resume (anexo) |
 | `GET` / `POST /api/resumes/{id}/parse-check` | Teste de leitura do PDF gerado (extrai o texto e confere contato, seções e palavras-chave); `POST` roda de novo. O diálogo do `APROVO` mostra o resultado e não habilita “Aprovar” quando o parser não lê o PDF |
 | `GET /api/jobs/{id}/occurrences` | Onde e em que rodadas a vaga foi vista |
 | `GET /api/jobs/{id}/score` | Nota mais recente da vaga, ou `null` |

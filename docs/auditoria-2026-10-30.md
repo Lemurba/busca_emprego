@@ -317,3 +317,104 @@ Nenhum achado recebeu status `refutado`. Ajustes feitos na verificação:
 - O `test:ui` passou só com uma config wrapper local. O comportamento na CI (com o Chromium certo) não foi observado.
 - Não foram feitos teste de carga, varredura de dependências (CVE) nem auditoria completa de acessibilidade (só o axe do smoke e a checagem visual em 390 px).
 - A análise é estática no commit `41e2655`. Os PRs abertos #45–#48 (migração para Preact) não foram avaliados.
+
+---
+
+## Status da aplicação
+
+Situação de cada achado no branch `ccr-277b551d-3zawrc` (31/10/2026), depois da migração para Preact (#45–#48) e das etapas S1–S8. Os números de linha das seções anteriores são de `41e2655` e não valem mais: `src/db.ts` virou uma fachada sobre `src/db/*.ts` e as páginas foram para `public/ui/pages/*.tsx`. A situação das issues do GitHub está em [`backlog-triagem-2026-10-30.md`](backlog-triagem-2026-10-30.md).
+
+Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta está descrito) e **fora do escopo** (retenção/LGPD, que não se aplica a uma instalação pessoal auto-hospedada).
+
+### Perfil, onboarding e portões humanos
+
+| ID | Achado | Status | Commits / observação |
+| --- | --- | --- | --- |
+| QA-01, F03/TD-04 | #49: rascunho invisível, sem revisão nem confirmação | resolvido | b0611bb (`draftProfiles`, `review-all`, descarte, nova versão), 2b4392a (revisão em *Saúde das buscas*), 8df5b3f e a60e74f (um rascunho por vez, motivos claros), 07ab11a e 2b4392a (`test/e2e/profile-review.test.mjs`, `test/ui/profile-review.spec.ts`) |
+| QA-02 | Sem botão para criar perfil a partir do PDF | resolvido | 2b4392a ("Criar perfil a partir deste PDF" em *Currículos*, desabilitado para PDF sem texto) |
+| I49-04 | Código citado errado na issue; `PROFILE_SNAPSHOT_REQUIRED` sem mensagem na UI | resolvido | cf75fa6 e 66d2ca7 (mensagem e bloqueio explicado no "Gerar currículo ATS"); b47f675 (dicionário único de mensagens) |
+| I49-05 | Citado só no apêndice A (rebaixado de crítica para alta), sem descrição própria no corpo | resolvido | Coberto pelos achados críticos e altos do §1, todos resolvidos acima |
+| TD-05/F04 | Citado só no apêndice A (elevado a crítica, alinhado a F04): onboarding travado pelos portões sem UI | resolvido | a1ae489 (aceite de termos, teste de acesso, exclusão de fonte e início de rodada), d14c224 e 6e88498 (e2e e Playwright termos → fonte pronta → rodada) |
+| I49-07 | Prontidão de fonte enganosa na UI | resolvido | a1ae489 (`effectiveReadiness` no bootstrap e em `GET /api/sources`; rótulos `not_ready`/`paused`) |
+| QA-04, TD-07/F13, I49-08 | Token de serviço revisa e confirma fatos, cria fatos `origin=user`, mescla duplicatas, resolve conflitos e exclui o currículo-base | resolvido | 66d2ca7 (portões humanos e `assertServiceOnlyProposes`), 6aaf2ab (serviço só propõe), 3753243 (resposta a pergunta humana e descarte de rascunho de agente só com a sessão); `test/e2e/auth-gates.test.mjs` |
+| I49-09 | `match_score` gravado sem snapshot | resolvido | 66d2ca7 e 6aaf2ab (nota presa ao snapshot da rodada; `PROFILE_SNAPSHOT_REQUIRED`/`PROFILE_SNAPSHOT_INVALID`) |
+| I49-10/QA-05 | Extrator de PDF mistura seções e não extrai nome nem cargo | resolvido | 67bff82 (corte no próximo título, um fato por item, páginas reais, nome e cargo como palpite), 45c2873 (ajustes de seção e localização) |
+| I49-11/QA-08 | `[object Object]` em fatos e excerpts | resolvido | 66d2ca7 (`profile.fact.invalid` para item objeto; excerpt em JSON) |
+| I49-12/QA-09 | Rótulos em inglês para tipos livres | resolvido | 67bff82 e 2b4392a (`full_name`, `target_role`, `certificates` e outros em `factTypeLabels`; `retired` em `profileStatusLabels`) |
+| I49-13 | `createProfileFromBaseResume` não atômico | resolvido | 6aaf2ab (perfil e fatos numa transação) |
+| I49-14 | Citado só no apêndice B, sem descrição própria no corpo | resolvido | Os achados de §1.1 e §1.3 estão todos resolvidos nesta tabela |
+| I49-15/F21/TD-16/QA-15 | Sem teste de fluxo pela UI; cobertura sem limite mínimo | resolvido | 07ab11a, d14c224 (e2e de onboarding e funil), 2b4392a, 6e88498 e 3b6ebd0 (specs Playwright de perfil, termos → rodada, ATS → APROVO e agentes), 95df68f (limite mínimo de cobertura em `npm test`) |
+| I49-16 | Plano de correção (não é defeito) | resolvido | Plano do §1.4 executado nos commits acima |
+| QA-10 | Rascunhos de perfil se acumulam | resolvido | 8df5b3f (um rascunho por vez, `409 profile.draft_exists`), b0611bb (`DELETE /api/profiles/{id}`) |
+| QA-13 | Eliminatórios sem caminho de resposta | resolvido | b0611bb (`POST /api/profiles/{id}/new-version`, ferramenta `radar_answer_profile_interview` e papel `preferencias`), a60e74f (entrevista validada no rascunho) |
+| QA-17 | Palavras de confirmação preenchidas pelo cliente | resolvido | f6ed8e8 (a pessoa digita TENHO INTERESSE, APROVO e AUTORIZO) |
+
+### Currículo ATS e funil
+
+| ID | Achado | Status | Commits / observação |
+| --- | --- | --- | --- |
+| QA-03 | "Preparar currículo" grava placeholder | resolvido | cf75fa6 ("Gerar currículo ATS" chama `/api/resumes/generate`; sem perfil, explica o bloqueio) |
+| QA-06 | Conteúdo ATS com chaves internas e sem edição possível | resolvido | cf75fa6 (texto legível com seções em pt-BR, edição validada pela checagem de fatos), 908bccd (trava estrutural da edição) |
+| QA-07 | "Aprovar" habilitado com o teste de leitura do PDF reprovado | resolvido | cf75fa6 (o botão fica desabilitado, com o motivo) |
+| QA-11 | Mensagens genéricas para `PROFILE_*`/`ATS_*` | resolvido | 563ec2f e b47f675 (código estável em todo erro, dicionário único também no MCP), 1825445 |
+| QA-12 | Vaga sem nota mostra "Aderência 0%" | resolvido | 53d8a22 ("Não avaliada") |
+| QA-18 | `opening_checked_at` descartado em `job.discovered` | resolvido | cc38926 (gravado com `opening_status`; documentado em `docs/agent-api.md` que não vale como prova para o AUTORIZO) |
+| §2 itens 3–5 | Publicar agente às cegas; fila de enriquecimento sem painel; pergunta com `delivery_failed` sem resposta pelo painel | resolvido | 3753243 e 3b6ebd0 (diff, origem e `checksum` revisado; painel e ferramentas MCP da fila; `POST /api/human-questions/{id}/respond`) |
+| §2 mapa | Só vagas com coordenadas | resolvido (escopo reduzido) | 88a93b3 (lista as vagas sem coordenadas e diz que não há geocodificação) |
+
+### Segurança, integridade e dados
+
+| ID | Achado | Status | Commits / observação |
+| --- | --- | --- | --- |
+| TD-10 | O MCP abre o SQLite direto (#10) | resolvido | a1cf98f (ferramentas pela API HTTP com o token de serviço), 1a8cea7 (configuração sem `RADAR_DB_PATH`), 1e83139 e d0be8ea |
+| F14 | Rotas que alteram dados sem zod; casts `as never` | parcial | 66d2ca7 e 80ffd52: toda rota que altera dados valida o corpo com schema estrito (`POST /api/logout` não tem corpo). Restam 8 casts `as never` em `src/server.ts` entre o tipo do schema e o do núcleo, sem efeito em runtime |
+| TD-09 | Cliente HTTP dos conectores sem DNS fixado; dois clientes anti-SSRF | resolvido | db82d92 (`src/safe-http.ts` único, DNS resolvido uma vez, corpo limitado em streaming), 09ddbb6 (prazo único, gzip limitado, NAT64/6to4) |
+| TD-21/F16 | Sem retenção/LGPD | fora do escopo (LGPD) | Instalação pessoal auto-hospedada: os dados são da própria pessoa, no próprio host. `retention_policies` continua sem uso |
+| TD-13 | Anonimização legada destrutiva no import; código morto | resolvido | 829d609 (comando explícito `scripts/ops/anonymize-legacy.mjs`), a103700 (código morto removido) |
+| TD-06 | `RADAR_PROJECT_ID` pela metade | resolvido | f18e278 (listagens filtradas, sementes por projeto), 4823795 (rotas por id, automação e ids), `test/project-scope-ids.test.mjs`, `test/e2e/project-scope.test.mjs` |
+| TD-08 | #29: frases como `Error` e status por regex | resolvido | 563ec2f (`DomainError(code, status)` em todo o núcleo), b47f675; `test/error-contract.test.mjs` |
+| TD-12 | `BEGIN IMMEDIATE` cru junto com `tx()` | resolvido | 829d609 (só `tx()`; `test/tx-guard.test.mjs` impede `BEGIN` cru) |
+| TD-22 (`updateApplication`) | `updateApplication` varre a tabela inteira | resolvido | 829d609 (consulta direta) |
+| F15 | Bootstrap sem paginação | parcial | 9519c8a: currículos sem `content` (`GET /api/resumes/{id}`), só a nota mais recente (`GET /api/jobs/{id}/scores` paginado). Falta: as vagas continuam completas no bootstrap, sem `job_summary` nem paginação |
+
+### Arquitetura, testes, CI e operação
+
+| ID | Achado | Status | Commits / observação |
+| --- | --- | --- | --- |
+| TD-03/F22 | `public/app.ts` grande; 1 de 10 páginas em Preact | parcial | 6452b4e, 70cc447, 04f2a45, 68245d7, 7ffb59c, 34cf503, 725c5bb, f67dab8 e afe6b0b: as 10 páginas estão em `public/ui/pages/*.tsx`. Resta: `public/app.ts` com cerca de 2.300 linhas (diálogos, detalhe da vaga e `handleAction` em template strings, 10 `innerHTML`) |
+| TD-02/F23 | `src/db.ts` com 3.195 linhas | resolvido | 30040f0 (módulos coesos em `src/db/`; `src/db.ts` é uma fachada de 29 linhas) |
+| TD-14 | Bootstrap sem tipo | resolvido | 9519c8a (`BootstrapPayload` em `src/bootstrap-payload.ts`, compartilhado com o painel), b47f675 (rodadas tipadas) |
+| TD-11 | Lógica duplicada (hash, domínio de agente, versão publicada) | resolvido | a103700 |
+| TD-24 | Migrações no import; baseline com sementes de projeto fixo | resolvido | 6579d25 (`openStore`/`npm run migrate`; sementes por projeto fora do baseline) |
+| TD-15 | `tsconfig` só com `strict`; formatador desligado; `.mjs` sem type-check | parcial | 3ce1abe (`noImplicitReturns`, `noFallthroughCasesInSwitch`, `noUnused*`, `noImplicitOverride`). Resta: formatador do Biome desligado e scripts `.mjs` sem type-check |
+| TD-20 | Parser próprio de `.env.local` em cada script; backup do banco errado | resolvido | c50af10 (leitor único `scripts/ops/lib/env-local.mjs`), dbd6940 (restore e health-check) |
+| TD-23 | Plugin Python sem lint nem tipos; versão desalinhada | resolvido | 43151d3 (ruff, mypy, versão alinhada), 1ae4d6d (job na CI) |
+| F24 | Pendências da crítica de UI/UX | parcial | 3b6ebd0 (mesclagem de duplicatas desfazível em 24 h). Restam os ícones em glifo e os 10 destinos de navegação (`public/index.html`) |
+| QA-14 | `test:ui` quebra com a versão do Chromium | resolvido | 76d8c2b (`PLAYWRIGHT_CHROMIUM_EXECUTABLE`) |
+| QA-16 | Warnings de lint não falham a CI | resolvido | 73af99c (zera os warnings; `npm run lint` falha em warning) |
+| TD-17 | CI: smoke de UI só no Node 24, build duplicado, sem Dependabot, template de PR nem ruff/mypy | resolvido | 1ae4d6d |
+| TD-18 | `^` em dependências de runtime; `playwright-core` sem uso; `pdf-lib` parado | parcial | 95df68f (versões exatas, `playwright-core` removido). `pdf-lib` continua (sem release desde 2021), sem substituto escolhido |
+| F17/TD-22 (métricas) | Sem métricas | parcial | 5d7884b (`GET /api/metrics` e painel "Saúde da instalação": idade do backup, tamanho do banco, filas, última rodada). Faltam latência e alertas automáticos |
+| F19 | Onboarding omite perfil e termos | resolvido | df1a1b8, f0abad2 (sequência completa no README, `ops/hermes/ONBOARDING.md`, runbook §4.1 e `docs/agent-api.md`) |
+| F20/TD-19 | Docs contraditórias e desatualizadas | resolvido | 595c9d4 (SDDs e auditorias datadas marcados como históricos, "sem login" anotado, caminhos de teste corrigidos), f0abad2 (todas as rotas de `server.ts` documentadas; 404 no lugar de `200 null`; sem "tela Operações"), 11a1b32 (triagem do backlog). `test/docs-routes.test.mjs` falha se uma rota registrada não estiver em `docs/agent-api.md` |
+
+### IDs citados só no apêndice
+
+| ID | Status | Observação |
+| --- | --- | --- |
+| F09 | resolvido | Citado só no apêndice A (rebaixado de alta para média), sem descrição própria. Os achados médios do corpo estão mapeados acima |
+| F10–F12, TD-01 | sem item no corpo | O apêndice B só os cita como não verificados adversarialmente. Não há achado descrito para mapear |
+
+### Plano priorizado (§5)
+
+| Item | Status |
+| --- | --- |
+| P0 1–4 | resolvidos (perfil pela UI; termos e readiness; portões do serviço; `test:ui` no ambiente) |
+| P1 5–8, 10 e 12 | resolvidos (ATS pela UI, validação de fatos, extrator, nova versão e entrevista, `RADAR_PROJECT_ID`, specs de fluxo e limite de cobertura) |
+| P1 9 | resolvido (#10, MCP via HTTP) |
+| P1 11 | resolvido em parte: todas as páginas estão em Preact e `BootstrapPayload` é tipado. Os diálogos ainda estão em `public/app.ts` (TD-03) |
+| P2 13 | resolvido no repositório ([triagem](backlog-triagem-2026-10-30.md) e template de PR com `Closes #`). Fechar as issues fica com o dono |
+| P2 14–16, 18 e 19 | resolvidos |
+| P2 20 | resolvido com ressalva: a referência de rotas continua escrita à mão em `docs/agent-api.md`, não gerada; `test/docs-routes.test.mjs` confere que nenhuma rota de `server.ts` ou `connectors/routes.ts` fica de fora |
+| P2 17 | métricas básicas resolvidas (5d7884b); retenção/LGPD fora do escopo |
+| P2 21 | resolvido ("Não avaliada", `retired`, digitação das palavras, `opening_checked_at` documentado, mapa com escopo reduzido) |
