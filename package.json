@@ -25,10 +25,10 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
-    "@biomejs/biome": "2.5.15",
+    "@biomejs/biome": "2.6.3",
     "@playwright/test": "1.56.1",
     "@types/node": "^24.3.0",
-    "esbuild": "^0.25.9",
+    "esbuild": "^0.28.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },
