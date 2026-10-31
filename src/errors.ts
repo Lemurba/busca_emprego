@@ -96,6 +96,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
   "resume.fact.already_resolved": "Esse fato já foi resolvido.",
   "resume.fact.approved_locked": "Retorne o currículo aprovado para revisão antes de alterá-lo.",
+  "resume.superseded": "Este rascunho foi substituído por um currículo gerado depois para a mesma vaga.",
   "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: um parser não enxerga parte do currículo. Corrija o conteúdo; a justificativa de exceção não libera esse bloqueio.",
   "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio em evidence.",
   "profile.import.invalid": "O arquivo não é um JSON Resume válido.",
