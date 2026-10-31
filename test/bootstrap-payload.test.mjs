@@ -47,5 +47,10 @@ test("bootstrap leva só a nota mais recente de cada vaga; o histórico vem em p
   assert.equal(second.items[0].profile_snapshot_id, snapshots[0]);
   assert.equal(second.items[0].round_id, null);
   assert.equal(second.items[0].criteria_basis_json, undefined, "coluna bruta não vaza");
+  // Só a forma decodificada vai à API (MatchScore): as colunas *_json cruas ficam no banco.
+  for (const score of [second.items[0], latest[0]]) {
+    for (const column of ["criteria_json", "evidence_json", "strengths_json", "gaps_json"]) assert.equal(column in score, false, `${column} não vaza`);
+    assert.ok(Array.isArray(score.criteria) && Array.isArray(score.strengths));
+  }
   assert.throws(() => store.listMatchScoreHistory("nao-existe", { limit: 20, offset: 0 }), (error) => error.code === "job.not_found");
 });

@@ -15,6 +15,7 @@ import { ConnectorBudgetError, ConnectorHttpClient, type ConnectorHttpOptions } 
 import { connectorById } from "./sources.js";
 import { listConnectorCompanies, queueLlmEnrichment, recordConnectorCompanyRun, type ConnectorCompany } from "./store.js";
 import type { ConnectorItem } from "./types.js";
+import type { SearchRoundDetail } from "../bootstrap-payload.js";
 import { DomainError } from "../errors.js";
 
 const CONNECTOR_BATCH_SIZE = 25;
@@ -113,13 +114,13 @@ export async function runConnectorCollection(options: ConnectorRunOptions = {}) 
   }
   if (!bySource.size) return { ok: true, round_id: null, skipped: "connector.no_companies", limits, sources: [] };
 
-  let round: any;
+  let round: SearchRoundDetail;
   try {
     round = startSearchRound({ source_ids: [...bySource.keys()] }, projectId, actor);
   } catch (error) {
     return { ok: false, round_id: null, error: error instanceof Error ? error.message : String(error), limits, sources: [] };
   }
-  const ready = new Set<string>((round.sources as Array<{ source_id: string }>).map((source) => source.source_id));
+  const ready = new Set<string>(round.sources.map((source) => source.source_id));
   for (const sourceId of [...bySource.keys()]) if (!ready.has(sourceId)) bySource.delete(sourceId);
 
   const controller = new AbortController();
@@ -206,7 +207,7 @@ export async function runConnectorCollection(options: ConnectorRunOptions = {}) 
   const failedSources = summary.filter((source) => source.status === "failed").length;
   const result = {
     ok: failedSources < summary.length || summary.length === 0,
-    round_id: round.id as string,
+    round_id: round.id,
     stop_reason: stopReason,
     limits,
     requests: client.requests,

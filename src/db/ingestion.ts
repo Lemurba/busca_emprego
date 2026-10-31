@@ -268,7 +268,7 @@ export function ingestSourceItems(sourceId: string, items: unknown[], options: {
 export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = storeProjectId(), agentId: string | null = null) {
   const round = getRound(roundId, projectId);
   if (!round) throw new DomainError("round.not_found");
-  const roundSource = (round.sources as Record<string, unknown>[]).find((source) => source.source_id === sourceId);
+  const roundSource = round.sources.find((source) => source.source_id === sourceId);
   if (!roundSource) throw new DomainError("round.source.not_found");
   const { items, nextCursor } = validateSourceBatch(sourceId, batch);
   const payloadHash = jobPayloadHash(batch);

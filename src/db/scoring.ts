@@ -89,16 +89,19 @@ export function matchScoreComponents(criteriaJson: unknown, basisJson: unknown):
   });
 }
 
-/** Linha de match_scores pronta para a API: JSON decodificado + componentes explicados. */
+/**
+ * Linha de match_scores pronta para a API: JSON decodificado + componentes explicados. As colunas
+ * `*_json` cruas saem da resposta (F15): só a forma decodificada vai ao painel, como em MatchScore.
+ */
 export function mapMatchScoreRow(row: Record<string, unknown>) {
-  const { criteria_basis_json: basisJson, ...rest } = row;
+  const { criteria_basis_json: basisJson, criteria_json: criteriaJson, evidence_json: evidenceJson, strengths_json: strengthsJson, gaps_json: gapsJson, ...rest } = row;
   return {
     ...rest,
-    criteria: parse(row.criteria_json, []),
-    evidence: parse(row.evidence_json, []),
-    strengths: parse(row.strengths_json, []),
-    gaps: parse(row.gaps_json, []),
-    components: matchScoreComponents(row.criteria_json, basisJson),
+    criteria: parse(criteriaJson, []),
+    evidence: parse(evidenceJson, []),
+    strengths: parse(strengthsJson, []),
+    gaps: parse(gapsJson, []),
+    components: matchScoreComponents(criteriaJson, basisJson),
     preference_adjustment: Number(row.preference_adjustment ?? 0),
     explanation: MATCH_SCORE_EXPLANATION,
   };

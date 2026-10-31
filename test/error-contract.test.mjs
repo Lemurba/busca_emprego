@@ -4,9 +4,12 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-error-contract-"));
 process.env.RADAR_DB_PATH = join(directory, "errors.sqlite");
@@ -141,6 +144,19 @@ try {
     assert.match(tool.request_id, /^[0-9a-f-]{36}$/u);
     assert.equal(logged.length, 1);
     assert.equal(JSON.parse(logged[0]).request_id, tool.request_id);
+  });
+
+  test("todo código estável lançado em src/ tem mensagem pt-BR no dicionário único (#29)", () => {
+    const files = readdirSync(srcDir, { recursive: true }).map(String).filter((file) => file.endsWith(".ts"));
+    const missing = new Set();
+    for (const file of files) {
+      const source = readFileSync(join(srcDir, file), "utf8");
+      // Códigos estáveis: com ponto (`job.not_found`) ou em MAIÚSCULAS (`PDF_DUPLICATE`); o resto é texto de validação.
+      for (const match of source.matchAll(/new (?:DomainError|WorkflowError)\(\s*[`"']([A-Za-z_]+(?:\.[A-Za-z_]+)+|[A-Z][A-Z_]+)[`"':]/gu)) {
+        if (!ERROR_MESSAGES[match[1]]) missing.add(`${match[1]} (${file})`);
+      }
+    }
+    assert.deepEqual([...missing], []);
   });
 } finally {
   rmSync(directory, { recursive: true, force: true });

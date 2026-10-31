@@ -1,5 +1,6 @@
 // Fontes (source_configs), prontidão calculada e rodadas de busca (search_rounds/round_sources).
 import type { SourceConfigRecord } from "../types.js";
+import type { RoundSource, SearchRound, SearchRoundDetail } from "../bootstrap-payload.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now, parseJsonArray, parseObject } from "./util.js";
 import { connectorById } from "../connectors/sources.js";
@@ -50,22 +51,33 @@ export function approveSourceTerms(id: string, actor = "user", projectId = store
   return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
 
-export function getRound(roundId: string, projectId = storeProjectId()): any {
-  const row = db.prepare("SELECT * FROM search_rounds WHERE id=? AND project_id=?").get(roundId, projectId) as Record<string, unknown> | undefined;
-  if (!row) return null;
+/** Linha de search_rounds no formato da API: JSON decodificado e sem as colunas cruas. */
+function mapSearchRound(row: Record<string, unknown>): SearchRound {
   return {
-    ...row,
-    source_ids: parseJsonArray(row.source_ids),
-    config_snapshot: parseObject(row.config_snapshot),
-    counters: parseObject(row.counters_json),
-    sources: db.prepare("SELECT * FROM round_sources WHERE round_id=? ORDER BY source_id").all(roundId)
+    id: String(row.id), project_id: String(row.project_id), status: String(row.status) as SearchRound["status"], profile_snapshot_id: String(row.profile_snapshot_id),
+    source_ids: parseJsonArray(row.source_ids), config_snapshot: parseObject(row.config_snapshot), counters: parseObject(row.counters_json),
+    started_at: String(row.started_at), finished_at: row.finished_at == null ? null : String(row.finished_at), error_code: row.error_code == null ? null : String(row.error_code),
   };
 }
 
-export function listSearchRounds(projectId = storeProjectId()): any[] {
-  return (db.prepare("SELECT * FROM search_rounds WHERE project_id=? ORDER BY started_at DESC").all(projectId) as Record<string, unknown>[]).map((row) => ({
-    ...row, source_ids: parseJsonArray(row.source_ids), config_snapshot: parseObject(row.config_snapshot), counters: parseObject(row.counters_json)
-  }));
+function mapRoundSource(row: Record<string, unknown>): RoundSource {
+  return {
+    round_id: String(row.round_id), source_id: String(row.source_id), status: String(row.status) as RoundSource["status"], cursor: row.cursor == null ? null : String(row.cursor),
+    batch_number: Number(row.batch_number ?? 0), received_count: Number(row.received_count ?? 0), accepted_count: Number(row.accepted_count ?? 0),
+    error_code: row.error_code == null ? null : String(row.error_code), readiness_snapshot: String(row.readiness_snapshot ?? "{}"),
+    started_at: row.started_at == null ? null : String(row.started_at), finished_at: row.finished_at == null ? null : String(row.finished_at),
+  };
+}
+
+export function getRound(roundId: string, projectId = storeProjectId()): SearchRoundDetail | null {
+  const row = db.prepare("SELECT * FROM search_rounds WHERE id=? AND project_id=?").get(roundId, projectId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  const sources = (db.prepare("SELECT * FROM round_sources WHERE round_id=? ORDER BY source_id").all(roundId) as Record<string, unknown>[]).map(mapRoundSource);
+  return { ...mapSearchRound(row), sources };
+}
+
+export function listSearchRounds(projectId = storeProjectId()): SearchRound[] {
+  return (db.prepare("SELECT * FROM search_rounds WHERE project_id=? ORDER BY started_at DESC").all(projectId) as Record<string, unknown>[]).map(mapSearchRound);
 }
 
 export function startSearchRound(input: Record<string, unknown> = {}, projectId = storeProjectId(), actor = "user") {
@@ -104,14 +116,17 @@ export function startSearchRound(input: Record<string, unknown> = {}, projectId 
     for (const item of ready) insertSource.run(id, item.source.id, "ready", JSON.stringify({ status: item.status, reason: item.reason, domain: item.source.domain }), timestamp);
   });
   audit("search_round", id, "started", { actor, project_id: projectId, profile_snapshot_id: snapshot.id, source_ids: readySources.map((source) => source.id) });
-  return getRound(id, projectId);
+  const round = getRound(id, projectId);
+  // Invariante: a rodada acabou de ser gravada nesta mesma conexão.
+  if (!round) throw new Error("round.persist.failed");
+  return round;
 }
 
 export function recordRoundSourceStatus(roundId: string, sourceId: string, status: string, input: Record<string, unknown> = {}, projectId = storeProjectId()) {
   if (!["running", "completed", "failed", "cancelled", "ready", "not_ready", "paused", "blocked"].includes(status)) throw new DomainError("round.source.status.invalid");
   const round = getRound(roundId, projectId);
   if (!round) throw new DomainError("round.not_found");
-  const source = (round.sources as Record<string, unknown>[]).find((item) => item.source_id === sourceId);
+  const source = round.sources.find((item) => item.source_id === sourceId);
   if (!source) throw new DomainError("round.source.not_found");
   const timestamp = now();
   const result = db.prepare(`UPDATE round_sources SET status=?,cursor=?,batch_number=?,received_count=?,accepted_count=?,error_code=?,finished_at=?

@@ -177,6 +177,24 @@ export type SearchRound = {
   error_code: string | null;
 };
 
+/** Estado de uma fonte numa rodada (round_sources). */
+export type RoundSource = {
+  round_id: string;
+  source_id: string;
+  status: "configured" | "not_ready" | "ready" | "running" | "completed" | "failed" | "paused" | "blocked" | "cancelled";
+  cursor: string | null;
+  batch_number: number;
+  received_count: number;
+  accepted_count: number;
+  error_code: string | null;
+  readiness_snapshot: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+/** GET /api/rounds/{id}: a rodada com o estado de cada fonte. */
+export type SearchRoundDetail = SearchRound & { sources: RoundSource[] };
+
 export type PossibleDuplicate = {
   id: string;
   project_id: string;

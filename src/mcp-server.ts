@@ -49,74 +49,38 @@ class ToolError extends Error {
   }
 }
 
-/** Mensagens pt-BR para os códigos estáveis devolvidos pelo núcleo (src/db.ts) via API. */
+/**
+ * Textos do MCP que diferem do painel (dirigidos ao agente). Todo o resto vem do dicionário único
+ * ERROR_MESSAGES de src/errors.ts (#29), via `mcpMessage`.
+ */
 const SAFE_MESSAGES: Record<string, string> = {
   // Credencial do MCP (não a sessão do dashboard): token ausente, errado ou de outra instalação.
   "unauthorized": "Token de serviço recusado pela API: confira RADAR_INTERNAL_SERVICE_TOKEN no env do servidor MCP (o mesmo do .env.local).",
   "internal_token_required": "Token de serviço recusado pela API: confira RADAR_INTERNAL_SERVICE_TOKEN no env do servidor MCP (o mesmo do .env.local).",
-  "validation.id.invalid": "Identificador inválido.",
-  "agent.not_found": "Agente não encontrado.",
-  "agent.jobs.create.forbidden": "O agente não tem permissão para registrar vagas.",
-  "agent.jobs.create_existing.forbidden": "A vaga já existe; use o enriquecimento.",
-  "agent.jobs.enrich.forbidden": "O agente não tem permissão para enriquecer vagas.",
-  "agent.job_field.forbidden": "Campo fora dos campos editáveis do agente.",
-  "connector.enrichment.not_found": "Item da fila de enriquecimento não encontrado.",
-  "connector.enrichment.already_resolved": "Este item da fila de enriquecimento já foi fechado.",
-  "agent.domain.forbidden": "Domínio fora da lista permitida do agente.",
-  "agent.source_url.required": "Informe a URL de origem da vaga.",
-  "agent.prompt_optimization.disabled": "Otimização de prompt desativada para este agente.",
-  "agent.prompt_optimization.reason.invalid": "Motivo da proposta inválido.",
-  "agent.prompt_optimization.prompt.invalid": "Prompt proposto inválido ou idêntico ao atual.",
-  "job.not_found": "Vaga não encontrada.",
-  "job.closed": "Vaga encerrada na fonte: não avalie vagas fechadas.",
   "job.suppressed": "Vaga oculta por uma regra \"Não tenho interesse\"; não gaste esforço com ela.",
-  "job.required_fields.invalid": "Informe título, empresa e fonte da vaga.",
-  "SCHEMA_INVALID": "Item do lote fora do esquema (job_url, title e company são obrigatórios; até 25 itens).",
   "PROFILE_CONFIRMATION_REQUIRED": "Confirme o perfil profissional no dashboard antes de iniciar a rodada.",
-  "ROUND_NO_SOURCES": "A fonte não está configurada ou ativa.",
-  "ROUND_SOURCES_NOT_READY": "A fonte não está pronta (termos, autenticação ou smoke test pendentes).",
-  "round.not_found": "Rodada não encontrada.",
-  "round.not_running": "A rodada já terminou; inicie outra.",
-  "round.source.not_found": "A fonte não faz parte da rodada.",
-  "round.source.not_runnable": "A fonte já terminou nesta rodada.",
-  "agent.published_version.required": "O agente não tem versão publicada.",
-  "job.salary.invalid": "Faixa salarial inválida.",
-  "job.coordinates.invalid": "Coordenadas inválidas.",
   "job.requirements_json.invalid": "Exigências explícitas inválidas: cada campo precisa do trecho literal do anúncio em evidence.",
   "application.not_found": "Candidatura não encontrada.",
-  "application.url.required": "A vaga não tem URL de candidatura.",
-  "application.authorization.required": "A candidatura não tem autorização automática (AUTORIZO).",
-  "application.authorization.unavailable": "Autorização indisponível, expirada, já usada ou desatualizada.",
-  "application.authorization.nonce.required": "Autorização indisponível.",
-  "application.worker.required": "Informe o worker_id do executor.",
-  "application.claim.required": "A candidatura precisa estar reservada (claim) por este executor.",
-  "application.claim.worker_mismatch": "A reserva pertence a outro executor.",
-  "application.url_mismatch": "A URL observada não corresponde à URL autorizada.",
-  "application.failure.reason_required": "Informe o motivo da falha.",
-  "application.resume_version.changed": "O currículo mudou depois da autorização.",
-  "SUBMISSION_EVIDENCE_REQUIRED": "Envio sem evidência observável do portal não é registrado.",
   "application.domain.not_ats": "A URL não é de um ATS de empresa permitido para envio automático; o envio precisa ser manual.",
   "application.final_confirmation_required": "Envio final sem a confirmação humana no painel e o submit_token dela é recusado.",
   "application.daily_limit_reached": "Limite diário de envios automáticos atingido; a candidatura voltou para revisão humana.",
-  "application.observed_url.required": "Informe a URL observada no portal.",
   "application.evidence.screenshot_invalid": "A captura precisa ser um PNG válido em base64.",
   "application.evidence.screenshot_too_large": "A captura deve ter no máximo 2 MB.",
   "application.evidence.fields_invalid": "Resumo dos campos inválido (até 100 itens {label, value}).",
-  "human_question.already_active": "Já existe pergunta ativa para esta candidatura.",
-  "human_question.invalid": "Pergunta inválida.",
   "human_question.not_active": "A pergunta não está aguardando resposta.",
   "human_question.identity_unauthorized": "Remetente não autorizado a responder.",
   "human_question.reply_not_correlated": "A resposta não corresponde à mensagem da pergunta.",
-  "human_question.action.invalid": "Ação de resposta inválida.",
   "human_question.required_cannot_skip": "Pergunta obrigatória não pode ser pulada.",
   "human_question.answer.invalid": "Resposta vazia ou longa demais.",
-  "agent_run.agent_mismatch": "A execução pertence a outro agente.",
   "profile.not_found": "Rascunho de perfil não encontrado.",
   "profile.draft_required": "Não há perfil em rascunho: peça à pessoa para criar uma nova versão do perfil no dashboard antes da entrevista.",
   "profile.draft_ambiguous": "Há mais de um perfil em rascunho: informe profile_id (o rascunho que a pessoa está revisando).",
-  "profile.interview.invalid": "Resposta inválida: informe a pergunta e um valor; listas aceitam só textos, números ou sim/não.",
   "profile.fact.invalid": "Resposta inválida para este eliminatório (veja o formato na descrição da ferramenta).",
 };
+
+function mcpMessage(code: string) {
+  return SAFE_MESSAGES[code] ?? messageForCode(code);
+}
 
 /** Converte qualquer erro em resposta MCP segura: código estável + mensagem pt-BR (#29). */
 export function toolError(error: unknown) {
@@ -198,7 +162,7 @@ const API_TIMEOUT_MS = 30_000;
  */
 const segment = (value: string) => {
   const trimmed = String(value ?? "").trim();
-  if (!trimmed || trimmed === "." || trimmed === "..") throw new ToolError("validation.id.invalid", SAFE_MESSAGES["validation.id.invalid"]!, 400);
+  if (!trimmed || trimmed === "." || trimmed === "..") throw new ToolError("validation.id.invalid", mcpMessage("validation.id.invalid"), 400);
   return encodeURIComponent(trimmed);
 };
 /** Proto declarado ao proxy TLS do dashboard; referência não resolvida ou vazia é ignorada. */
@@ -347,7 +311,7 @@ function authorizationFor(api: RadarApi, applicationId: string) {
 async function currentNonce(api: RadarApi, applicationId: string) {
   const queue = await api.get<Json[]>("/api/authorized-applications");
   const nonce = queue.find((item) => item.id === applicationId && item.authorization_state === "issued")?.nonce;
-  if (typeof nonce !== "string" || !nonce) throw new ToolError("application.authorization.unavailable", SAFE_MESSAGES["application.authorization.unavailable"]!);
+  if (typeof nonce !== "string" || !nonce) throw new ToolError("application.authorization.unavailable", mcpMessage("application.authorization.unavailable"));
   return nonce;
 }
 
@@ -357,9 +321,9 @@ function fetchApplication(api: RadarApi, applicationId: string) {
 
 async function requireClaimHolder(api: RadarApi, applicationId: string, workerId: string) {
   const application = await fetchApplication(api, applicationId);
-  if (!application) throw new ToolError("application.not_found", SAFE_MESSAGES["application.not_found"]!);
-  if (!application.claimed_by) throw new ToolError("application.claim.required", SAFE_MESSAGES["application.claim.required"]!);
-  if (application.claimed_by !== workerId.trim()) throw new ToolError("application.claim.worker_mismatch", SAFE_MESSAGES["application.claim.worker_mismatch"]!);
+  if (!application) throw new ToolError("application.not_found", mcpMessage("application.not_found"));
+  if (!application.claimed_by) throw new ToolError("application.claim.required", mcpMessage("application.claim.required"));
+  if (application.claimed_by !== workerId.trim()) throw new ToolError("application.claim.worker_mismatch", mcpMessage("application.claim.worker_mismatch"));
   return application;
 }
 
@@ -479,8 +443,8 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     annotations: { readOnlyHint: true },
   }, async ({ job_id, include_suppressed }) => execute(async () => {
     const job = await fetchJob(api, job_id);
-    if (!job) throw new ToolError("job.not_found", SAFE_MESSAGES["job.not_found"]!);
-    if (job.suppressed && !include_suppressed) throw new ToolError("job.suppressed", SAFE_MESSAGES["job.suppressed"]!);
+    if (!job) throw new ToolError("job.not_found", mcpMessage("job.not_found"));
+    if (job.suppressed && !include_suppressed) throw new ToolError("job.suppressed", mcpMessage("job.suppressed"));
     return { job: withUntrustedContent(job) };
   }));
 
@@ -631,7 +595,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }, async ({ agent_id, job_id, ...input }) => execute(async () => {
     const agent = await agentFor(agent_id, "jobs.write");
     // #33: vaga fechada (verificação de vaga viva ou fonte) não entra na avaliação.
-    if ((await fetchJob(api, job_id))?.opening_status === "closed") throw new ToolError("job.closed", SAFE_MESSAGES["job.closed"]!);
+    if ((await fetchJob(api, job_id))?.opening_status === "closed") throw new ToolError("job.closed", mcpMessage("job.closed"));
     return { score: await api.post(`/api/jobs/${segment(job_id)}/score`, input, actingAs(agent)) };
   }));
 
@@ -708,7 +672,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     requireAllowedDomain(agent, observed_url);
     await requireClaimHolder(api, application_id, worker_id);
     // Mesmo limite da API: acima dele o esquema HTTP responderia invalid_body, não o código estável.
-    if (screenshot_base64.length > SCREENSHOT_BASE64_MAX) throw new ToolError("application.evidence.screenshot_too_large", SAFE_MESSAGES["application.evidence.screenshot_too_large"]!, 400);
+    if (screenshot_base64.length > SCREENSHOT_BASE64_MAX) throw new ToolError("application.evidence.screenshot_too_large", mcpMessage("application.evidence.screenshot_too_large"), 400);
     const requested = await api.post(`/api/applications/${segment(application_id)}/final-confirmation`, { worker_id, observed_url, fields_summary, screenshot_base64 }, actingAs(agent));
     return { application: await applicationView(api, application_id), evidence_id: requested.evidence_id };
   }));
@@ -798,9 +762,9 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     const agent = await agentFor(agent_id, "preferences.write");
     const drafts = await api.get<Json[]>("/api/profiles/drafts");
     // Com mais de um rascunho, adivinhar o mais recente podia gravar num rascunho que a pessoa não está revisando.
-    if (!profile_id && drafts.length > 1) throw new ToolError("profile.draft_ambiguous", SAFE_MESSAGES["profile.draft_ambiguous"]!);
+    if (!profile_id && drafts.length > 1) throw new ToolError("profile.draft_ambiguous", mcpMessage("profile.draft_ambiguous"));
     const draft = profile_id ? drafts.find((item) => item.id === profile_id) : drafts[0];
-    if (!draft) throw new ToolError("profile.draft_required", SAFE_MESSAGES["profile.draft_required"]!);
+    if (!draft) throw new ToolError("profile.draft_required", mcpMessage("profile.draft_required"));
     // Ator agent:* (x-radar-agent-id) → fato proposto (answerProfileInterview), nunca declaração humana confirmada.
     const result = await api.post<Json>(`/api/profiles/${segment(String(draft.id))}/interview`, { question_key, answer }, actingAs(agent));
     const current = (await api.get<Json[]>("/api/profiles/drafts")).find((item) => item.id === draft.id) as { pending?: number; missing_blockers?: string[] } | undefined;
