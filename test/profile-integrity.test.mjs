@@ -186,7 +186,11 @@ describe("I49-13: perfil a partir do PDF-base", () => {
     const link = profile.facts.find((fact) => fact.type === "professional_link");
     assert.equal(email?.evidence_page, 1);
     assert.equal(link?.evidence_page, 2, "o link da segunda página não sai como página 1");
-    assert.ok(profile.facts.every((fact) => fact.origin === "pdf" && fact.state === "proposed"));
+    // Nome é palpite do cabeçalho (I49-10): entra para revisão, com confiança baixa; o resto é proposto.
+    const name = profile.facts.find((fact) => fact.type === "full_name");
+    assert.deepEqual([name?.value, name?.state, name?.evidence_page], ["Maria Souza", "needs_review", 1]);
+    assert.ok(name.confidence <= 0.5);
+    assert.ok(profile.facts.every((fact) => fact.origin === "pdf" && fact.state === (fact.type === "full_name" ? "needs_review" : "proposed")));
     const created = store.db.prepare("SELECT payload FROM audit_events WHERE entity_id=? AND event_type='draft_created'").get(profile.id);
     assert.equal(JSON.parse(created.payload).fact_count, profile.facts.length, "perfil e fatos gravados juntos");
 

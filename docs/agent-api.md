@@ -289,7 +289,7 @@ Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extra�
 | `GET /api/base-resumes/{id}/file` | Baixa o PDF com `Content-Disposition: attachment` |
 | `POST /api/base-resumes/{id}/select` | Seleciona a base padrão para novas adaptações |
 | `DELETE /api/base-resumes/{id}` | Remove o PDF e limpa vínculos de base dos currículos (só com a sessão do painel) |
-| `POST /api/base-resumes/{id}/create-profile` | Cria um perfil em rascunho com os fatos propostos do PDF (página real de cada fato); perfil e fatos numa transação |
+| `POST /api/base-resumes/{id}/create-profile` | Cria um perfil em rascunho com os fatos propostos do PDF (página real de cada fato); perfil e fatos numa transação. Cada seção vai do seu título até o próximo; itens listados (competências, idiomas, certificações, cada entrada de experiência/formação/projeto) viram um fato cada. `full_name` e `target_role` saem do cabeçalho como palpite (`state: needs_review`, confiança ≤ 0,4) |
 
 O envio é JSON com `title`, `file_name` e `file_data` (bytes codificados em Base64), limite de 5 MB e cabeçalho `%PDF-` obrigatório. O primeiro PDF vira a base selecionada; a seleção pode ser alterada. O conteúdo binário fica somente no SQLite local. Não inclua PDF ou dados pessoais em `POST /api/agent-events`.
 

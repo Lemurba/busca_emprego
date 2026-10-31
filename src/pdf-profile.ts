@@ -45,7 +45,8 @@ export interface ProposedFact {
   excerpt: string;
   origin: "pdf";
   confidence: number;
-  state: "proposed";
+  /** `needs_review` para palpites de baixa confiança (nome, cargo-alvo). */
+  state: "proposed" | "needs_review";
 }
 
 export function sha256(value: Uint8Array): string {
@@ -471,31 +472,169 @@ export function findPhones(text: string): string[] {
   return found;
 }
 
-/** Conservative parser: only facts literally present in extracted text become proposed facts. */
+// ---------------------------------------------------------------------------
+// Fatos propostos (I49-10): cada seção vai do seu título até o próximo título
+// (inclusive atravessando páginas), cada item listado vira um fato próprio e
+// cada fato leva a página real da linha onde começa. Nome e cargo-alvo saem do
+// cabeçalho com confiança baixa e estado `needs_review`.
+// ---------------------------------------------------------------------------
+
+type SectionKind = "summary" | "skills" | "experience" | "education" | "certifications" | "languages" | "projects";
+
+/** Títulos reconhecidos (sem acento, minúsculos). `null` = seção sem fatos (só encerra a anterior). */
+const SECTION_HEADINGS: Record<string, SectionKind | null> = {};
+const sectionHeadingAliases: Array<[SectionKind | null, string[]]> = [
+  ["summary", ["resumo", "resumo profissional", "sobre", "sobre mim", "perfil", "perfil profissional", "objetivo", "objetivo profissional", "summary", "professional summary", "about", "about me", "profile", "objective"]],
+  ["skills", ["competencias", "competencias tecnicas", "habilidades", "habilidades tecnicas", "conhecimentos", "conhecimentos tecnicos", "tecnologias", "ferramentas", "stack", "skills", "technical skills", "hard skills", "soft skills"]],
+  ["experience", ["experiencia", "experiencias", "experiencia profissional", "experiencias profissionais", "historico profissional", "trajetoria profissional", "experience", "work experience", "professional experience", "employment history", "work history"]],
+  ["education", ["formacao", "formacao academica", "educacao", "escolaridade", "education", "academic background"]],
+  ["certifications", ["certificacao", "certificacoes", "certificados", "cursos e certificacoes", "certificacoes e cursos", "licencas e certificados", "certification", "certifications", "licenses and certifications"]],
+  ["languages", ["idioma", "idiomas", "linguas", "language", "languages"]],
+  ["projects", ["projeto", "projetos", "projetos relevantes", "project", "projects"]],
+  [null, ["contato", "contatos", "contact", "dados pessoais", "informacoes pessoais", "informacoes adicionais", "additional information", "interesses", "interests", "referencias", "references", "voluntariado", "volunteering", "premios", "awards", "publicacoes", "publications", "cursos", "outros"]],
+];
+for (const [kind, names] of sectionHeadingAliases) for (const name of names) SECTION_HEADINGS[name] = kind;
+
+const BULLET = /^\s*(?:[•·▪▫◦‣⁃●○■□►▶✓✔*–—-]|\d{1,2}[.)])\s+/u;
+const LIST_SEPARATOR = /\s*[,;|•·▪●]\s*/u;
+const YEAR_OR_CURRENT = /\b(?:19|20)\d{2}\b|\b(?:atual|atualmente|presente|present|current)\b/iu;
+const CONTACT_LIKE = /@|https?:\/\/|www\.|\d{4}|linkedin|github/iu;
+
+function headingKey(value: string): string {
+  return value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("pt-BR")
+    .replace(/^[\s#*_=>•·-]+|[\s*_:=•·-]+$/gu, "").replace(/\s+/gu, " ").trim();
+}
+
+/** Linha de título: a linha inteira é um nome de seção, ou "Título: conteúdo" na mesma linha. */
+function matchHeading(line: string): { kind: SectionKind | null; rest: string } | null {
+  const whole = headingKey(line);
+  if (whole.length <= 50 && whole in SECTION_HEADINGS) return { kind: SECTION_HEADINGS[whole]!, rest: "" };
+  const colon = line.indexOf(":");
+  if (colon > 0 && colon <= 40) {
+    const key = headingKey(line.slice(0, colon));
+    if (key in SECTION_HEADINGS) return { kind: SECTION_HEADINGS[key]!, rest: line.slice(colon + 1).trim() };
+  }
+  return null;
+}
+
+interface SourceLine { text: string; page: number; pageText: string }
+
+const stripBullet = (line: string) => line.replace(BULLET, "").trim();
+
+/** Itens de lista curtos (competências, idiomas): um por linha, e linhas com separadores são divididas. */
+function listItems(lines: SourceLine[]): SourceLine[] {
+  const items: SourceLine[] = [];
+  for (const line of lines) {
+    // Vírgulas dentro de parênteses ("Inglês (avançado, C1)") não separam itens.
+    const protectedText = stripBullet(line.text).replace(/\([^)]*\)/gu, (group) => group.replace(/[,;|]/gu, "\u0000"));
+    for (const part of protectedText.split(LIST_SEPARATOR)) {
+      const value = part.replace(/\u0000/gu, ",").replace(/[.;,]+$/u, "").trim();
+      if (value && /[\p{L}\p{N}]/u.test(value)) items.push({ ...line, text: value });
+    }
+  }
+  return items;
+}
+
+/**
+ * Entradas de várias linhas (experiência, formação, projetos): uma linha de cabeçalho (sem marcador)
+ * abre a entrada e os marcadores seguintes são detalhes dela. Uma nova linha sem marcador depois de
+ * detalhes, ou uma segunda linha com ano/período, abre a próxima entrada.
+ */
+function entryItems(lines: SourceLine[]): Array<{ first: SourceLine; parts: string[] }> {
+  const entries: Array<{ first: SourceLine; parts: string[]; hasBullets: boolean; hasYear: boolean }> = [];
+  const allBullets = lines.length > 1 && lines.every((line) => BULLET.test(line.text));
+  for (const line of lines) {
+    const bullet = BULLET.test(line.text);
+    const text = stripBullet(line.text);
+    if (!text) continue;
+    const year = YEAR_OR_CURRENT.test(text);
+    const current = entries.at(-1);
+    const startsNew = !current || (allBullets ? bullet : !bullet && (current.hasBullets || (year && current.hasYear)));
+    if (startsNew) entries.push({ first: line, parts: [text], hasBullets: false, hasYear: year });
+    else {
+      current.parts.push(text);
+      current.hasBullets ||= bullet;
+      current.hasYear ||= year;
+    }
+  }
+  return entries;
+}
+
+/** Nome provável: 2 a 6 palavras com inicial maiúscula (partículas "de/da/dos/e" permitidas), sem dígitos. */
+const NOT_NAME = /(?<!\p{L})(?:curr[ií]culo|curriculum|resum[eé]|vitae|cv)(?!\p{L})/iu;
+
+function looksLikeName(line: string): boolean {
+  if (line.length > 70 || /[\d@:/|•]/u.test(line) || NOT_NAME.test(line)) return false;
+  const words = line.split(/\s+/u);
+  if (words.length < 2 || words.length > 6) return false;
+  return words.every((word) => /^(?:d[aeo]s?|e|van|von|del|di)$/u.test(word) || /^\p{Lu}[\p{L}'’.-]*$/u.test(word));
+}
+
+/** Cargo provável: linha curta de texto, sem contato, logo depois do nome. */
+function looksLikeRole(line: string): string | null {
+  const value = line.split(/\s+[|•·]\s+/u)[0]!.trim();
+  if (!value || value.length > 80 || CONTACT_LIKE.test(value) || !/\p{L}{3}/u.test(value)) return null;
+  if (value.split(/\s+/u).length > 10) return null;
+  return value;
+}
+
+/** Conservador: só vira fato proposto o que está literalmente no texto extraído. */
 export function proposeFacts(extraction: PdfExtraction): ProposedFact[] {
   if (extraction.status !== "extracted") return [];
   const facts: ProposedFact[] = [];
+  const seen = new Set<string>();
+  const add = (type: string, value: string, source: { page: number; pageText: string; anchor: string }, confidence: number, state: ProposedFact["state"] = "proposed") => {
+    const key = `${type}\u0000${value.toLocaleLowerCase("pt-BR")}`;
+    if (!value || seen.has(key)) return;
+    seen.add(key);
+    facts.push({ type, value, page: source.page, excerpt: excerpt(source.pageText, source.anchor), origin: "pdf", confidence, state });
+  };
   const pages = extraction.pages.length ? extraction.pages : [{ page: 1, text: extraction.text, startOffset: 0 }];
+  const lines: SourceLine[] = [];
   for (const page of pages) {
-    const add = (type: string, value: string, confidence = 0.95) => facts.push({ type, value, page: page.page, excerpt: excerpt(page.text, value), origin: "pdf", confidence, state: "proposed" });
-    for (const email of page.text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) ?? []) add("contact_email", email);
-    for (const phone of findPhones(page.text)) add("contact_phone", phone, 0.85);
-    for (const link of page.text.match(/https?:\/\/[^\s)]+/gu) ?? []) add("professional_link", link, 0.9);
-    const lines = page.text.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
-    const headings: Array<[RegExp, string]> = [
-      [/^(?:resumo|summary|perfil|profile)\s*:?[\s-]*$/iu, "summary"],
-      [/^(?:compet[eê]ncias|skills|tecnologias)\s*:?[\s-]*$/iu, "skills"],
-      [/^(?:experi[eê]ncia|experience|hist[oó]rico profissional)\s*:?[\s-]*$/iu, "experience"],
-      [/^(?:forma[cç][aã]o|education|educa[cç][aã]o)\s*:?[\s-]*$/iu, "education"],
-      [/^(?:certifica[cç][oõ]es?|certifications?)\s*:?[\s-]*$/iu, "certifications"],
-      [/^(?:idiomas?|languages?)\s*:?[\s-]*$/iu, "languages"],
-      [/^(?:projetos?|projects?)\s*:?[\s-]*$/iu, "projects"],
-    ];
-    for (let index = 0; index < lines.length; index += 1) {
-      const heading = headings.find(([pattern]) => pattern.test(lines[index]));
-      if (!heading) continue;
-      const section = lines.slice(index + 1, index + 4).join("; ");
-      if (section) add(heading[1], section, 0.75);
+    const source = (anchor: string) => ({ page: page.page, pageText: page.text, anchor });
+    for (const email of page.text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) ?? []) add("contact_email", email, source(email), 0.95);
+    for (const phone of findPhones(page.text)) add("contact_phone", phone, source(phone), 0.85);
+    for (const link of page.text.match(/https?:\/\/[^\s)]+/gu) ?? []) add("professional_link", link, source(link), 0.9);
+    for (const text of page.text.split(/\r?\n/gu)) if (text.trim()) lines.push({ text: text.trim(), page: page.page, pageText: page.text });
+  }
+
+  // Corta o texto em seções: cada uma termina no próximo título reconhecido (mesmo em outra página).
+  const header: SourceLine[] = [];
+  const sections: Array<{ kind: SectionKind | null; lines: SourceLine[] }> = [];
+  for (const line of lines) {
+    const heading = matchHeading(line.text);
+    if (heading) {
+      sections.push({ kind: heading.kind, lines: heading.rest ? [{ ...line, text: heading.rest }] : [] });
+      continue;
+    }
+    if (sections.length) sections.at(-1)!.lines.push(line);
+    else header.push(line);
+  }
+
+  // Cabeçalho: nome e cargo são palpites (o PDF não diz o que cada linha é) e pedem revisão.
+  // Só as primeiras linhas do cabeçalho: o nome abre o currículo.
+  const nameLine = header.slice(0, 3).find((line) => looksLikeName(line.text));
+  if (nameLine) {
+    add("full_name", nameLine.text, { page: nameLine.page, pageText: nameLine.pageText, anchor: nameLine.text }, 0.4, "needs_review");
+    const next = header[header.indexOf(nameLine) + 1];
+    const role = next ? looksLikeRole(next.text) : null;
+    if (next && role) add("target_role", role, { page: next.page, pageText: next.pageText, anchor: next.text }, 0.35, "needs_review");
+  }
+
+  for (const section of sections) {
+    if (!section.kind || !section.lines.length) continue;
+    const kind = section.kind;
+    const at = (line: SourceLine) => ({ page: line.page, pageText: line.pageText, anchor: line.text });
+    if (kind === "summary") {
+      const first = section.lines[0]!;
+      add(kind, section.lines.map((line) => stripBullet(line.text)).join(" ").replace(/\s+/gu, " ").trim(), at(first), 0.75);
+    } else if (kind === "skills" || kind === "languages") {
+      for (const item of listItems(section.lines)) add(kind, item.text, { page: item.page, pageText: item.pageText, anchor: item.text }, 0.75);
+    } else if (kind === "certifications") {
+      for (const line of section.lines) add(kind, stripBullet(line.text), at(line), 0.75);
+    } else {
+      for (const entry of entryItems(section.lines)) add(kind, entry.parts.join("; "), at(entry.first), 0.75);
     }
   }
   return facts;
