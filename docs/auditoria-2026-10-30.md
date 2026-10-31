@@ -322,7 +322,7 @@ Nenhum achado recebeu status `refutado`. Ajustes feitos na verificação:
 
 ## Status da aplicação
 
-Situação de cada achado no branch `ccr-277b551d-3zawrc` (31/10/2026), depois da migração para Preact (#45–#48) e das etapas S1–S8. Os números de linha das seções anteriores são de `41e2655` e não valem mais: `src/db.ts` virou uma fachada sobre `src/db/*.ts` e as páginas foram para `public/ui/pages/*.tsx`. A situação das issues do GitHub está em [`backlog-triagem-2026-10-30.md`](backlog-triagem-2026-10-30.md).
+Situação de cada achado no branch `ccr-277b551d-3zawrc` (31/10/2026), depois da migração para Preact (#45–#48), das etapas S1–S8 e da rodada final de QA (achados QAF-01 a QAF-20 e N1 a N4, na última subseção). Os números de linha das seções anteriores são de `41e2655` e não valem mais: `src/db.ts` virou uma fachada sobre `src/db/*.ts` e as páginas foram para `public/ui/pages/*.tsx`. A situação das issues do GitHub está em [`backlog-triagem-2026-10-30.md`](backlog-triagem-2026-10-30.md).
 
 Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta está descrito) e **fora do escopo** (retenção/LGPD, que não se aplica a uma instalação pessoal auto-hospedada).
 
@@ -334,16 +334,16 @@ Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta
 | QA-02 | Sem botão para criar perfil a partir do PDF | resolvido | 2b4392a ("Criar perfil a partir deste PDF" em *Currículos*, desabilitado para PDF sem texto) |
 | I49-04 | Código citado errado na issue; `PROFILE_SNAPSHOT_REQUIRED` sem mensagem na UI | resolvido | cf75fa6 e 66d2ca7 (mensagem e bloqueio explicado no "Gerar currículo ATS"); b47f675 (dicionário único de mensagens) |
 | I49-05 | Citado só no apêndice A (rebaixado de crítica para alta), sem descrição própria no corpo | resolvido | Coberto pelos achados críticos e altos do §1, todos resolvidos acima |
-| TD-05/F04 | Citado só no apêndice A (elevado a crítica, alinhado a F04): onboarding travado pelos portões sem UI | resolvido | a1ae489 (aceite de termos, teste de acesso, exclusão de fonte e início de rodada), d14c224 e 6e88498 (e2e e Playwright termos → fonte pronta → rodada) |
+| TD-05/F04 | Citado só no apêndice A (elevado a crítica, alinhado a F04): onboarding travado pelos portões sem UI | resolvido | a1ae489 (aceite de termos, teste de acesso, exclusão de fonte e início de rodada), d14c224 e 6e88498 (e2e e Playwright termos → registrar teste de acesso → fonte pronta → rodada), 11728ff (Playwright de "Excluir fonte" e do conector sem empresa). O "Testar acesso" de conector chama a API pública do ATS e não roda no Playwright (sem rede): fica em `test/e2e/connectors.test.mjs` e `test/e2e/fontes-ats.test.mjs` |
 | I49-07 | Prontidão de fonte enganosa na UI | resolvido | a1ae489 (`effectiveReadiness` no bootstrap e em `GET /api/sources`; rótulos `not_ready`/`paused`) |
-| QA-04, TD-07/F13, I49-08 | Token de serviço revisa e confirma fatos, cria fatos `origin=user`, mescla duplicatas, resolve conflitos e exclui o currículo-base | resolvido | 66d2ca7 (portões humanos e `assertServiceOnlyProposes`), 6aaf2ab (serviço só propõe), 3753243 (resposta a pergunta humana e descarte de rascunho de agente só com a sessão); `test/e2e/auth-gates.test.mjs` |
+| QA-04, TD-07/F13, I49-08 | Token de serviço revisa e confirma fatos, cria fatos `origin=user`, mescla duplicatas, resolve conflitos e exclui o currículo-base | resolvido | 66d2ca7 (portões humanos e `assertServiceOnlyProposes`), 6aaf2ab (serviço só propõe), 3753243 (resposta a pergunta humana e descarte de rascunho de agente só com a sessão), 5f84e53 (N1: exclusão de agente e de fonte e religar fonte desligada só com a sessão; N2: o serviço não tira currículo de "aprovado"); `test/e2e/auth-gates.test.mjs` |
 | I49-09 | `match_score` gravado sem snapshot | resolvido | 66d2ca7 e 6aaf2ab (nota presa ao snapshot da rodada; `PROFILE_SNAPSHOT_REQUIRED`/`PROFILE_SNAPSHOT_INVALID`) |
 | I49-10/QA-05 | Extrator de PDF mistura seções e não extrai nome nem cargo | resolvido | 67bff82 (corte no próximo título, um fato por item, páginas reais, nome e cargo como palpite), 45c2873 (ajustes de seção e localização) |
 | I49-11/QA-08 | `[object Object]` em fatos e excerpts | resolvido | 66d2ca7 (`profile.fact.invalid` para item objeto; excerpt em JSON) |
 | I49-12/QA-09 | Rótulos em inglês para tipos livres | resolvido | 67bff82 e 2b4392a (`full_name`, `target_role`, `certificates` e outros em `factTypeLabels`; `retired` em `profileStatusLabels`) |
 | I49-13 | `createProfileFromBaseResume` não atômico | resolvido | 6aaf2ab (perfil e fatos numa transação) |
 | I49-14 | Citado só no apêndice B, sem descrição própria no corpo | resolvido | Os achados de §1.1 e §1.3 estão todos resolvidos nesta tabela |
-| I49-15/F21/TD-16/QA-15 | Sem teste de fluxo pela UI; cobertura sem limite mínimo | resolvido | 07ab11a, d14c224 (e2e de onboarding e funil), 2b4392a, 6e88498 e 3b6ebd0 (specs Playwright de perfil, termos → rodada, ATS → APROVO e agentes), 95df68f (limite mínimo de cobertura em `npm test`) |
+| I49-15/F21/TD-16/QA-15 | Sem teste de fluxo pela UI; cobertura sem limite mínimo | parcial | 07ab11a, d14c224 (e2e de onboarding e funil), 2b4392a, 6e88498 e 3b6ebd0 (specs Playwright de perfil, termos → rodada, ATS → APROVO e agentes), 95df68f (limite mínimo de cobertura), 5f84e53 (N4: limites em linhas 85, ramos 75, funções 78; hoje 90,5/80,8/83,5). Falta: o funil Playwright para no APROVO. O servidor do `test:ui` roda com a automação desligada (o padrão), e o detalhe da vaga não oferece AUTORIZO nesse caso (QAF-07). O AUTORIZO é coberto só pela API, em `test/e2e/auth-gates.test.mjs` e no smoke de agentes |
 | I49-16 | Plano de correção (não é defeito) | resolvido | Plano do §1.4 executado nos commits acima |
 | QA-10 | Rascunhos de perfil se acumulam | resolvido | 8df5b3f (um rascunho por vez, `409 profile.draft_exists`), b0611bb (`DELETE /api/profiles/{id}`) |
 | QA-13 | Eliminatórios sem caminho de resposta | resolvido | b0611bb (`POST /api/profiles/{id}/new-version`, ferramenta `radar_answer_profile_interview` e papel `preferencias`), a60e74f (entrevista validada no rascunho) |
@@ -360,7 +360,8 @@ Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta
 | QA-12 | Vaga sem nota mostra "Aderência 0%" | resolvido | 53d8a22 ("Não avaliada") |
 | QA-18 | `opening_checked_at` descartado em `job.discovered` | resolvido | cc38926 (gravado com `opening_status`; documentado em `docs/agent-api.md` que não vale como prova para o AUTORIZO) |
 | §2 itens 3–5 | Publicar agente às cegas; fila de enriquecimento sem painel; pergunta com `delivery_failed` sem resposta pelo painel | resolvido | 3753243 e 3b6ebd0 (diff, origem e `checksum` revisado; painel e ferramentas MCP da fila; `POST /api/human-questions/{id}/respond`) |
-| §2 mapa | Só vagas com coordenadas | resolvido (escopo reduzido) | 88a93b3 (lista as vagas sem coordenadas e diz que não há geocodificação) |
+| §2 mapa | Só vagas com coordenadas | resolvido (escopo reduzido) | 88a93b3 (lista as vagas sem coordenadas e diz que não há geocodificação); 5f84e53 (QAF-11: coordenadas enviadas em `job.discovered` e nos lotes não são mais descartadas) |
+| §2 matriz "Ver extração do PDF" | `GET /api/base-resumes/{id}/extraction` sem tela | resolvido | 11728ff ("Ver texto lido" em cada currículo-base de *Currículos*; `test/ui/profile-review.spec.ts`) |
 
 ### Segurança, integridade e dados
 
@@ -371,7 +372,7 @@ Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta
 | TD-09 | Cliente HTTP dos conectores sem DNS fixado; dois clientes anti-SSRF | resolvido | db82d92 (`src/safe-http.ts` único, DNS resolvido uma vez, corpo limitado em streaming), 09ddbb6 (prazo único, gzip limitado, NAT64/6to4) |
 | TD-21/F16 | Sem retenção/LGPD | fora do escopo (LGPD) | Instalação pessoal auto-hospedada: os dados são da própria pessoa, no próprio host. `retention_policies` continua sem uso |
 | TD-13 | Anonimização legada destrutiva no import; código morto | resolvido | 829d609 (comando explícito `scripts/ops/anonymize-legacy.mjs`), a103700 (código morto removido) |
-| TD-06 | `RADAR_PROJECT_ID` pela metade | resolvido | f18e278 (listagens filtradas, sementes por projeto), 4823795 (rotas por id, automação e ids), `test/project-scope-ids.test.mjs`, `test/e2e/project-scope.test.mjs` |
+| TD-06 | `RADAR_PROJECT_ID` pela metade | resolvido | f18e278 (listagens filtradas, sementes por projeto), 4823795 (rotas por id, automação e ids), 5f84e53 (N3: `/api/field-conflicts/{id}/resolve` e `/api/preference-rules/{id}`), `test/project-scope-ids.test.mjs`, `test/e2e/project-scope.test.mjs` |
 | TD-08 | #29: frases como `Error` e status por regex | resolvido | 563ec2f (`DomainError(code, status)` em todo o núcleo), b47f675; `test/error-contract.test.mjs` |
 | TD-12 | `BEGIN IMMEDIATE` cru junto com `tx()` | resolvido | 829d609 (só `tx()`; `test/tx-guard.test.mjs` impede `BEGIN` cru) |
 | TD-22 (`updateApplication`) | `updateApplication` varre a tabela inteira | resolvido | 829d609 (consulta direta) |
@@ -381,7 +382,7 @@ Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta
 
 | ID | Achado | Status | Commits / observação |
 | --- | --- | --- | --- |
-| TD-03/F22 | `public/app.ts` grande; 1 de 10 páginas em Preact | parcial | 6452b4e, 70cc447, 04f2a45, 68245d7, 7ffb59c, 34cf503, 725c5bb, f67dab8 e afe6b0b: as 10 páginas estão em `public/ui/pages/*.tsx`. Resta: `public/app.ts` com cerca de 2.300 linhas (diálogos, detalhe da vaga e `handleAction` em template strings, 10 `innerHTML`) |
+| TD-03/F22 | `public/app.ts` grande; 1 de 10 páginas em Preact | parcial | 6452b4e, 70cc447, 04f2a45, 68245d7, 7ffb59c, 34cf503, 725c5bb, f67dab8 e afe6b0b: as 10 páginas estão em `public/ui/pages/*.tsx`. Resta: `public/app.ts` com cerca de 2.400 linhas (diálogos, detalhe da vaga, editor de currículo e `handleAction` em template strings, 10 `innerHTML`); as correções de QA (11728ff) entraram no código existente, sem migrar esses trechos |
 | TD-02/F23 | `src/db.ts` com 3.195 linhas | resolvido | 30040f0 (módulos coesos em `src/db/`; `src/db.ts` é uma fachada de 29 linhas) |
 | TD-14 | Bootstrap sem tipo | resolvido | 9519c8a (`BootstrapPayload` em `src/bootstrap-payload.ts`, compartilhado com o painel), b47f675 (rodadas tipadas) |
 | TD-11 | Lógica duplicada (hash, domínio de agente, versão publicada) | resolvido | a103700 |
@@ -410,11 +411,45 @@ Legenda: **resolvido** (commits que resolvem o achado), **parcial** (o que resta
 | Item | Status |
 | --- | --- |
 | P0 1–4 | resolvidos (perfil pela UI; termos e readiness; portões do serviço; `test:ui` no ambiente) |
-| P1 5–8, 10 e 12 | resolvidos (ATS pela UI, validação de fatos, extrator, nova versão e entrevista, `RADAR_PROJECT_ID`, specs de fluxo e limite de cobertura) |
+| P1 5–8 e 10 | resolvidos (ATS pela UI, validação de fatos, extrator, nova versão e entrevista, `RADAR_PROJECT_ID`) |
+| P1 12 | resolvido em parte: specs de fluxo até o APROVO e limite de cobertura (5f84e53). O AUTORIZO pela UI não tem spec (ver I49-15) |
 | P1 9 | resolvido (#10, MCP via HTTP) |
 | P1 11 | resolvido em parte: todas as páginas estão em Preact e `BootstrapPayload` é tipado. Os diálogos ainda estão em `public/app.ts` (TD-03) |
-| P2 13 | resolvido no repositório ([triagem](backlog-triagem-2026-10-30.md) e template de PR com `Closes #`). Fechar as issues fica com o dono |
+| P2 13 | resolvido no repositório ([triagem](backlog-triagem-2026-10-30.md) e template de PR com `Closes #`). Fechar as issues fica com o dono, assim como a decisão sobre o IP da LAN no histórico do git (#30), que hoje é só uma recomendação na triagem |
 | P2 14–16, 18 e 19 | resolvidos |
 | P2 20 | resolvido com ressalva: a referência de rotas continua escrita à mão em `docs/agent-api.md`, não gerada; `test/docs-routes.test.mjs` confere que nenhuma rota de `server.ts` ou `connectors/routes.ts` fica de fora |
 | P2 17 | métricas básicas resolvidas (5d7884b); retenção/LGPD fora do escopo |
 | P2 21 | resolvido ("Não avaliada", `retired`, digitação das palavras, `opening_checked_at` documentado, mapa com escopo reduzido) |
+
+### QA final e verificação de completude (31/10/2026)
+
+Achados da rodada final de QA pelo navegador e pela API (QAF) e da verificação de completude contra esta auditoria (N). Todos conferidos no código antes da correção.
+
+| ID | Achado | Status | Commits / observação |
+| --- | --- | --- | --- |
+| QAF-01 | Prazo (`deadline_at`) de lotes, `job.discovered` e conectores descartado na ingestão | resolvido | 5f84e53 (gravado e validado como em `POST /api/jobs`); `test/e2e/auth-gates.test.mjs`, `test/e2e/connectors.test.mjs` |
+| QAF-02 | Currículo ATS de perfil do PDF sem nome no topo; o teste de leitura não exigia o nome | resolvido | 5f84e53 (`full_name`/`target_role` no cabeçalho, rótulos em pt-BR, verificação "Nome no topo" no teste de leitura); `test/fontes-ats.test.mjs` |
+| QAF-03 | `job.discovered` e `radar_discover_job` gravavam vaga de fonte sem termos aceitos | resolvido | 5f84e53 (fonte pronta exigida, como no lote: `ROUND_NO_SOURCES`/`ROUND_SOURCES_NOT_READY`); `test/e2e/auth-gates.test.mjs`, `scripts/ops/smoke-agents.mjs` |
+| QAF-04 | Quadro com rolagem lateral da página inteira | resolvido | 11728ff (`.board` posicionado); spec de 390 px em `test/ui/smoke.spec.ts` |
+| QAF-05 | Quadro vazio rolável sem foco pelo teclado (axe `scrollable-region-focusable`) | resolvido | 11728ff (região "Etapas do quadro" com `tabindex="0"`) |
+| QAF-06 | Pílula "Desligada no servidor (RADAR_AUTO_APPLICATION_ENABLED)" estoura a largura no celular | resolvido | 11728ff (pílula curta e nota com a variável que quebra linha) |
+| QAF-07 | "Autorizar envio automático" oferecido com a automação desligada | resolvido | 11728ff (botões omitidos e motivo exibido: servidor ou kill-switch) |
+| QAF-08 | "Testar acesso…" de conector sem empresa sempre falha | resolvido | 5f84e53 (`connector_companies`), 11728ff ("Cadastrar empresa…" leva ao formulário); `test/ui/sources-ats-flow.spec.ts` |
+| QAF-09 | "Mover para…" oferece "Entrada" na mesma coluna e "Match forte" sem nota; o cliente mandava nota inventada | resolvido | 11728ff ("Validar (continua em Entrada)", "Match forte" desabilitado com o motivo, transição sem dados inventados; o workflow já usava a nota do banco) |
+| QAF-10 | A mesma fonte com dois nomes (`LinkedIn Jobs` e `linkedin-jobs`) | resolvido | 5f84e53 (`job.discovered` grava o id da fonte cadastrada) |
+| QAF-11 | `job.discovered` descartava latitude/longitude | resolvido | 5f84e53 (coordenadas validadas em par, também nos lotes) |
+| QAF-12 | Schema e docs aceitavam 1.000 itens por lote; o domínio, 25 | resolvido | 5f84e53 (25 no schema e em `docs/agent-api.md`) |
+| QAF-13 | Extrator de PDF juntava o detalhe de um cargo ao cargo seguinte | resolvido | 5f84e53 (linha "Cargo - Empresa (AAAA-AAAA)" abre a própria entrada); `test/pdf-profile.test.mjs` |
+| QAF-14 | Revisão do perfil mostrava as chaves cruas do JSON Resume | resolvido | 5f84e53 e 11728ff (`factValueText`, o mesmo texto do currículo ATS); `test/ui/profile-review.spec.ts` |
+| QAF-15 | Botões Confirmar/Rejeitar com nomes acessíveis repetidos | resolvido | 11728ff (o valor entra no nome do botão) |
+| QAF-16 | Revisão de publicação: "por você por você", listas só reordenadas como mudança, "serviço internal" | resolvido | 5f84e53 (diff de listas como conjuntos), 11728ff (origem e ator); `test/agentes-filas.test.mjs` |
+| QAF-17 | "Registrar envio" gravava a data de hoje sem confirmação | resolvido | 11728ff (diálogo com a data do envio, padrão hoje, nunca no futuro) |
+| QAF-18 | Modal e diálogo continuavam abertos depois de trocar de página | resolvido | 11728ff (fechados no `hashchange`) |
+| QAF-19 | Vaga com candidatura na fila listada em "Vagas ainda sem candidatura" | resolvido | 11728ff (sai da lista com candidatura em qualquer estado) |
+| QAF-20 | Rota da API no texto, plurais com "(s)" e "sessão expirou" depois de Sair | resolvido | 11728ff (`countLabel`, texto sem a rota, mensagem "Você saiu do painel.") |
+| N1 | Token de serviço excluía agentes e fontes; religava fonte desligada | resolvido | 5f84e53 (`DELETE /api/agents/{id}` e `/api/sources/{id}` só com a sessão; religar fonte também); `docs/security.md` |
+| N2 | Token de serviço desfazia o APROVO por `PATCH /api/resumes/{id}`, auditado como "user" | resolvido | 5f84e53 (403 para o serviço em currículo aprovado; o ator real vai para o fluxo e a auditoria) |
+| N3 | Conflito de campo e regra de preferência sem escopo de projeto | resolvido | 5f84e53; `test/e2e/project-scope.test.mjs` |
+| N4 | Limite mínimo de cobertura muito abaixo do real | resolvido | 5f84e53 (linhas 85, ramos 75, funções 78) |
+
+Continuam parciais, sem mudança nesta rodada: F14 (8 casts `as never` em `src/server.ts` entre o tipo do schema, com campos `null`, e o tipo do núcleo), F15 (bootstrap com as vagas completas), TD-03/F22 (`public/app.ts`), TD-15 (formatador do Biome e type-check dos `.mjs`), F24 (ícones em glifo e os 10 destinos de navegação), TD-18 (`pdf-lib` sem substituto escolhido), F17/TD-22 (sem latência nem alertas automáticos), P2 20 (referência de rotas escrita à mão) e o funil Playwright até o AUTORIZO (I49-15). Fechar as issues do GitHub e decidir sobre o #30 ficam com o dono. Retenção/LGPD (TD-21/F16) segue fora do escopo.
