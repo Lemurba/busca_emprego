@@ -72,7 +72,7 @@ Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver pr
 
 ### Publicação e rollback de agentes
 
-Editar um agente cria uma versão `draft`; a versão publicada continua governando novas execuções. Publique com `POST /api/agents/{id}/publish` e `version_id`. Rollback usa `POST /api/agents/{id}/rollback`, clona o snapshot escolhido como uma nova versão monotônica e a publica, preservando toda a auditoria. Nunca altere `config_json` diretamente no SQLite.
+Editar um agente cria uma versão `draft`; a versão publicada continua governando novas execuções. No dashboard, "Publicar" abre a revisão: diferença campo a campo contra a versão publicada e a origem do rascunho (você, proposta do coordenador ou automação); proposta que não é sua só é publicada depois de marcar "Revisei as mudanças", e pode ser descartada. Pela API, publique com `POST /api/agents/{id}/publish`, `version_id` e o `checksum` de `GET /api/agents/{id}/versions/{versionId}/diff`. Rollback usa `POST /api/agents/{id}/rollback`, clona o snapshot escolhido como uma nova versão monotônica e a publica, preservando toda a auditoria. Nunca altere `config_json` diretamente no SQLite.
 
 ### Fontes e credenciais
 
@@ -228,7 +228,7 @@ Não fazer downgrade de código sobre schema incompatível. O schema é versiona
 - **DB `quick_check` falha:** parar imediatamente, não executar reparo no original, copiar arquivos SQLite/sidecars para investigação e restaurar o último backup testado.
 - **disco quase cheio:** pausar coleta/escrita; liberar espaço apenas por política aprovada. Não excluir banco, WAL ou backups ad hoc.
 - **Geoapify indisponível/quota:** manter Kanban/lista; desabilitar mapa/geocoding e não inventar coordenadas.
-- **Telegram indisponível:** manter candidatura em `needs_review`; nunca usar resposta padrão nem submeter. Diagnostique o gateway com `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e reentregue com `node scripts/ops/notify-human-questions.mjs --send`. Pergunta em `delivery_failed` continua respondível na conversa e só é reenviada com `--retry-failed`, porque a rota de entrega marca uma única vez (`pending` → `delivered`).
+- **Telegram indisponível:** manter candidatura em `needs_review`; nunca usar resposta padrão nem submeter. Diagnostique o gateway com `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e reentregue com `node scripts/ops/notify-human-questions.mjs --send`. Pergunta em `delivery_failed` pode ser respondida no dashboard (Saúde das buscas › Perguntas para você › Responder aqui) e só é reenviada com `--retry-failed`, porque a rota de entrega marca uma única vez (`pending` → `delivered`).
 - **possível vazamento de secret:** revogar no provedor, rotacionar no Hermes, revisar logs e auditoria; não imprimir o novo valor em teste.
 
 ## 8. Limitações operacionais conhecidas

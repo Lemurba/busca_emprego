@@ -35,7 +35,8 @@ Painel → Configurações → **Empresas por conector** (tabela `connector_comp
 - `POST /api/connectors/companies` — `{ connector, slug, name?, query?, enabled? }` (cria ou atualiza);
 - `PATCH /api/connectors/companies/{id}` — `{ name?, query?, enabled? }`;
 - `DELETE /api/connectors/companies/{id}`;
-- `GET /api/connectors/enrichment-queue` e `POST /api/connectors/enrichment-queue/{id}` (`{ status: "done" | "dismissed" }`).
+- `GET /api/connectors/enrichment-queue` (itens pendentes, com `job_id` quando a vaga já foi ingerida) e `POST /api/connectors/enrichment-queue/{id}` (`{ status: "done" | "dismissed" }`; item já fechado → `409 connector.enrichment.already_resolved`; o ator vai para a auditoria). O painel Agentes › Fila de enriquecimento lista os itens e fecha à mão.
+- MCP (papel `coleta`, só agentes com `jobs.enrich`): `radar_list_enrichment_queue` e `radar_resolve_enrichment`.
 
 As fontes `greenhouse`, `lever`… são as fontes padrão de `source_configs`. Para entrar numa rodada
 elas precisam estar **ativas, com termos aprovados por humano** (painel) e **prontas** — o teste de
@@ -90,5 +91,6 @@ Com `--quiet`, o script não escreve nada quando não há vaga nova nem falha (t
 | requisições | `--max-requests` → `RADAR_CONNECTOR_MAX_REQUESTS` → 300 | para com `connector.request_limit` |
 | páginas da cascata | `--max-enrichments` → `RADAR_CONNECTOR_MAX_ENRICHMENTS` → 50 | o excedente vai direto para a fila de LLM |
 
-Para os agentes LLM do Hermes, `concurrency`, `timeout_seconds` e `max_cost_per_run` continuam sendo
-gravados no snapshot da rodada; quem os aplica é o executor do Hermes, não este repositório.
+Para os agentes LLM do Hermes, `concurrency`, `timeout_seconds` e `max_cost_per_run` (e os tetos de tokens)
+valem no registro de execuções (`radar_record_agent_run` / evento `agent.status`): execução além da
+concorrência é recusada, e a que estoura tempo, custo ou tokens é abortada (ver `docs/agent-api.md`).

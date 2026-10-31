@@ -38,6 +38,7 @@ import { RADAR_MCP_ROLES, RADAR_MCP_TOOLS, type RadarMcpRole } from "./mcp-tools
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
 import { projectId } from "./config.js";
+import { listLlmEnrichmentQueue, resolveLlmEnrichment } from "./connectors/store.js";
 
 /**
  * Servidor MCP do Radar de Vagas.
@@ -78,6 +79,8 @@ const SAFE_MESSAGES: Record<string, string> = {
   "agent.jobs.create_existing.forbidden": "A vaga já existe; use o enriquecimento.",
   "agent.jobs.enrich.forbidden": "O agente não tem permissão para enriquecer vagas.",
   "agent.job_field.forbidden": "Campo fora dos campos editáveis do agente.",
+  "connector.enrichment.not_found": "Item da fila de enriquecimento não encontrado.",
+  "connector.enrichment.already_resolved": "Este item da fila de enriquecimento já foi fechado.",
   "agent.domain.forbidden": "Domínio fora da lista permitida do agente.",
   "agent.source_url.required": "Informe a URL de origem da vaga.",
   "agent.prompt_optimization.disabled": "Otimização de prompt desativada para este agente.",
@@ -473,6 +476,23 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     return { result: { ...enriched, job: withUntrustedContent(enriched.job) } };
   }));
 
+  if (has("radar_list_enrichment_queue")) server.registerTool("radar_list_enrichment_queue", {
+    description: "Lista a fila de enriquecimento por LLM: vagas que a coleta determinística não conseguiu completar (escopo jobs.enrich). Cada item traz job_id (quando a vaga já foi ingerida), job_url e o motivo. Enriqueça com radar_enrich_job e feche o item com radar_resolve_enrichment.",
+    inputSchema: { agent_id: agentId, limit: z.number().int().min(1).max(100).default(25) },
+    annotations: { readOnlyHint: true },
+  }, async ({ agent_id, limit }) => execute(() => {
+    agentFor(agent_id, "jobs.enrich");
+    return { items: listLlmEnrichmentQueue(PROJECT_ID, "pending", limit) };
+  }));
+
+  if (has("radar_resolve_enrichment")) server.registerTool("radar_resolve_enrichment", {
+    description: "Fecha um item pendente da fila de enriquecimento (escopo jobs.enrich): done depois de enriquecer a vaga com evidência; dismissed quando não há dado verificável. Item já fechado não é reaberto.",
+    inputSchema: { agent_id: agentId, item_id: z.string().min(1).max(120), status: z.enum(["done", "dismissed"]) },
+  }, async ({ agent_id, item_id, status }) => execute(() => {
+    const agent = agentFor(agent_id, "jobs.enrich");
+    return { item: resolveLlmEnrichment(item_id, status, PROJECT_ID, `agent:${agent.id}`) };
+  }));
+
   if (has("radar_create_resume")) server.registerTool("radar_create_resume", {
     description: "Cria rascunho de currículo ATS para vaga marcada como de interesse (escopo resume.write). Nunca aprova nem envia. A resposta traz fact_check.pending: números, datas, empresas, cargos, títulos e certificações sem fato confirmado no perfil, que bloqueiam a aprovação.",
     inputSchema: {
@@ -509,7 +529,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }, async ({ agent_id, target_agent_id, prompt, reason }) => execute(() => {
     const agent = agentFor(agent_id, "agents.propose");
     if (target_agent_id.trim() === agent.id) throw new ToolError("agent.prompt_optimization.self_forbidden", "O agente não pode propor o próprio prompt.");
-    const target = proposeAgentPrompt(target_agent_id.trim(), { prompt, reason }, PROJECT_ID);
+    const target = proposeAgentPrompt(target_agent_id.trim(), { prompt, reason }, PROJECT_ID, `agent:${agent.id}`);
     return { agent: target, draft_version_id: target?.draft_version_id ?? null, published: false };
   }));
 

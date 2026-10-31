@@ -4,8 +4,8 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
-import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
+import { addProfileFact, listJobHistory, answerHumanQuestion, answerHumanQuestionFromDashboard, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, discardAgentDraft, getAgentVersionDiff, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, undoPossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
+import { expireAuthorizations, expireTimedOutAgentRuns, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
 import { dbPath } from "./db.js";
 import { registerProcess } from "./process-registry.js";
@@ -120,8 +120,9 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
  * só valem com a sessão do dashboard. O token de serviço (Hermes, scripts) recebe 403.
  * #32: também a confirmação final do envio (ENVIAR) e o cancelamento, o kill-switch/limites
  * (`PUT /api/settings/automation`) e a captura da confirmação final.
- * QA-04/TD-07: revisão de fato do perfil, mescla de duplicatas (irreversível), resolução de
- * conflito de enriquecimento e exclusão do currículo-base. Fatos `origin=user` ou já
+ * QA-04/TD-07: revisão de fato do perfil, mescla de duplicatas (e o desfazer dela), resolução de
+ * conflito de enriquecimento e exclusão do currículo-base. Também a resposta a uma pergunta
+ * humana pelo painel e o descarte de rascunho de agente. Fatos `origin=user` ou já
  * confirmados vindos do serviço são recusados em `assertServiceOnlyProposes`.
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
@@ -131,10 +132,11 @@ function isHumanOnlyRequest(method: string | undefined, pathname: string) {
     || /^\/api\/resumes\/[^/]+\/(?:approve|facts\/[^/]+)$/u.test(pathname)
     || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual|confirm-final|cancel-final)$/u.test(pathname)
     || /^\/api\/profiles\/[^/]+\/(?:confirm|facts\/[^/]+\/review)$/u.test(pathname)
-    || /^\/api\/possible-duplicates\/[^/]+\/resolve$/u.test(pathname)
+    || /^\/api\/possible-duplicates\/[^/]+\/(?:resolve|undo)$/u.test(pathname)
+    || /^\/api\/human-questions\/[^/]+\/respond$/u.test(pathname)
     || /^\/api\/field-conflicts\/[^/]+\/resolve$/u.test(pathname)
     || /^\/api\/sources\/[^/]+\/terms$/u.test(pathname)
-    || /^\/api\/agents\/[^/]+\/(?:publish|rollback)$/u.test(pathname)
+    || /^\/api\/agents\/[^/]+\/(?:publish|rollback|discard-draft)$/u.test(pathname)
   )
     || method === "PATCH" && /^\/api\/applications\/[^/]+$/u.test(pathname)
     || method === "DELETE" && /^\/api\/(?:jobs|base-resumes)\/[^/]+$/u.test(pathname)
@@ -299,9 +301,14 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/agents"), handler: ({ res }) => ok(res, 200, listAgentConfigs(projectId)) },
   { method: "POST", pattern: r("/api/agents"), handler: ({ actor, res, body }) => ok(res, 201, createAgentConfig(validateBody(schemas.agentCreate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/agents/{id}/versions"), handler: ({ res, params }) => ok(res, 200, listAgentConfigVersions(params[0]!, projectId)) },
-  { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => ok(res, 200, publishAgentConfigVersion(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
+  { method: "GET", pattern: r("/api/agents/{id}/versions/{id}/diff"), handler: ({ res, params }) => ok(res, 200, getAgentVersionDiff(params[0]!, params[1]!, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.agentPublish, body);
+    ok(res, 200, publishAgentConfigVersion(params[0]!, String(input.version_id ?? ""), actor, projectId, input.checksum));
+  } },
+  { method: "POST", pattern: r("/api/agents/{id}/discard-draft"), handler: ({ actor, res, params, body }) => ok(res, 200, discardAgentDraft(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
   { method: "POST", pattern: r("/api/agents/{id}/rollback"), handler: ({ actor, res, params, body }) => ok(res, 200, rollbackAgentConfig(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
-  { method: "POST", pattern: r("/api/agents/{id}/prompt-proposals"), handler: ({ res, params, body }) => ok(res, 201, proposeAgentPrompt(params[0]!, validateBody(schemas.agentPromptProposal, body), projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/prompt-proposals"), handler: ({ actor, res, params, body }) => ok(res, 201, proposeAgentPrompt(params[0]!, validateBody(schemas.agentPromptProposal, body), projectId, actor)) },
   { method: "PATCH", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateAgentConfig(params[0]!, validateBody(schemas.agentPatch, body), actor, projectId)) },
   { method: "DELETE", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteAgentConfig(params[0]!, actor, projectId)); } },
 
@@ -390,6 +397,8 @@ const routes: Route[] = [
 
   // Duplicidades
   { method: "GET", pattern: r("/api/possible-duplicates"), handler: ({ res }) => ok(res, 200, listPossibleDuplicates(projectId)) },
+  // Desfazer a decisão dentro do prazo (DUPLICATE_UNDO_WINDOW_MS): só a sessão do dashboard.
+  { method: "POST", pattern: r("/api/possible-duplicates/{id}/undo"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, undoPossibleDuplicate(params[0]!, actor)); } },
   { method: "POST", pattern: r("/api/possible-duplicates/{id}/resolve"), handler: ({ actor, res, params, body }) => ok(res, 200, resolvePossibleDuplicate(params[0]!, String(validateBody(schemas.duplicateResolve, body).status ?? "") as "merged" | "distinct" | "dismissed", actor)) },
 
   // Currículos adaptados
@@ -494,6 +503,8 @@ const routes: Route[] = [
     const input = validateBody(schemas.humanDelivery, body);
     ok(res, 200, markHumanQuestionDelivery(params[0]!, Boolean(input.delivered), input.message_ref == null ? undefined : String(input.message_ref), input.error == null ? undefined : String(input.error)));
   } },
+  // Resposta pelo painel (inclusive de pergunta com entrega falha no Telegram): só a sessão do dashboard.
+  { method: "POST", pattern: r("/api/human-questions/{id}/respond"), handler: ({ actor, res, params, body }) => ok(res, 200, answerHumanQuestionFromDashboard(params[0]!, validateBody(schemas.humanDashboardAnswer, body), actor)) },
   { method: "POST", pattern: r("/api/human-questions/{id}/answer"), handler: ({ res, params, body }) => ok(res, 200, answerHumanQuestion(params[0]!, validateBody(schemas.humanAnswer, body))) },
 
   // Eventos de agentes
@@ -663,6 +674,9 @@ function runExpiration() {
     if (expired.length) console.log(JSON.stringify({ event: "jobs.expired", count: expired.length }));
     // Autorizações vencidas e leases sem heartbeat (#18) também expiram aqui, não no bootstrap.
     expireAuthorizations();
+    // #16: execuções de agente LLM além do tempo limite da versão publicada são abortadas.
+    const timedOut = expireTimedOutAgentRuns();
+    if (timedOut.length) console.log(JSON.stringify({ event: "agent_runs.timed_out", count: timedOut.length }));
   } catch (error) {
     console.error(JSON.stringify({ event: "jobs.expiration_failed", message: error instanceof Error ? error.message : String(error) }));
   }

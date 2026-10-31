@@ -83,6 +83,9 @@ mcp_servers:
         - radar_ingest_batch
         - radar_enrich_job
         - radar_record_agent_run
+        # fila de enriquecimento (só agentes com jobs.enrich)
+        - radar_list_enrichment_queue
+        - radar_resolve_enrichment
       resources: false
       prompts: false
 

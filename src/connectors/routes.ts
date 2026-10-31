@@ -31,6 +31,6 @@ export function connectorRoutes(projectId: string): ConnectorRoute[] {
     { method: "PATCH", path: "/api/connectors/companies/{id}", status: 200, handler: ({ actor, params, body }) => updateConnectorCompany(params[0]!, validateBody(connectorSchemas.companyPatch, body), actor, projectId) },
     { method: "DELETE", path: "/api/connectors/companies/{id}", status: 200, handler: ({ actor, params, body }) => { validateBody(connectorSchemas.empty, body); return deleteConnectorCompany(params[0]!, actor, projectId); } },
     { method: "GET", path: "/api/connectors/enrichment-queue", status: 200, handler: () => listLlmEnrichmentQueue(projectId) },
-    { method: "POST", path: "/api/connectors/enrichment-queue/{id}", status: 200, handler: ({ params, body }) => resolveLlmEnrichment(params[0]!, validateBody(connectorSchemas.enrichmentResolve, body).status, projectId) }
+    { method: "POST", path: "/api/connectors/enrichment-queue/{id}", status: 200, handler: ({ actor, params, body }) => resolveLlmEnrichment(params[0]!, validateBody(connectorSchemas.enrichmentResolve, body).status, projectId, actor) }
   ];
 }

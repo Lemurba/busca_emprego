@@ -6,7 +6,7 @@ export const RADAR_MCP_TOOLS = [
   "radar_list_authorized_applications", "radar_claim_application", "radar_heartbeat_application", "radar_verify_application",
   "radar_request_final_confirmation", "radar_get_final_confirmation",
   "radar_submit_application", "radar_fail_application", "radar_ask_human",
-  "radar_list_open_questions",
+  "radar_list_open_questions", "radar_list_enrichment_queue", "radar_resolve_enrichment",
 ] as const;
 
 export type RadarMcpTool = typeof RADAR_MCP_TOOLS[number];
@@ -32,7 +32,8 @@ export const RADAR_MCP_ROLES = {
   coleta: {
     agent_roles: ["source_scout", "job_enrichment"],
     binding_required: false,
-    tools: ["radar_list_sources", "radar_get_job", "radar_discover_job", "radar_ingest_batch", "radar_enrich_job", "radar_record_agent_run"],
+    // Fila de enriquecimento: só agentes com jobs.enrich (job_enrichment) leem e fecham itens.
+    tools: ["radar_list_sources", "radar_get_job", "radar_discover_job", "radar_ingest_batch", "radar_enrich_job", "radar_record_agent_run", "radar_list_enrichment_queue", "radar_resolve_enrichment"],
   },
   curriculo: {
     agent_roles: ["resume_writer", "match_evaluator"],

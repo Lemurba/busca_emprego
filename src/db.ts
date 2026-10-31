@@ -239,7 +239,7 @@ export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigReco
 export function listAgentConfigVersions(agentId: string, projectId = "busca-emprego") {
   if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new Error("agent.not_found");
   return (db.prepare("SELECT id,agent_id,version,status,checksum,created_by,created_at,published_by,published_at FROM agent_config_versions WHERE agent_id=? ORDER BY version DESC").all(agentId) as Record<string, unknown>[])
-    .map((row) => ({ ...row, version: Number(row.version) }));
+    .map((row) => ({ ...row, version: Number(row.version), origin: agentVersionOrigin(String(row.created_by)) }));
 }
 
 export function listFieldProvenance(jobId: string) {
@@ -314,6 +314,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     activeProfile,
     rounds: listSearchRounds(projectId),
     possibleDuplicates: listPossibleDuplicates(projectId),
+    recentDuplicateDecisions: listRecentDuplicateDecisions(projectId),
     matchScores: (db.prepare("SELECT job_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at FROM match_scores WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[]).map(mapMatchScoreRow),
     companies: listCompanies(),
     agentRuns: listAgentRuns(),
@@ -1180,6 +1181,32 @@ export function listJobOccurrences(jobId?: string, projectId = "busca-emprego") 
 
 export function listPossibleDuplicates(projectId = "busca-emprego", status = "pending") {
   return db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status=? ORDER BY created_at DESC").all(projectId, status);
+}
+
+/**
+ * Prazo para desfazer a decisão sobre uma possível duplicata. Mesclar só registra a decisão
+ * (nenhuma vaga é apagada nem tem dados movidos), então voltar para `pending` é seguro; o prazo
+ * existe para que decisões antigas, já usadas como referência, não mudem sem querer.
+ */
+export const DUPLICATE_UNDO_WINDOW_MS = 24 * 60 * 60_000;
+
+/** Decisões dentro do prazo de desfazer, com o limite de cada uma (`undo_until`). */
+export function listRecentDuplicateDecisions(projectId = "busca-emprego", reference = Date.now()) {
+  const since = new Date(reference - DUPLICATE_UNDO_WINDOW_MS).toISOString();
+  return (db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status<>'pending' AND reviewed_at>=? ORDER BY reviewed_at DESC LIMIT 50").all(projectId, since) as Record<string, unknown>[])
+    .map((row) => ({ ...row, undo_until: new Date(Date.parse(String(row.reviewed_at)) + DUPLICATE_UNDO_WINDOW_MS).toISOString() }));
+}
+
+/** Desfaz a decisão (mesclar, distintas ou dispensar) dentro do prazo: a suspeita volta para a fila. */
+export function undoPossibleDuplicate(id: string, actor = "user", reference = Date.now()) {
+  const row = db.prepare("SELECT status,reviewed_at FROM possible_duplicates WHERE id=?").get(id) as { status: string; reviewed_at: string | null } | undefined;
+  if (!row) throw new Error("possible_duplicate.not_found");
+  if (row.status === "pending") throw new Error("possible_duplicate.not_resolved");
+  if (!row.reviewed_at || reference - Date.parse(row.reviewed_at) > DUPLICATE_UNDO_WINDOW_MS) throw new Error("possible_duplicate.undo_expired");
+  const result = db.prepare("UPDATE possible_duplicates SET status='pending',reviewed_at=NULL,reviewed_by=NULL WHERE id=? AND status=?").run(id, row.status);
+  if (!result.changes) throw new Error("possible_duplicate.not_resolved");
+  audit("possible_duplicate", id, "undone", { previous_status: row.status, actor });
+  return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
 }
 
 export function resolvePossibleDuplicate(id: string, status: "merged" | "distinct" | "dismissed", actor = "user") {
@@ -2585,13 +2612,67 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
 const executor = createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, getApplication, leaseExpiresAt });
 export const { requestFinalConfirmation, confirmFinalSubmission, cancelFinalConfirmation, pollFinalConfirmation, getApplicationEvidence, automationOverview, updateAutomationSettings } = executor;
 
+/** Prefixo da mensagem de execução abortada por limite (#16): execução assim não é reaberta. */
+const RUN_LIMIT_PREFIX = "Interrompida pelo limite";
+
+/** Limites de execução do snapshot publicado do agente (os mesmos campos que os conectores usam). */
+function agentRunLimits(snapshot: Record<string, unknown>) {
+  const optional = (value: unknown) => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+  const concurrency = Number(snapshot.concurrency);
+  const timeoutSeconds = Number(snapshot.timeout_seconds);
+  return {
+    concurrency: Number.isSafeInteger(concurrency) && concurrency >= 1 ? concurrency : 1,
+    timeoutSeconds: Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 120,
+    maxCost: optional(snapshot.max_cost_per_run),
+    maxInputTokens: optional(snapshot.max_input_tokens),
+    maxOutputTokens: optional(snapshot.max_output_tokens)
+  };
+}
+
+/**
+ * #16 — execuções `running` de agentes que passaram do `timeout_seconds` da versão com que
+ * começaram são abortadas (viram `failed` com o motivo). Roda a cada registro de execução e no
+ * timer de expiração do servidor; o agente que tentar atualizar a execução depois recebe erro.
+ */
+export function expireTimedOutAgentRuns(reference = Date.now()) {
+  const rows = db.prepare("SELECT id,agent_id,started_at,config_snapshot FROM agent_runs WHERE status='running' AND agent_id IS NOT NULL").all() as { id: string; agent_id: string; started_at: string; config_snapshot: string | null }[];
+  const expired: string[] = [];
+  for (const row of rows) {
+    const { timeoutSeconds } = agentRunLimits(row.config_snapshot ? JSON.parse(row.config_snapshot) : {});
+    const started = Date.parse(row.started_at);
+    if (!Number.isFinite(started) || reference - started <= timeoutSeconds * 1000) continue;
+    const result = db.prepare("UPDATE agent_runs SET status='failed',finished_at=?,message=? WHERE id=? AND status='running'").run(now(), `${RUN_LIMIT_PREFIX}: tempo limite de ${timeoutSeconds} s excedido.`, row.id);
+    if (!result.changes) continue;
+    audit("agent_run", row.id, "limit_exceeded", { limit: "timeout", agent_id: row.agent_id, timeout_seconds: timeoutSeconds });
+    expired.push(row.id);
+  }
+  return expired;
+}
+
+/**
+ * Registra início/atualização/fim de uma execução de agente, aplicando os limites da versão
+ * publicada (#16): `concurrency` (execuções `running` simultâneas do agente), `timeout_seconds`
+ * (duração e `latency_ms`), `max_cost_per_run` e `max_input_tokens`/`max_output_tokens`.
+ * Início além da concorrência é recusado sem gravar; execução que estoura custo, tokens ou
+ * tempo é gravada como `failed` (abortada, com o motivo) e o chamador recebe o erro.
+ */
 export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }) {
   // A random id never collides between runs started in the same millisecond; an explicit id
   // updates that run (status/finish) instead of replacing the row and losing its start.
   const id = input.id || randomUUID();
   const timestamp = now();
+  if (input.agent_id) expireTimedOutAgentRuns();
+  const existing = input.id ? db.prepare("SELECT status,message,config_snapshot,config_version_id,agent_id FROM agent_runs WHERE id=?").get(input.id) as { status: string; message: string; config_snapshot: string | null; config_version_id: string | null; agent_id: string | null } | undefined : undefined;
+  if (existing?.status === "failed" && String(existing.message ?? "").startsWith(RUN_LIMIT_PREFIX)) {
+    throw new Error(String(existing.message).includes("tempo limite") ? "agent.run.timeout" : "agent.run.aborted");
+  }
   let versionId = input.config_version_id ?? null;
   let snapshot = input.config_snapshot ?? null;
+  // Uma execução em curso continua com a versão com que começou (republicar não muda os limites dela).
+  if (existing?.config_snapshot && existing.agent_id === (input.agent_id ?? existing.agent_id) && !snapshot) {
+    snapshot = JSON.parse(existing.config_snapshot);
+    versionId = versionId ?? existing.config_version_id;
+  }
   if (input.agent_id && (!versionId || !snapshot)) {
     const agent = listAgentConfigs().find((item) => item.id === input.agent_id);
     if (!agent?.published_version_id) throw new Error("agent.published_version.required");
@@ -2600,6 +2681,26 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     versionId = version.id;
     snapshot = JSON.parse(version.config_json);
   }
+  const limits = input.agent_id && snapshot ? agentRunLimits(snapshot) : null;
+  if (limits && !existing && input.status === "running") {
+    const running = Number((db.prepare("SELECT COUNT(*) AS total FROM agent_runs WHERE agent_id=? AND status='running'").get(input.agent_id!) as { total: number }).total);
+    if (running >= limits.concurrency) {
+      audit("agent_run", id, "rejected", { limit: "concurrency", agent_id: input.agent_id, running, concurrency: limits.concurrency });
+      throw new Error("agent.run.concurrency_exceeded");
+    }
+  }
+  // Execução nova não começa no futuro (fugiria do tempo limite); início inválido vira agora.
+  const startedAt = input.started_at && Date.parse(input.started_at) <= Date.now() ? input.started_at : timestamp;
+  let status = input.status;
+  let message = input.message ?? "";
+  let violation: { code: string; detail: string } | null = null;
+  if (limits) {
+    if (limits.maxCost != null && input.cost != null && input.cost > limits.maxCost) violation = { code: "agent.run.max_cost_exceeded", detail: `custo ${input.cost} acima do máximo de ${limits.maxCost} por execução` };
+    else if (limits.maxInputTokens != null && input.input_tokens != null && input.input_tokens > limits.maxInputTokens) violation = { code: "agent.run.max_input_tokens_exceeded", detail: `${input.input_tokens} tokens de entrada acima do máximo de ${limits.maxInputTokens}` };
+    else if (limits.maxOutputTokens != null && input.output_tokens != null && input.output_tokens > limits.maxOutputTokens) violation = { code: "agent.run.max_output_tokens_exceeded", detail: `${input.output_tokens} tokens de saída acima do máximo de ${limits.maxOutputTokens}` };
+    else if (input.latency_ms != null && input.latency_ms > limits.timeoutSeconds * 1000) violation = { code: "agent.run.timeout", detail: `tempo limite de ${limits.timeoutSeconds} s excedido` };
+    if (violation) { status = "failed"; message = `${RUN_LIMIT_PREFIX}: ${violation.detail}.`; }
+  }
   db.prepare(`INSERT INTO agent_runs
     (id,agent_name,status,started_at,finished_at,found_count,message,agent_id,config_version_id,config_snapshot,model_effective,input_tokens,output_tokens,cost,latency_ms)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -2607,8 +2708,12 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
       message=excluded.message,agent_id=COALESCE(excluded.agent_id,agent_runs.agent_id),config_version_id=COALESCE(excluded.config_version_id,agent_runs.config_version_id),
       config_snapshot=COALESCE(excluded.config_snapshot,agent_runs.config_snapshot),model_effective=COALESCE(excluded.model_effective,agent_runs.model_effective),
       input_tokens=COALESCE(excluded.input_tokens,agent_runs.input_tokens),output_tokens=COALESCE(excluded.output_tokens,agent_runs.output_tokens),
-      cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "", input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
-  audit("agent_run", id, "status", { status: input.status, found_count: input.found_count ?? 0, agent_id: input.agent_id ?? null, config_version_id: versionId });
+      cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, status, startedAt, input.finished_at ?? (status === "running" ? null : timestamp), input.found_count ?? 0, message, input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
+  audit("agent_run", id, "status", { status, found_count: input.found_count ?? 0, agent_id: input.agent_id ?? null, config_version_id: versionId });
+  if (violation) {
+    audit("agent_run", id, "limit_exceeded", { limit: violation.code, agent_id: input.agent_id ?? null, detail: violation.detail });
+    throw new Error(violation.code);
+  }
   return listAgentRuns().find((run) => run.id === id) ?? null;
 }
 
@@ -2957,6 +3062,25 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
   if (!allowed.size || !identity || !allowed.has(identity)) throw new Error("human_question.identity_unauthorized");
   const replyTo = String(input.reply_to_message_ref ?? input.reply_to ?? "").trim();
   if (replyTo && replyTo !== String(row.telegram_message_ref ?? "")) throw new Error("human_question.reply_not_correlated");
+  return recordHumanAnswer(row, input, identity, { replyTo, inboundMessageId, activeStatuses: ["pending", "delivered"] });
+}
+
+/**
+ * Resposta dada no dashboard (portão humano, só a sessão): vale para pergunta pendente,
+ * entregue ou com entrega falha no Telegram (`delivery_failed`), que antes só podia ser
+ * respondida reenviando a mensagem. Mesmas ações e efeitos da resposta pelo Telegram.
+ */
+export function answerHumanQuestionFromDashboard(id: string, input: Record<string, unknown>, actor: string) {
+  const row = db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) as Record<string, unknown> | undefined;
+  if (!row) throw new Error("human_question.not_found");
+  if (!["pending", "delivered", "delivery_failed"].includes(String(row.status))) throw new Error("human_question.not_active");
+  return recordHumanAnswer(row, input, actor, { replyTo: "", inboundMessageId: "", activeStatuses: ["pending", "delivered", "delivery_failed"] });
+}
+
+/** Grava a resposta (answer/skip/manual/stop) e aplica o efeito na candidatura, sob o lock de escrita. */
+function recordHumanAnswer(row: Record<string, unknown>, input: Record<string, unknown>, identity: string, options: { replyTo: string; inboundMessageId: string; activeStatuses: string[] }) {
+  const id = String(row.id);
+  const { replyTo, inboundMessageId } = options;
   const action = String(input.action ?? "answer").toLowerCase();
   const answer = String(input.answer ?? input.text ?? "").trim();
   const required = Number(row.required ?? 1) === 1;
@@ -2965,6 +3089,7 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
   if (action === "answer" && (!answer || answer.length > 1000)) throw new Error("human_question.answer.invalid");
   const timestamp = now();
   const applicationId = String(row.application_id);
+  const statusList = options.activeStatuses.map((status) => `'${status}'`).join(",");
   const duplicate = tx(() => {
     if (inboundMessageId) {
       // Claimed under the write lock: a concurrent redelivery of the same message loses here.
@@ -2972,7 +3097,7 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
       if (!inserted.changes) return true;
     }
     const finalAnswer = action === "skip" ? "PULADO" : action === "manual" ? "MANUAL" : action === "stop" ? "PARADO" : answer;
-    const updated = db.prepare("UPDATE human_questions SET status=?,answered_at=?,answer=?,answer_actor=?,reply_to_message_ref=? WHERE id=? AND status IN ('pending','delivered')").run(action === "stop" ? "cancelled" : "answered", timestamp, finalAnswer, identity, replyTo || null, id);
+    const updated = db.prepare(`UPDATE human_questions SET status=?,answered_at=?,answer=?,answer_actor=?,reply_to_message_ref=? WHERE id=? AND status IN (${statusList})`).run(action === "stop" ? "cancelled" : "answered", timestamp, finalAnswer, identity, replyTo || null, id);
     if (!updated.changes) throw new Error("human_question.not_active");
     if (action === "manual") {
       revokeAuthorizationRows(applicationId, "human_manual");
@@ -2988,7 +3113,7 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
       assertCurrentAuthorization(currentAuthorization(applicationId), "claimed", timestamp);
       db.prepare("UPDATE applications SET status='in_progress',current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Resposta recebida para ${id}; execução retomada`, timestamp, applicationId);
     }
-    audit("human_question", id, "answered", { application_id: row.application_id, inbound_message_id: inboundMessageId || null });
+    audit("human_question", id, "answered", { application_id: row.application_id, inbound_message_id: inboundMessageId || null, actor: identity });
     return false;
   });
   if (duplicate) return { duplicate: true, question: db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) ?? null };
@@ -3062,11 +3187,60 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
 
-export function publishAgentConfigVersion(agentId: string, versionId: string, actor: string, projectId = "busca-emprego") {
+/**
+ * Origem de uma versão de agente pelo ator que a criou: a sessão do dashboard é humana;
+ * `hermes-memory` e `agent:<id>` são propostas do coordenador; `service:<nome>` é o token de
+ * serviço (scripts/Hermes). Chamadas diretas da biblioteca (testes, ops) contam como humanas.
+ */
+export function agentVersionOrigin(createdBy: string): "human" | "coordinator" | "service" {
+  if (createdBy === "hermes-memory" || createdBy.startsWith("agent:")) return "coordinator";
+  if (createdBy.startsWith("service:")) return "service";
+  return "human";
+}
+
+/**
+ * Diferença entre uma versão (normalmente o rascunho) e a versão publicada hoje, campo a campo,
+ * com a origem e, para propostas do coordenador, a justificativa registrada. É o que o dashboard
+ * mostra antes de publicar; o `checksum` devolvido é o que a publicação confere.
+ */
+export function getAgentVersionDiff(agentId: string, versionId: string, projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
+  const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
+  if (!agent || !version) throw new Error("agent.version.not_found");
+  const published = agent.published_version_id
+    ? db.prepare("SELECT id,version,config_json FROM agent_config_versions WHERE id=?").get(agent.published_version_id) as { id: string; version: number; config_json: string } | undefined
+    : undefined;
+  const before = (published ? JSON.parse(published.config_json) : {}) as Record<string, unknown>;
+  const after = JSON.parse(String(version.config_json)) as Record<string, unknown>;
+  const changes = [...new Set([...Object.keys(after), ...Object.keys(before)])]
+    .filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(after[field] ?? null))
+    .map((field) => ({ field, before: before[field] ?? null, after: after[field] ?? null }));
+  const createdBy = String(version.created_by);
+  const origin = agentVersionOrigin(createdBy);
+  // A justificativa da proposta fica na auditoria (`prompt_proposed`), ligada à versão criada.
+  const proposal = origin === "coordinator"
+    ? (db.prepare("SELECT payload FROM audit_events WHERE entity_type='agent_config' AND entity_id=? AND event_type='prompt_proposed' ORDER BY id DESC").all(agentId) as { payload: string }[])
+      .map((row) => JSON.parse(row.payload) as Record<string, unknown>).find((payload) => payload.version_id === versionId) ?? null
+    : null;
+  return {
+    agent_id: agentId, version_id: versionId, version: Number(version.version), status: String(version.status), checksum: String(version.checksum),
+    created_by: createdBy, created_at: String(version.created_at), origin, proposal_reason: proposal?.reason == null ? null : String(proposal.reason),
+    published: published ? { version_id: published.id, version: Number(published.version) } : null, changes
+  };
+}
+
+/**
+ * Publica um rascunho (portão humano). `checksum`, quando enviado, precisa ser o da versão
+ * revisada (o que `getAgentVersionDiff` devolveu): se o rascunho mudou depois da revisão, a
+ * publicação é recusada. Rascunho que não nasceu de uma edição humana (proposta do coordenador
+ * ou do token de serviço) só é publicado com esse checksum, isto é, depois de o diff ser visto.
+ */
+export function publishAgentConfigVersion(agentId: string, versionId: string, actor: string, projectId = "busca-emprego", reviewedChecksum?: string) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
   if (!agent || !version) throw new Error("agent.version.not_found");
   if (version.status !== "draft") throw new Error("agent.version.not_draft");
+  if (reviewedChecksum ? reviewedChecksum !== version.checksum : agentVersionOrigin(String(version.created_by)) !== "human") throw new Error("agent.version.review_required");
   const snapshot = JSON.parse(String(version.config_json)) as Record<string, unknown>;
   const values = validateAgentConfigInput(snapshot);
   const timestamp = now();
@@ -3081,17 +3255,23 @@ export function publishAgentConfigVersion(agentId: string, versionId: string, ac
 }
 
 export function rollbackAgentConfig(agentId: string, targetVersionId: string, actor: string, projectId = "busca-emprego") {
-  const target = db.prepare("SELECT config_json,version FROM agent_config_versions WHERE id=? AND agent_id=?").get(targetVersionId, agentId) as { config_json: string; version: number } | undefined;
+  const target = db.prepare("SELECT config_json,version,published_at FROM agent_config_versions WHERE id=? AND agent_id=?").get(targetVersionId, agentId) as { config_json: string; version: number; published_at: string | null } | undefined;
   if (!target || !listAgentConfigs(projectId).some((item) => item.id === agentId)) throw new Error("agent.version.not_found");
+  // Restaurar só vale para versões que já estiveram publicadas: rascunho (ou proposta descartada)
+  // passa pela revisão do diff, não por aqui.
+  if (!target.published_at) throw new Error("agent.version.not_restorable");
   const values = validateAgentConfigInput(JSON.parse(target.config_json));
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(agentId) as { version: number }).version);
   const versionId = insertAgentVersion(db, agentId, nextVersion, "draft", values, actor);
-  const result = publishAgentConfigVersion(agentId, versionId, actor, projectId);
+  // O alvo é uma versão já existente no histórico, escolhida pelo humano na lista de versões.
+  const checksum = (db.prepare("SELECT checksum FROM agent_config_versions WHERE id=?").get(versionId) as { checksum: string }).checksum;
+  const result = publishAgentConfigVersion(agentId, versionId, actor, projectId, checksum);
   audit("agent_config", agentId, "rolled_back", { actor, target_version_id: targetVersionId, target_version: target.version, published_as: nextVersion });
   return result;
 }
 
-export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = "busca-emprego") {
+/** Proposta de prompt do coordenador: vira rascunho com origem `coordinator`; só vale após revisão e publicação humana. */
+export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = "busca-emprego", actor = "hermes-memory") {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   if (!agent) throw new Error("agent.not_found");
   if (!agent.hermes_prompt_optimization) throw new Error("agent.prompt_optimization.disabled");
@@ -3099,9 +3279,19 @@ export function proposeAgentPrompt(agentId: string, input: Record<string, unknow
   if (reason.length < 10 || reason.length > 1000) throw new Error("agent.prompt_optimization.reason.invalid");
   const prompt = String(input.prompt ?? "").trim();
   if (!prompt || prompt === agent.prompt) throw new Error("agent.prompt_optimization.prompt.invalid");
-  const result = updateAgentConfig(agentId, { prompt }, "hermes-memory", projectId);
-  audit("agent_config", agentId, "prompt_proposed", { actor: "hermes-memory", reason, version: result?.version });
+  const result = updateAgentConfig(agentId, { prompt }, actor, projectId);
+  const draft = result?.draft_version_id ? db.prepare("SELECT version FROM agent_config_versions WHERE id=?").get(result.draft_version_id) as { version: number } | undefined : undefined;
+  audit("agent_config", agentId, "prompt_proposed", { actor, reason, version_id: result?.draft_version_id ?? null, version: draft ? Number(draft.version) : null });
   return result;
+}
+
+/** Descarta um rascunho (ex.: proposta do coordenador recusada): a versão fica `retired` no histórico. */
+export function discardAgentDraft(agentId: string, versionId: string, actor: string, projectId = "busca-emprego") {
+  const result = db.prepare("UPDATE agent_config_versions SET status='retired' WHERE id=? AND agent_id=? AND status='draft' AND agent_id IN (SELECT id FROM agent_configs WHERE project_id=?)").run(versionId, agentId, projectId);
+  if (!result.changes) throw new Error("agent.version.not_draft");
+  db.prepare("UPDATE agent_configs SET draft_version_id=NULL,updated_at=? WHERE id=? AND draft_version_id=?").run(now(), agentId, versionId);
+  audit("agent_config", agentId, "draft_discarded", { actor, version_id: versionId });
+  return listAgentConfigs(projectId).find((item) => item.id === agentId) ?? null;
 }
 
 export function deleteAgentConfig(id: string, actor: string, projectId = "busca-emprego") {
