@@ -85,7 +85,9 @@ test("PDF-base → create-profile → rascunho no bootstrap com pendentes", asyn
   assert.equal(draft.source, "pdf");
   assert.equal(draft.base_resume_id, baseResume.id);
   assert.ok(draft.facts.length >= 4, "e-mail, telefone, link e seções");
-  assert.ok(draft.facts.every((fact) => fact.origin === "pdf" && fact.state === "proposed" && fact.evidence_page >= 1));
+  // Nome e cargo-alvo saem do cabeçalho como palpite (`needs_review`); o resto é `proposed`.
+  const headerGuess = (fact) => ["full_name", "target_role"].includes(fact.type);
+  assert.ok(draft.facts.every((fact) => fact.origin === "pdf" && fact.state === (headerGuess(fact) ? "needs_review" : "proposed") && fact.evidence_page >= 1));
   assert.equal(draft.facts.find((fact) => fact.type === "professional_link")?.evidence_page, 2);
 
   const bootstrap = await json(await human("GET", "/api/bootstrap"), 200);
@@ -111,7 +113,8 @@ test("token de serviço recebe 403 nos portões humanos do perfil", async () => 
   // O serviço continua podendo LER o perfil e o bootstrap (sem decidir nada).
   assert.equal((await service("GET", `/api/profiles/${draft.id}`)).status, 200);
   const unchanged = await json(await human("GET", `/api/profiles/${draft.id}/facts`), 200);
-  assert.ok(unchanged.every((item) => item.state === "proposed"), "nada foi revisado pelo serviço");
+  const before = new Map(draft.facts.map((item) => [item.id, item.state]));
+  assert.ok(unchanged.every((item) => ["proposed", "needs_review"].includes(item.state) && item.state === before.get(item.id)), "nada foi revisado pelo serviço");
 });
 
 test("revisão pela sessão: confirmar com pendentes é 422; depois de revisar, 200 com snapshot", async () => {
