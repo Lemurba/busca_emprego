@@ -94,6 +94,20 @@ Campos calculados que aparecem dentro de cada elemento de `jobs`:
 
 Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, não descrição/evidência integral. O detalhe completo é carregado sob demanda por `GET /api/jobs/{id}` para reduzir payload e exposição desnecessária.
 
+### `GET /api/metrics`
+
+Métricas operacionais (F17), aceitas com a sessão do dashboard ou com o token interno; não recebe corpo e só devolve contagens e idades (nenhum dado pessoal). A página "Saúde das buscas" mostra o mesmo conteúdo no painel "Saúde da instalação".
+
+| Campo | Conteúdo |
+| --- | --- |
+| `generated_at`, `uptime_seconds` | Momento da leitura e tempo de processo do servidor |
+| `database.bytes`, `database.wal_bytes` | Tamanho do banco (`page_count × page_size`) e do arquivo `-wal` |
+| `backup` | `status` (`ok`, `stale`, `missing` ou `unavailable`), `latest_at`, `age_seconds`, `count` e `stale_after_hours` (36). Lê `RADAR_BACKUP_DIR` ou `<dir do banco>/backups` e conta só arquivos `radar-<timestamp>.sqlite` gerados por `backup-sqlite.mjs` |
+| `queues.human_questions_open` | Perguntas ao humano em `pending`, `delivered` ou `delivery_failed` |
+| `queues.enrichment_pending` | Itens `pending` em `connector_enrichment_queue` |
+| `queues.authorized_applications` | Autorizações de envio `issued` (não vencidas) e `claimed` |
+| `last_round` | `id`, `status`, `started_at`, `finished_at` e `error_code` da rodada mais recente, ou `null` |
+
 ### Configuração de agentes no dashboard
 
 | Método | Endpoint | Acesso HTTP | Uso |

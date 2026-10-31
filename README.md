@@ -87,6 +87,7 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | --- | --- | --- |
 | `GET` | `/api/health` | Verificar se o processo responde |
 | `GET` | `/api/ready` | Verificar banco, ambiente e operador |
+| `GET` | `/api/metrics` | Idade do último backup, tamanho do banco, filas e última rodada (painel "Saúde da instalação") |
 | `GET` | `/auth?token=...` | Trocar `RADAR_DASHBOARD_TOKEN` pelo cookie de sessão do dashboard |
 | `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, métricas e metadados dos PDFs |
 | `POST` | `/api/agent-events` | Registrar vaga descoberta/atualizada ou estado do agente |

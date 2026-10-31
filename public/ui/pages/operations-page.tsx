@@ -11,6 +11,7 @@ import { appData } from "../app-state.js";
 import { AutomationPanel } from "../components/automation-panel.js";
 import { EmptyState } from "../components/empty-state.js";
 import { MetricCard } from "../components/metric-card.js";
+import { OpsMetricsPanel } from "../components/ops-metrics-panel.js";
 import { PageHeading } from "../components/page-heading.js";
 
 type Rule = NonNullable<Data["suppressedJobs"]>[number]["rules"][number];
@@ -31,6 +32,8 @@ export type OperationsPageProps = {
   describeRule: (rule: any) => string;
   /** Eliminatórios ainda sem fato confirmado no perfil (rótulos já traduzidos). */
   missingBlockers: (facts: Fact[]) => string[];
+  /** Cliente da API do app.ts, usado pelo painel de métricas (F17). */
+  fetchJson: <T>(url: string, options?: RequestInit) => Promise<T>;
 };
 
 const openQuestionStatuses = ["pending", "delivered", "delivery_failed"];
@@ -92,6 +95,7 @@ export function OperationsPage(props: OperationsPageProps) {
         <MetricCard text="Duplicatas" value={data.possibleDuplicates.length} note="aguardando sua decisão" icon="≋" tone="orange" />
         <MetricCard text="Perguntas" value={openQuestions.length} note="esperando resposta no Telegram" icon="?" tone="red" />
       </div>
+      <OpsMetricsPanel fetchJson={props.fetchJson} formatDate={formatDate} roundStatus={props.roundStatus} />
       <AutomationPanel automation={data.automation} jobLabel={(applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || "")} formatDate={formatDate} />
       <div class="dashboard-grid equal section-spaced">
         <ProfilePanel profile={profile} facts={facts} props={props} />

@@ -417,6 +417,28 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("Saúde das buscas: painel Saúde da instalação mostra GET /api/metrics e Atualizar busca de novo", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    const metrics = await pageApi(page, "GET", "api/metrics");
+    const reads: string[] = [];
+    page.on("request", (request) => { if (request.method() === "GET" && request.url().endsWith("/api/metrics")) reads.push(request.url()); });
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="ops-metrics-title"]');
+    await expect(panel.getByRole("heading", { name: "Saúde da instalação" })).toBeVisible();
+    await expect(panel).toContainText("Último backup");
+    // Banco do smoke recém-criado, sem diretório de backup: "Nenhum backup" (status missing).
+    await expect(panel).toContainText(metrics.backup.status === "missing" ? "Nenhum backup" : "Último backup");
+    await expect(panel).toContainText("Banco de dados");
+    await expect(panel).toContainText(`${metrics.queues.human_questions_open} pergunta(s) aberta(s)`);
+    await expect(panel).toContainText(metrics.last_round ? "Iniciada em" : "Nenhuma rodada registrada.");
+    await expect.poll(() => reads.length).toBe(1);
+    await panel.getByRole("button", { name: "Atualizar" }).click();
+    await expect.poll(() => reads.length).toBe(2);
+    await expect(panel.getByRole("button", { name: "Atualizar" })).toBeEnabled();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);

@@ -137,7 +137,7 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 
 ## 5. Backup, retenção e restore
 
-`backup-sqlite.mjs` usa `VACUUM INTO`, valida a origem (`quick_check`) e o snapshot (`PRAGMA integrity_check`), aplica permissões 0600 e gera manifesto SHA-256.
+`backup-sqlite.mjs` usa `VACUUM INTO`, valida a origem (`quick_check`) e o snapshot (`PRAGMA integrity_check`), aplica permissões 0600 e gera manifesto SHA-256. Sem `--db`/`--out` nem `RADAR_DB_PATH`/`RADAR_BACKUP_DIR` no ambiente, usa os valores do `$RADAR_APP_DIR/.env.local` (caminhos relativos ao diretório do app), o mesmo arquivo que o serviço lê. Todos os scripts de `scripts/ops` leem o `.env.local` pelo mesmo módulo (`scripts/ops/lib/env-local.mjs`), sem `source`.
 
 ### Agendamento (cron sem LLM)
 
@@ -156,6 +156,8 @@ hermes cron create "every 24h" --no-agent --script radar-backup.sh \
   --deliver telegram --name radar-backup
 hermes cron run <job_id>      # primeira execução manual: stdout vazio = sucesso
 ```
+
+Para conferir sem abrir o diretório: `GET /api/metrics` devolve `backup.status` (`stale` depois de 36 h sem backup novo) e `backup.age_seconds`; o painel "Saúde da instalação" da página "Saúde das buscas" mostra o mesmo.
 
 Contrato igual ao do watchdog: sucesso é tick silencioso (`RADAR_BACKUP_NOTIFY_SUCCESS=true` avisa também os sucessos); qualquer falha (backup, teste de restore, criptografia, envio) chega no Telegram com as últimas linhas do resumo JSON. Para rodar à mão: `node scripts/ops/scheduled-backup.mjs` (uma linha JSON; código 1 em falha). Rotação e teste de restore também rodam isolados: `node scripts/ops/rotate-backups.mjs --dir DIR --dry-run` e `node scripts/ops/restore-test.mjs --dir DIR`.
 
@@ -233,7 +235,7 @@ Não fazer downgrade de código sobre schema incompatível. O schema é versiona
 
 ## 8. Limitações operacionais conhecidas
 
-- `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume, mas ainda não mede filas/dependências.
+- `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume. `GET /api/metrics` (token interno ou sessão) mede idade do último backup, tamanho do banco, filas (perguntas abertas, enriquecimento, autorizações de envio) e a última rodada, mas não há alerta automático sobre esses números nem métricas de latência.
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
 - A API distingue apenas dois papéis (token interno e sessão do dashboard), sem escopos por rota. SQLite continua em instância única.
 - O build atual não mede a cobertura mínima de 80% exigida pelo SDD.

@@ -673,7 +673,8 @@ const operationsPage = preactPage(OperationsPage, () => ({
   originLabel: (origin: string) => label(originLabels, origin),
   factDisplay,
   describeRule,
-  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type))
+  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type)),
+  fetchJson
 }));
 const jobsPage = preactPage(JobsPage, () => ({
   title: pageMeta.jobs.label,

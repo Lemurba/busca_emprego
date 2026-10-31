@@ -1,0 +1,109 @@
+/**
+ * F17 — painel "Saúde da instalação" da página "Saúde das buscas": idade do último backup,
+ * tamanho do banco, filas que esperam alguém e a última rodada, lidos de `GET /api/metrics`.
+ *
+ * Autocontido como o painel de conectores: busca os dados ao montar e no botão "Atualizar"
+ * (que para a propagação, para o handler global de cliques do #view não marcá-lo ocupado).
+ */
+import { useCallback, useEffect, useState } from "preact/hooks";
+
+export type OperationalMetrics = {
+  generated_at: string;
+  uptime_seconds: number;
+  database: { bytes: number; wal_bytes: number };
+  backup: { status: "ok" | "stale" | "missing" | "unavailable"; latest_at: string | null; age_seconds: number | null; count: number; stale_after_hours: number };
+  queues: { human_questions_open: number; enrichment_pending: number; authorized_applications: { issued: number; claimed: number } };
+  last_round: { id: string; status: string; started_at: string; finished_at: string | null; error_code: string | null } | null;
+};
+
+export type OpsMetricsDeps = {
+  fetchJson: <T>(url: string, options?: RequestInit) => Promise<T>;
+  formatDate: (value: string | null | undefined) => string;
+  roundStatus: (status: string) => { label: string; tone: string };
+};
+
+const backupStatus: Record<OperationalMetrics["backup"]["status"], [string, string]> = {
+  ok: ["Em dia", "teal"],
+  stale: ["Atrasado", "red"],
+  missing: ["Nenhum backup", "red"],
+  unavailable: ["Sem acesso ao diretório", "orange"]
+};
+
+/** "há 3 h", "há 2 dias"… a partir de segundos. */
+export function formatAge(seconds: number) {
+  if (seconds < 60) return "há menos de 1 min";
+  if (seconds < 3600) return `há ${Math.floor(seconds / 60)} min`;
+  if (seconds < 86_400) return `há ${Math.floor(seconds / 3600)} h`;
+  const days = Math.floor(seconds / 86_400);
+  return `há ${days} ${days === 1 ? "dia" : "dias"}`;
+}
+
+/** Bytes em B/KB/MB/GB (base 1024, uma casa decimal, vírgula do pt-BR). */
+export function formatBytes(bytes: number) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${unit === 0 ? value : value.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} ${units[unit]}`;
+}
+
+function BackupItem({ backup, formatDate }: { backup: OperationalMetrics["backup"]; formatDate: OpsMetricsDeps["formatDate"] }) {
+  const [label, tone] = backupStatus[backup.status] ?? [backup.status, "orange"];
+  const detail = backup.latest_at && backup.age_seconds !== null
+    ? `${formatAge(backup.age_seconds)} (${formatDate(backup.latest_at)}) · ${backup.count} ${backup.count === 1 ? "cópia" : "cópias"} no diretório`
+    : backup.status === "unavailable" ? "O servidor não conseguiu ler o diretório de backup." : "Nenhuma cópia encontrada. Rode o backup agendado (scripts/ops/scheduled-backup.mjs).";
+  return (
+    <article class="ops-item">
+      <div><strong>Último backup</strong><span>{`${detail}${backup.status === "stale" ? ` · mais de ${backup.stale_after_hours} h sem cópia nova` : ""}`}</span></div>
+      <span class={`status-pill ${tone}`}>{label}</span>
+    </article>
+  );
+}
+
+export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus }: OpsMetricsDeps) {
+  const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setMetrics(await fetchJson<OperationalMetrics>("/api/metrics"));
+      setLoadError(null);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Não foi possível carregar as métricas.");
+    }
+  }, [fetchJson]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  let body = <p class="muted-text">Carregando…</p>;
+  if (loadError) body = <p class="muted-text">{loadError}</p>;
+  else if (metrics) {
+    const { database, queues, last_round: round } = metrics;
+    const status = round ? roundStatus(round.status) : null;
+    body = (
+      <div class="ops-list">
+        <BackupItem backup={metrics.backup} formatDate={formatDate} />
+        <article class="ops-item">
+          <div><strong>Banco de dados</strong><span>{`${formatBytes(database.bytes)}${database.wal_bytes ? ` + ${formatBytes(database.wal_bytes)} de WAL` : ""}`}</span></div>
+        </article>
+        <article class="ops-item">
+          <div><strong>Filas</strong><span>{`${queues.human_questions_open} pergunta(s) aberta(s) · ${queues.enrichment_pending} vaga(s) aguardando enriquecimento · ${queues.authorized_applications.issued} autorização(ões) de envio emitida(s) e ${queues.authorized_applications.claimed} em execução`}</span></div>
+        </article>
+        <article class="ops-item">
+          <div><strong>Última rodada</strong><span>{round ? `Iniciada em ${formatDate(round.started_at)}${round.finished_at ? ` · terminada em ${formatDate(round.finished_at)}` : ""}${round.error_code ? ` · erro ${round.error_code}` : ""}` : "Nenhuma rodada registrada."}</span></div>
+          {status ? <span class={`status-pill ${status.tone}`}>{status.label}</span> : null}
+        </article>
+      </div>
+    );
+  }
+
+  return (
+    <section class="panel section-spaced" aria-labelledby="ops-metrics-title">
+      <div class="section-head flush">
+        <div><h2 id="ops-metrics-title">Saúde da instalação</h2><p>Backup, banco e filas que esperam alguém. Os mesmos números saem em GET /api/metrics.</p></div>
+        <button type="button" class="secondary-button" data-ops-metrics-refresh onClick={(event) => { event.stopPropagation(); void refresh(); }}>Atualizar</button>
+      </div>
+      {body}
+    </section>
+  );
+}
