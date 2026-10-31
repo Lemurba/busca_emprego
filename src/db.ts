@@ -668,9 +668,21 @@ function jobPayloadHash(value: unknown): string {
 const sourceItemFields = new Set([
   "source_id", "source_job_id", "title", "company", "location_text", "work_model", "seniority", "description", "benefits",
   "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period",
-  "posted_at", "deadline_at", "opening_status", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs",
+  "posted_at", "deadline_at", "opening_status", "opening_checked_at", "source_url", "linkedin_post_url", "job_url", "application_url", "evidence_refs",
   "requirements_json"
 ]);
+
+/**
+ * QA-18: quando a fonte informa se a vaga está aberta ou fechada, a observação tem data.
+ * Vale a data enviada (`opening_checked_at`, nunca no futuro) ou o momento da ingestão;
+ * sem estado informado (`unknown`), não há verificação a registrar.
+ */
+function openingCheckedAt(item: Record<string, unknown>): string | null {
+  if (!["open", "closed"].includes(String(item.opening_status ?? "unknown"))) return null;
+  const reported = item.opening_checked_at == null ? Number.NaN : Date.parse(String(item.opening_checked_at));
+  const observed = now();
+  return Number.isNaN(reported) || reported > Date.parse(observed) ? observed : new Date(reported).toISOString();
+}
 
 export function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
   if (String(batch.source_id ?? sourceId) !== sourceId || !Array.isArray(batch.items) || batch.items.length > 25) throw new Error("SCHEMA_INVALID:source.items");
@@ -682,6 +694,7 @@ export function validateSourceBatch(sourceId: string, batch: Record<string, unkn
     if (String(item.source_id ?? sourceId) !== sourceId || !String(item.job_url ?? "").trim() || !String(item.title ?? "").trim() || !String(item.company ?? "").trim()) throw new Error(`SCHEMA_INVALID:source.items.${index}.required`);
     const opening = String(item.opening_status ?? "unknown");
     if (!["open", "closed", "unknown"].includes(opening)) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_status`);
+    if (item.opening_checked_at != null && Number.isNaN(Date.parse(String(item.opening_checked_at)))) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_checked_at`);
     for (const field of ["job_url", "source_url", "linkedin_post_url", "application_url"] as const) {
       if (item[field]) canonicalizeJobUrl(String(item[field]));
     }
@@ -1051,7 +1064,7 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
     description: item.description == null ? "" : String(item.description), benefits: Array.isArray(item.benefits) ? item.benefits.map(String).join("\n") : String(item.benefits ?? ""),
     requirements: Array.isArray(item.requirements) ? item.requirements.map(String).join("\n") : String(item.requirements ?? ""), responsibilities: Array.isArray(item.responsibilities) ? item.responsibilities.map(String).join("\n") : String(item.responsibilities ?? ""),
     additional_information: item.additional_information == null ? "" : String(item.additional_information), source: sourceId, source_url: sourceUrl, linkedin_post_url: item.linkedin_post_url ? canonicalizeJobUrl(String(item.linkedin_post_url)) : "", job_url: jobUrl,
-    application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at),
+    application_url: item.application_url ? canonicalizeJobUrl(String(item.application_url)) : "", opening_status: String(item.opening_status ?? "unknown"), opening_checked_at: openingCheckedAt(item), salary_min: item.salary_min == null ? null : Number(item.salary_min), salary_max: item.salary_max == null ? null : Number(item.salary_max), currency: item.currency == null ? "BRL" : String(item.currency), salary_period: item.salary_period == null ? null : String(item.salary_period), posted_at: item.posted_at == null ? null : String(item.posted_at),
     ...(item.requirements_json == null ? {} : { requirements_json: normalizeJobRequirements(item.requirements_json) })
   };
   // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
@@ -1073,7 +1086,8 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
   const suppressed = applySuppression(job.id);
   if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId ?? undefined);
   for (const [field, value] of Object.entries(jobInput)) {
-    if (["id", "project_id", "source_job_id", "source"].includes(field) || value == null || value === "") continue;
+    // opening_checked_at é a data da observação de opening_status, não um campo com fonte própria.
+    if (["id", "project_id", "source_job_id", "source", "opening_checked_at"].includes(field) || value == null || value === "") continue;
     // Vista em outro portal (dedup multi-chave), a URL diferente fica na ocorrência, não vira conflito.
     if (existingJob && multiKeyMatch && ["source_url", "job_url", "linkedin_post_url", "application_url"].includes(field)) continue;
     // A closure reported by the source is applied by closeJobFromSource, not parked as a conflict.
@@ -3168,7 +3182,7 @@ function agentJobItem(input: Partial<Job> & { source: string; title: string; com
     job_url: input.job_url || input.linkedin_post_url || input.application_url || input.source_url,
   };
   if (raw.location != null) item.location_text = raw.location;
-  for (const field of ["source_job_id", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period", "posted_at", "deadline_at", "opening_status", "linkedin_post_url", "application_url"]) {
+  for (const field of ["source_job_id", "work_model", "seniority", "description", "benefits", "requirements", "responsibilities", "additional_information", "salary_min", "salary_max", "currency", "salary_period", "posted_at", "deadline_at", "opening_status", "opening_checked_at", "linkedin_post_url", "application_url"]) {
     if (raw[field] != null && raw[field] !== "") item[field] = raw[field];
   }
   return item;

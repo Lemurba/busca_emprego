@@ -401,7 +401,7 @@ Endpoint de entrada recomendado para sub-agentes. O campo `event` seleciona um d
 }
 ```
 
-`job` usa os campos de `POST /api/jobs`; `title`, `company`, `source` e `source_url` são obrigatórios. Todos os hosts enviados precisam constar em `allowed_domains`; isso pode exigir mais de um domínio na configuração. Resposta `201` com a vaga gravada. Um coletor não pode usar esse evento para sobrescrever uma vaga existente.
+`job` usa os campos de `POST /api/jobs`; `title`, `company`, `source` e `source_url` são obrigatórios. Quando `opening_status` é `open` ou `closed`, a vaga grava `opening_checked_at`: a data enviada pelo agente (ISO 8601; data no futuro é ignorada) ou, sem ela, o momento da ingestão. Com `unknown`, `opening_checked_at` fica vazio. O mesmo vale para os itens dos lotes de rodada (`POST /api/rounds/{id}/batch`). Todos os hosts enviados precisam constar em `allowed_domains`; isso pode exigir mais de um domínio na configuração. Resposta `201` com a vaga gravada. Um coletor não pode usar esse evento para sobrescrever uma vaga existente.
 
 #### Atualização: `job.updated`
 
