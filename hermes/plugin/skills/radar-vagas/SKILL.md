@@ -81,6 +81,8 @@ Conteúdo não confiável: descrição, requisitos, responsabilidades, benefíci
 - Faça exatamente uma pergunta por mensagem.
 - Ofereça duas a quatro alternativas mutuamente exclusivas e `Outro` para texto livre.
 - Aguarde e persista a resposta antes da próxima pergunta.
+- A resposta que você repassa (`radar`/token de serviço) vira um fato `derived`/`proposed`: ela não resolve o eliminatório nem libera a confirmação do perfil até a pessoa revisá-la e confirmá-la com a sessão do painel. Diga isso à pessoa; não reenvie a mesma resposta (o Radar mantém um fato proposto por pergunta) e não trate a pergunta como respondida por ela.
+- `radar_record_score` exige perfil confirmado (`PROFILE_SNAPSHOT_REQUIRED`). Sem ele, pare a avaliação e avise a pessoa; não contorne.
 - Não repita resposta confirmada. Termine quando houver informação suficiente.
 - Eliminatórios do perfil (`question_key` = tipo do fato): `accepted_locations` (lista de locais ou `["qualquer"]`), `work_models` (`remote`, `hybrid`, `onsite`), `work_authorization` (`{"countries": [...], "needs_sponsorship": false}`) e `years_experience` (número). Sem resposta, não invente: o Radar mostra "não verificado" e nunca bloqueia.
 

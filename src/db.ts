@@ -1194,25 +1194,36 @@ export function resolvePossibleDuplicate(id: string, status: "merged" | "distinc
 /**
  * I49-09: a nota de aderência sempre se refere a um snapshot de perfil confirmado do projeto.
  * Sem id, usa o snapshot do perfil ativo; sem perfil confirmado → PROFILE_SNAPSHOT_REQUIRED;
- * id de outro projeto ou inexistente → PROFILE_SNAPSHOT_INVALID.
+ * id de outro projeto ou inexistente → PROFILE_SNAPSHOT_INVALID. Com `round_id`, a rodada
+ * precisa existir no projeto e a nota usa o snapshot fixado nela ao iniciar (um snapshot
+ * diferente → PROFILE_SNAPSHOT_INVALID), para não misturar versões do perfil na rodada.
+ * `active` diz se é o snapshot do perfil ativo: só esse atualiza a nota exibida no quadro.
  */
-function requireProfileSnapshotId(snapshotId: string | null | undefined, projectId: string): string {
+function resolveScoreSnapshot(snapshotId: string | null | undefined, roundId: string | null | undefined, projectId: string): { snapshotId: string; roundId: string; active: boolean } {
   const requested = String(snapshotId ?? "").trim();
-  if (!requested) {
-    const active = getLatestProfileSnapshot(undefined, projectId);
-    if (!active) throw new Error("PROFILE_SNAPSHOT_REQUIRED");
-    return String(active.id);
+  const round = String(roundId ?? "").trim();
+  const activeId = getLatestProfileSnapshot(undefined, projectId)?.id as string | undefined;
+  let resolved = requested;
+  if (round) {
+    const row = db.prepare("SELECT profile_snapshot_id FROM search_rounds WHERE id=? AND project_id=?").get(round, projectId) as { profile_snapshot_id: string } | undefined;
+    if (!row) throw new Error("round.not_found");
+    if (requested && requested !== row.profile_snapshot_id) throw new Error("PROFILE_SNAPSHOT_INVALID");
+    resolved = row.profile_snapshot_id;
   }
-  const row = db.prepare("SELECT s.id FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id WHERE s.id=? AND p.project_id=?").get(requested, projectId);
+  if (!resolved) {
+    if (!activeId) throw new Error("PROFILE_SNAPSHOT_REQUIRED");
+    return { snapshotId: String(activeId), roundId: round, active: true };
+  }
+  const row = db.prepare("SELECT s.id FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id WHERE s.id=? AND p.project_id=?").get(resolved, projectId);
   if (!row) throw new Error("PROFILE_SNAPSHOT_INVALID");
-  return requested;
+  return { snapshotId: resolved, roundId: round, active: resolved === activeId };
 }
 
 export function recordMatchScore(input: { job_id: string; scores: Record<string, unknown>; profile_snapshot_id?: string | null; round_id?: string | null; evidence?: unknown[]; strengths?: string[]; gaps?: string[]; project_id?: string }) {
   const job = getJob(input.job_id);
   if (!job) throw new Error("job.not_found");
   const projectId = input.project_id ?? "busca-emprego";
-  const snapshotId = requireProfileSnapshotId(input.profile_snapshot_id, projectId);
+  const { snapshotId, roundId, active } = resolveScoreSnapshot(input.profile_snapshot_id, input.round_id, projectId);
   // Critério = número (legado, "estimado") ou {value, basis, evidence}; a conta não muda.
   const criteria = normalizeCriterionInputs(input.scores);
   const result = calculateMatchScore(criteria.values as never);
@@ -1227,11 +1238,12 @@ export function recordMatchScore(input: { job_id: string; scores: Record<string,
   tx(() => {
     db.prepare(`INSERT INTO match_scores (id,project_id,job_id,profile_snapshot_id,round_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,profile_snapshot_id,round_id) DO UPDATE SET project_id=excluded.project_id,score_base=excluded.score_base,coverage_percent=excluded.coverage_percent,band=excluded.band,preference_adjustment=excluded.preference_adjustment,score_final=excluded.score_final,criteria_json=excluded.criteria_json,criteria_basis_json=excluded.criteria_basis_json,evidence_json=excluded.evidence_json,strengths_json=excluded.strengths_json,gaps_json=excluded.gaps_json,created_at=excluded.created_at`)
-      .run(randomUUID(), projectId, input.job_id, snapshotId, input.round_id ?? "", result.scoreBase, result.coveragePercent, result.band, adjusted.preferenceAdjustment, adjusted.scoreFinal, JSON.stringify(result.criteria), JSON.stringify(criteria.basis), json(input.evidence ?? []), json(input.strengths ?? []), json(input.gaps ?? []), now());
-    db.prepare("UPDATE jobs SET match_score=?,updated_at=? WHERE id=?").run(Math.round(adjusted.scoreFinal), now(), input.job_id);
+      .run(randomUUID(), projectId, input.job_id, snapshotId, roundId, result.scoreBase, result.coveragePercent, result.band, adjusted.preferenceAdjustment, adjusted.scoreFinal, JSON.stringify(result.criteria), JSON.stringify(criteria.basis), json(input.evidence ?? []), json(input.strengths ?? []), json(input.gaps ?? []), now());
+    // Nota de um perfil já substituído fica no histórico, mas não sobrescreve a do quadro.
+    if (active) db.prepare("UPDATE jobs SET match_score=?,updated_at=? WHERE id=?").run(Math.round(adjusted.scoreFinal), now(), input.job_id);
   });
-  audit("job", input.job_id, "match_scored", { score_base: result.scoreBase, coverage_percent: result.coveragePercent, band: result.band, score_final: adjusted.scoreFinal, profile_snapshot_id: snapshotId, round_id: input.round_id ?? null });
-  return getMatchScore(input.job_id, snapshotId, input.round_id ?? "");
+  audit("job", input.job_id, "match_scored", { score_base: result.scoreBase, coverage_percent: result.coveragePercent, band: result.band, score_final: adjusted.scoreFinal, profile_snapshot_id: snapshotId, round_id: roundId || null, active_profile: active });
+  return getMatchScore(input.job_id, snapshotId, roundId);
 }
 
 /** Última nota da vaga; snapshot/rodada só filtram quando informados (`""` = sem rodada). */
@@ -1535,7 +1547,9 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   const requestedState = String(input.state ?? (origin === "user" ? "confirmed" : "proposed"));
   const state = automated && requestedState === "confirmed" ? "proposed" : requestedState;
   const evidencePage = input.evidence_page == null && input.page == null ? null : Number(input.evidence_page ?? input.page);
-  const defaultExcerpt = origin === "user" ? `Declaração humana: ${factExcerpt(value).slice(0, 200)}` : automated ? `Informado por ${actor}: ${factExcerpt(value).slice(0, 200)}` : "";
+  // Só a declaração humana ganha trecho padrão. Fato do serviço/agente traz a própria evidência
+  // ou fica sem ela (e então não pode ser confirmado como está); quem informou fica na auditoria.
+  const defaultExcerpt = origin === "user" ? `Declaração humana: ${factExcerpt(value).slice(0, 200)}` : "";
   const evidenceExcerpt = String(input.evidence_excerpt ?? input.excerpt ?? defaultExcerpt).trim().slice(0, 500);
   const confidence = Number(input.confidence ?? (origin === "user" ? 1 : 0.8));
   if (!type || type.length > 80 || value == null || value === "" || (Array.isArray(value) && value.length === 0)) throw new Error("profile.fact.invalid");
@@ -1545,6 +1559,8 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   if (origin === "import" && !evidenceExcerpt.startsWith("/")) throw new Error("profile.fact.evidence.required");
   if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error("profile.fact.confidence.invalid");
   if (evidencePage != null && (!Number.isInteger(evidencePage) || evidencePage < 1)) throw new Error("profile.fact.invalid");
+  // Fato "do PDF" vindo do serviço/agente precisa apontar a página de onde saiu.
+  if (automated && origin === "pdf" && evidencePage == null) throw new Error("profile.fact.evidence.required");
   const id = String(input.id ?? idFor(`profile-fact|${profileId}|${type}|${JSON.stringify(value)}|${Date.now()}|${Math.random()}`));
   const timestamp = now();
   db.prepare(`INSERT INTO profile_facts
@@ -1634,9 +1650,12 @@ export function updateProfessionalProfile(id: string, input: Record<string, unkn
   if (!profile || profile.status !== "draft") throw new Error("profile.draft_required");
   const context = input.context === undefined && input.context_json === undefined ? profile.context : parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
-  db.prepare("UPDATE professional_profiles SET context_json=?,updated_at=? WHERE id=? AND project_id=? AND status='draft'").run(contextJson, now(), id, projectId);
-  if (Array.isArray(input.facts)) for (const fact of input.facts) addProfileFact(id, fact as Record<string, unknown>, actor, projectId);
-  audit("profile", id, "draft_updated", { actor });
+  // Contexto e fatos são uma unidade (como na criação): um fato inválido desfaz o PATCH inteiro.
+  tx(() => {
+    db.prepare("UPDATE professional_profiles SET context_json=?,updated_at=? WHERE id=? AND project_id=? AND status='draft'").run(contextJson, now(), id, projectId);
+    if (Array.isArray(input.facts)) for (const fact of input.facts) addProfileFact(id, fact as Record<string, unknown>, actor, projectId);
+    audit("profile", id, "draft_updated", { actor });
+  });
   return { ...getProfile(id, projectId), facts: listProfileFacts(id) };
 }
 
@@ -1695,15 +1714,29 @@ export function answerProfileInterview(profileId: string, questionKey: string, a
   const timestamp = now();
   const excerptText = factExcerpt(normalizedAnswer).slice(0, 200);
   tx(() => {
-    db.prepare(`INSERT INTO profile_interviews (id,profile_id,question_key,question,answer_json,status,asked_at,answered_at)
-      VALUES (?,?,?,?,?,'answered',?,?)
-      ON CONFLICT(profile_id,question_key) DO UPDATE SET answer_json=excluded.answer_json,status='answered',answered_at=excluded.answered_at`)
-      .run(idFor(`interview|${profileId}|${key}`), profileId, key, key, JSON.stringify(answer), timestamp, timestamp);
     if (isAutomatedActor(actor)) {
       // QA-04: resposta repassada pelo serviço (Hermes) não é declaração humana verificada:
       // vira fato proposto, com o trecho como evidência, para o usuário confirmar no dashboard.
-      addProfileFact(profileId, { type: key, value: normalizedAnswer, origin: "derived", state: "proposed", evidence_excerpt: `Entrevista via ${actor}: ${excerptText}` }, actor, projectId);
+      // Uma pergunta = um fato proposto (id determinístico): repetir a resposta não empilha
+      // fatos para revisar, e resposta nova só reabre a revisão quando o valor muda.
+      // A entrevista fica `pending` e nunca sobrescreve uma resposta já dada pela pessoa.
+      db.prepare(`INSERT INTO profile_interviews (id,profile_id,question_key,question,answer_json,status,asked_at,answered_at)
+        VALUES (?,?,?,?,?,'pending',?,NULL)
+        ON CONFLICT(profile_id,question_key) DO UPDATE SET answer_json=excluded.answer_json WHERE profile_interviews.status<>'answered'`)
+        .run(idFor(`interview|${profileId}|${key}`), profileId, key, key, JSON.stringify(answer), timestamp);
+      const factId = idFor(`interview-fact|${profileId}|${key}`);
+      const existing = db.prepare("SELECT value_json FROM profile_facts WHERE id=?").get(factId) as { value_json: string } | undefined;
+      const excerpt = `Entrevista via ${actor}: ${excerptText}`;
+      if (!existing) addProfileFact(profileId, { id: factId, type: key, value: normalizedAnswer, origin: "derived", state: "proposed", evidence_excerpt: excerpt }, actor, projectId);
+      else if (existing.value_json !== JSON.stringify(normalizedAnswer)) {
+        db.prepare("UPDATE profile_facts SET value_json=?,evidence_excerpt=?,state='proposed',updated_at=? WHERE id=?").run(JSON.stringify(normalizedAnswer), excerpt, timestamp, factId);
+        audit("profile_fact", factId, "reproposed", { profile_id: profileId, type: key, actor });
+      }
     } else {
+      db.prepare(`INSERT INTO profile_interviews (id,profile_id,question_key,question,answer_json,status,asked_at,answered_at)
+        VALUES (?,?,?,?,?,'answered',?,?)
+        ON CONFLICT(profile_id,question_key) DO UPDATE SET answer_json=excluded.answer_json,status='answered',answered_at=excluded.answered_at`)
+        .run(idFor(`interview|${profileId}|${key}`), profileId, key, key, JSON.stringify(answer), timestamp, timestamp);
       const fact = db.prepare("SELECT id FROM profile_facts WHERE profile_id=? AND type=? AND origin='user' ORDER BY created_at LIMIT 1").get(profileId, key) as { id: string } | undefined;
       if (fact) db.prepare("UPDATE profile_facts SET value_json=?,confidence=1,state='confirmed',evidence_excerpt=?,updated_at=? WHERE id=?").run(JSON.stringify(normalizedAnswer), `Declaração humana: ${excerptText}`, timestamp, fact.id);
       else addProfileFact(profileId, { type: key, value: normalizedAnswer, origin: "user", state: "confirmed" }, actor, projectId);

@@ -184,6 +184,16 @@ function assertServiceOnlyProposes(actor: string, facts: ReadonlyArray<{ origin?
   }
 }
 
+/**
+ * O contexto do rascunho (nome, cargo, competências...) entra inteiro no snapshot ao confirmar,
+ * sem revisão item a item: só a sessão humana o escreve. O serviço propõe por fatos (403).
+ */
+function assertServiceLeavesContext(actor: string, input: { context?: unknown; context_json?: unknown }) {
+  if (isServiceActor(actor) && (input.context != null || input.context_json != null)) {
+    throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
+  }
+}
+
 function assertAutomationEnabled(req: IncomingMessage, pathname: string) {
   if (isAutomationRequest(req.method, pathname) && process.env.RADAR_AUTO_APPLICATION_ENABLED !== "true") throw new HttpError(403, "AUTOMATION_DISABLED", "A candidatura automatizada está desligada nesta instalação.");
 }
@@ -242,6 +252,7 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/profiles"), handler: ({ res }) => ok(res, 200, listProfiles(projectId)) },
   { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => {
     const input = validateBody(schemas.profileCreate, body);
+    assertServiceLeavesContext(actor, input);
     assertServiceOnlyProposes(actor, input.facts ?? []);
     ok(res, 201, createProfessionalProfile(input, actor, projectId));
   } },
@@ -274,6 +285,7 @@ const routes: Route[] = [
   } },
   { method: "PATCH", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.profilePatch, body);
+    assertServiceLeavesContext(actor, input);
     assertServiceOnlyProposes(actor, input.facts ?? []);
     ok(res, 200, updateProfessionalProfile(params[0]!, input, actor, projectId));
   } },
@@ -324,7 +336,8 @@ const routes: Route[] = [
     const input = validateBody(schemas.roundSourceStatus, body);
     ok(res, 200, recordRoundSourceStatus(params[0]!, String(input.source_id ?? ""), String(input.status ?? ""), input, projectId));
   } },
-  // O lote vem no próprio corpo ou embrulhado em `{ source_id, batch }`.
+  // O lote vem no próprio corpo ou embrulhado em `{ source_id, batch }`. Com a chave `batch`
+  // (mesmo nula ou lista), o corpo é o envelope e `batch` precisa ser um objeto (400 senão).
   { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => {
     const envelope = body.batch !== undefined ? validateBody(schemas.roundBatchEnvelope, body) : null;
     const batch = validateBody(schemas.roundBatch, envelope ? envelope.batch : body);

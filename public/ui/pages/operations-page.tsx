@@ -60,7 +60,7 @@ function ProfilePanel({ profile, facts, props }: { profile: any; facts: Fact[]; 
           </article>
         )) : <EmptyState title="Nenhum perfil confirmado" detail="Crie o perfil a partir do currículo-base antes da busca." />}
       </div>
-      {missing.length ? <p class="muted-text">{`Eliminatórios sem resposta no perfil: ${missing.join(", ")}. Responda na entrevista do Hermes; até lá essas checagens aparecem como “não verificado”.`}</p> : null}
+      {missing.length ? <p class="muted-text">{`Eliminatórios sem resposta no perfil: ${missing.join(", ")}. As respostas dadas ao Hermes chegam como propostas e só valem depois que você as confirma no perfil; até lá essas checagens aparecem como “não verificado”.`}</p> : null}
     </section>
   );
 }

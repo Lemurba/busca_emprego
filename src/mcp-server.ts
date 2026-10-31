@@ -514,7 +514,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_record_score")) server.registerTool("radar_record_score", {
-    description: "Registra a nota de aderência de uma vaga (0–100 por critério; null = sem dado). Cada critério aceita número ou {value, basis: explicit|estimated, evidence}. Exige perfil confirmado: sem profile_snapshot_id usa o snapshot do perfil ativo (PROFILE_SNAPSHOT_REQUIRED se não houver). Escopo jobs.write (avaliador de compatibilidade).",
+    description: "Registra a nota de aderência de uma vaga (0–100 por critério; null = sem dado). Cada critério aceita número ou {value, basis: explicit|estimated, evidence}. Exige perfil confirmado: sem profile_snapshot_id usa o snapshot do perfil ativo (PROFILE_SNAPSHOT_REQUIRED se não houver); com round_id, a rodada precisa existir e a nota usa o snapshot fixado nela (outro snapshot → PROFILE_SNAPSHOT_INVALID). Nota de perfil substituído fica no histórico sem mudar a do quadro. Escopo jobs.write (avaliador de compatibilidade).",
     inputSchema: {
       agent_id: agentId,
       job_id: z.string().min(1),

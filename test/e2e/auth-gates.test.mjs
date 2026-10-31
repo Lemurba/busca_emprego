@@ -123,6 +123,10 @@ try {
     await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "user" });
     await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "pdf", state: "confirmed", evidence_page: 1, evidence_excerpt: "SQL" });
     await refusedToService("PATCH", "/api/profiles/qualquer", { facts: [{ type: "skills", value: "SQL", origin: "user", state: "confirmed" }] });
+    // O contexto do rascunho vai inteiro para o snapshot ao confirmar: só a sessão o escreve.
+    await refusedToService("POST", "/api/profiles", { context: { name: "Fake", skills: ["COBOL"] } });
+    await refusedToService("PATCH", "/api/profiles/qualquer", { context: { name: "Fake" } });
+    await refusedToService("PATCH", "/api/profiles/qualquer", { context_json: "{\"name\":\"Fake\"}" });
     // Sem credencial nenhuma continua 401; com a sessão a rota é alcançada (404 do recurso).
     assert.equal((await call(json, "POST", "/api/profiles/qualquer/confirm", {})).status, 401);
     assert.notEqual((await human("POST", "/api/sources/qualquer/terms", {})).status, 403);
@@ -154,15 +158,83 @@ try {
     const relayed = interview.data.facts.find((fact) => fact.type === "target_role");
     assert.deepEqual([relayed.origin, relayed.state], ["derived", "proposed"]);
 
+    // Reenviar a mesma resposta não empilha outro fato para revisar.
+    const again = await svc("POST", `/api/profiles/${profileId}/interview`, { question_key: "target_role", answer: "Analista" });
+    assert.equal(again.data.facts.filter((fact) => fact.type === "target_role").length, 1);
+    // O id do fato é do servidor: id do cliente é campo desconhecido (antes colidia → 500).
+    const withId = await svc("POST", `/api/profiles/${profileId}/facts`, { id: pdfFact.id, type: "skills", value: ["X"] });
+    assert.equal(withId.status, 400, JSON.stringify(withId.data));
+    assert.equal(withId.data.error, "invalid_body");
+    // "Do PDF" sem página não é aceito do serviço.
+    const pdfWithoutPage = await svc("POST", `/api/profiles/${profileId}/facts`, { type: "summary", value: "Oi", origin: "pdf", state: "rejected" });
+    assert.equal(pdfWithoutPage.status, 422, JSON.stringify(pdfWithoutPage.data));
+
     await refusedToService("POST", `/api/profiles/${profileId}/facts/${pdfFact.id}/review`, { state: "confirmed" });
     await refusedToService("POST", `/api/profiles/${profileId}/confirm`, {});
-    for (const fact of [pdfFact, implicit.data, relayed]) {
+    for (const fact of [pdfFact, relayed]) {
       const reviewed = await human("POST", `/api/profiles/${profileId}/facts/${fact.id}/review`, { state: "confirmed" });
       assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
     }
+    // Fato do serviço sem evidência própria não é confirmado como está; a pessoa o rejeita (ou declara de novo).
+    const unsupported = await human("POST", `/api/profiles/${profileId}/facts/${implicit.data.id}/review`, { state: "confirmed" });
+    assert.equal(unsupported.status, 422, JSON.stringify(unsupported.data));
+    assert.equal(unsupported.data.error, "profile.fact.evidence.required");
+    assert.equal((await human("POST", `/api/profiles/${profileId}/facts/${implicit.data.id}/review`, { state: "rejected" })).status, 200);
     const confirmed = await human("POST", `/api/profiles/${profileId}/confirm`, {});
     assert.equal(confirmed.status, 200, JSON.stringify(confirmed.data));
     assert.ok(confirmed.data.snapshot?.id);
+  });
+
+  // F14: corpos estritos nas rotas de automação (perfil já confirmado no teste anterior).
+  await test("F14: agent.status, lote da rodada, perfil, nota e rotas sem corpo recusam campo desconhecido", async () => {
+    const run = { agent_name: "Coletor", status: "running" };
+    for (const extra of [{ config_snapshot: { prompt: "injetado" } }, { config_version_id: "v-falsa" }]) {
+      const refused = await svc("POST", "/api/agent-events", { event: "agent.status", run: { ...run, ...extra } });
+      assert.equal(refused.status, 400, JSON.stringify(refused.data));
+      assert.equal(refused.data.error, "invalid_body");
+    }
+    assert.equal((await svc("POST", "/api/agent-events", { event: "agent.status", run })).status, 201);
+
+    assert.equal((await svc("POST", "/api/sources", { id: "f14-source", name: "F14", source_type: "custom", domain: "jobs.example.test", enabled: true, auth_strategy: "none" })).status, 201);
+    assert.equal((await human("POST", "/api/sources/f14-source/terms", {})).status, 200);
+    assert.equal((await svc("POST", "/api/sources/f14-source/readiness", { status: "ready", reason: "smoke-ok" })).status, 200);
+    const round = await svc("POST", "/api/rounds", { run_id: "round-f14", source_ids: ["f14-source"] });
+    assert.equal(round.status, 201, JSON.stringify(round.data));
+    const item = (id) => ({ source_id: "f14-source", source_job_id: id, title: `Analista ${id}`, company: "Acme F14", description: `Vaga ${id} de dados.`, source_url: `https://jobs.example.test/f14/${id}`, job_url: `https://jobs.example.test/f14/${id}` });
+    const bare = await svc("POST", "/api/rounds/round-f14/batch", { source_id: "f14-source", next_cursor: "p2", items: [item("a")] });
+    assert.equal(bare.status, 200, JSON.stringify(bare.data));
+    const wrapped = await svc("POST", "/api/rounds/round-f14/batch", { source_id: "f14-source", batch: { next_cursor: "p3", items: [item("b")] } });
+    assert.equal(wrapped.status, 200, JSON.stringify(wrapped.data));
+    const list = (await svc("GET", "/api/bootstrap")).data.jobs;
+    for (const id of ["a", "b"]) assert.ok(list.some((job) => job.source_url === `https://jobs.example.test/f14/${id}`), `item ${id} ingerido`);
+    for (const body of [
+      { source_id: "f14-source", batch: { items: [item("c")], extra: true } },
+      { source_id: "f14-source", batch: null, items: [item("c")] },
+      { source_id: "f14-source", batch: [item("c")] },
+      { source_id: "f14-source", items: [item("c")], foo: 1 },
+    ]) {
+      const refused = await svc("POST", "/api/rounds/round-f14/batch", body);
+      assert.equal(refused.status, 400, `${JSON.stringify(body)} → ${JSON.stringify(refused.data)}`);
+      assert.equal(refused.data.error, "invalid_body");
+    }
+
+    for (const body of [{ id: "x" }, { source: "pdf" }]) {
+      const refused = await human("POST", "/api/profiles", body);
+      assert.equal(refused.status, 400, JSON.stringify(refused.data));
+      assert.equal(refused.data.error, "invalid_body");
+    }
+    const job = list.find((entry) => entry.source_url === "https://jobs.example.test/f14/a");
+    const scores = { role_family: 80, skills: 70, seniority: 60, location_work_model: 50, compensation: null, explicit_preferences: null };
+    const unknownField = await svc("POST", `/api/jobs/${job.id}/score`, { scores, foo: 1 });
+    assert.equal(unknownField.status, 400, JSON.stringify(unknownField.data));
+    const unknownRound = await svc("POST", `/api/jobs/${job.id}/score`, { scores, round_id: "rodada-inexistente" });
+    assert.equal(unknownRound.status, 404, JSON.stringify(unknownRound.data));
+    const inRound = await svc("POST", `/api/jobs/${job.id}/score`, { scores, round_id: "round-f14" });
+    assert.equal(inRound.status, 200, JSON.stringify(inRound.data));
+    assert.equal(inRound.data.profile_snapshot_id, round.data.profile_snapshot_id);
+    const withBody = await human("POST", `/api/jobs/${job.id}/restore`, { foo: 1 });
+    assert.equal(withBody.status, 400, JSON.stringify(withBody.data));
+    assert.equal(withBody.data.error, "invalid_body");
   });
 
   await test("#19: histórico grava human:dashboard para a sessão e service:<nome> para o token", async () => {

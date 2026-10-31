@@ -242,13 +242,13 @@ describe("repostagem", () => {
     const reposted = store.getBootstrap().jobs.find((job) => job.source_job_id === "r-2");
     const plain = store.getBootstrap().jobs.find((job) => job.source_job_id === "r-4");
     const scores = { role_family: 80, skills: 80, seniority: 80, location_work_model: 80, compensation: null, explicit_preferences: null };
-    const baseline = store.recordMatchScore({ job_id: plain.id, scores, round_id: "before" });
+    const baseline = store.recordMatchScore({ job_id: plain.id, scores, round_id: "round-repost" });
     const recorded = store.recordJobFeedback(reposted.id, { mode: "partial", reason_code: "repost", detail_key: "repost_bucket", explanation: "Vaga repostada várias vezes, desconfio.", confirmation: "REJEITAR PARCIALMENTE" });
     assert.equal(recorded.facet_value, "1");
     assert.throws(() => store.recordJobFeedback(reposted.id, { mode: "partial", reason_code: "repost", detail_key: "salary", explanation: "Detalhe incompatível aqui.", confirmation: "REJEITAR PARCIALMENTE" }), /feedback\.detail_key\.incompatible/);
-    const penalized = store.recordMatchScore({ job_id: reposted.id, scores, round_id: "after" });
+    const penalized = store.recordMatchScore({ job_id: reposted.id, scores, round_id: "round-repost" });
     assert.ok(penalized.preference_adjustment < 0, `ajuste ${penalized.preference_adjustment}`);
-    const unaffected = store.recordMatchScore({ job_id: plain.id, scores, round_id: "after" });
+    const unaffected = store.recordMatchScore({ job_id: plain.id, scores, round_id: "round-repost" });
     assert.equal(unaffected.preference_adjustment, baseline.preference_adjustment, "vaga sem repostagem não é afetada");
     // Rejeição "por repostagem" numa vaga nunca repostada não vira penalidade geral.
     const fresh = newJob({ description: "Outra descrição qualquer para uma vaga sem histórico de repostagem nenhum no radar." });

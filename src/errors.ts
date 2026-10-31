@@ -106,7 +106,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "profile.fact.review.forbidden": "Revisar informações do perfil é decisão humana: use o dashboard.",
   "profile.confirm.forbidden": "Confirmar o perfil é decisão humana: use o dashboard.",
   PROFILE_SNAPSHOT_REQUIRED: "Confirme o perfil profissional antes: a nota e o currículo usam a versão confirmada do perfil.",
-  PROFILE_SNAPSHOT_INVALID: "A versão do perfil informada não existe neste projeto.",
+  PROFILE_SNAPSHOT_INVALID: "A versão do perfil informada não existe neste projeto ou não é a fixada na rodada.",
 };
 
 export const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";

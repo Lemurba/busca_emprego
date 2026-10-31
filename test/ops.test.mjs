@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -63,4 +63,18 @@ test("anonimização legada (TD-13): comando explícito recusa sem RADAR_RUN_LEG
   assert.match(refused.stderr, /legacy_anonymization\.disabled/);
   const wrongValue = spawnSync(process.execPath, ["scripts/ops/anonymize-legacy.mjs", "--db", join(directory, "anon.sqlite")], { encoding: "utf8", env: { ...env, RADAR_RUN_LEGACY_ANONYMIZATION: "1" } });
   assert.equal(wrongValue.status, 2, "só o valor literal true habilita");
+});
+
+test("anonimização legada (TD-13): caminho de banco inexistente ou que não é SQLite é recusado sem criar arquivo", () => {
+  const env = { ...process.env, RADAR_RUN_LEGACY_ANONYMIZATION: "true" };
+  const typo = join(directory, "pasta-errada", "nao-existe.sqlite");
+  const missing = spawnSync(process.execPath, ["scripts/ops/anonymize-legacy.mjs", "--db", typo], { encoding: "utf8", env });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /db_not_found/);
+  assert.equal(existsSync(typo), false, "não cria banco novo no caminho digitado errado");
+  const notSqlite = join(directory, "nao-e-banco.sqlite");
+  writeFileSync(notSqlite, "texto qualquer");
+  const wrongFile = spawnSync(process.execPath, ["scripts/ops/anonymize-legacy.mjs", "--db", notSqlite], { encoding: "utf8", env });
+  assert.equal(wrongFile.status, 2);
+  assert.match(wrongFile.stderr, /db_not_found/);
 });

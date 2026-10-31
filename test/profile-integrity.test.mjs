@@ -54,7 +54,7 @@ describe("QA-04/TD-07: serviço e agentes só propõem fatos", () => {
     const fact = store.addProfileFact(profile.id, { type: "skills", value: "SQL", origin: "user", state: "confirmed" }, "service:hermes");
     assert.equal(fact.origin, "derived");
     assert.equal(fact.state, "proposed");
-    assert.equal(fact.evidence_excerpt, "Informado por service:hermes: SQL");
+    assert.equal(fact.evidence_excerpt, "", "sem trecho sintético: quem informou fica na auditoria");
     const implicit = store.addProfileFact(profile.id, { type: "languages", value: "Inglês" }, "agent:preferencias");
     assert.deepEqual([implicit.origin, implicit.state], ["derived", "proposed"], "sem origin, o agente não vira declaração humana");
     const pdf = store.addProfileFact(profile.id, { type: "certifications", value: "NR-35", origin: "pdf", state: "confirmed", page: 1, excerpt: "NR-35" }, "service:hermes");
@@ -78,9 +78,87 @@ describe("QA-04/TD-07: serviço e agentes só propõem fatos", () => {
     const profile = draft();
     store.answerProfileInterview(profile.id, "target_role", "Analista", "tester");
     const relayed = store.answerProfileInterview(profile.id, "target_role", "Diretor", "service:hermes");
-    const roles = relayed.facts.filter((item) => item.type === "target_role");
-    assert.deepEqual(roles.map((item) => [item.origin, item.state, item.value]), [["user", "confirmed", "Analista"], ["derived", "proposed", "Diretor"]]);
-    assert.equal(roles[1].evidence_excerpt, "Entrevista via service:hermes: Diretor");
+    const roles = relayed.facts.filter((item) => item.type === "target_role").sort((left, right) => left.origin.localeCompare(right.origin));
+    assert.deepEqual(roles.map((item) => [item.origin, item.state, item.value]), [["derived", "proposed", "Diretor"], ["user", "confirmed", "Analista"]]);
+    assert.equal(roles[0].evidence_excerpt, "Entrevista via service:hermes: Diretor");
+    const interview = store.db.prepare("SELECT answer_json,status FROM profile_interviews WHERE profile_id=? AND question_key='target_role'").get(profile.id);
+    assert.deepEqual({ ...interview }, { answer_json: '"Analista"', status: "answered" }, "a resposta da pessoa continua registrada");
+  });
+
+  test("entrevista via serviço repetida não empilha fatos; valor novo volta a proposto", () => {
+    const profile = draft();
+    store.answerProfileInterview(profile.id, "years_experience", 7, "service:hermes");
+    store.answerProfileInterview(profile.id, "years_experience", 7, "service:hermes");
+    let facts = factsOf(profile.id).filter((item) => item.type === "years_experience");
+    assert.equal(facts.length, 1, "um fato proposto por pergunta");
+    store.reviewProfileFact(facts[0].id, "rejected", "human:dashboard", profile.id);
+    store.answerProfileInterview(profile.id, "years_experience", 7, "agent:preferencias");
+    facts = factsOf(profile.id).filter((item) => item.type === "years_experience");
+    assert.deepEqual(facts.map((item) => [item.state, item.value]), [["rejected", 7]], "mesmo valor não reabre o que a pessoa rejeitou");
+    store.answerProfileInterview(profile.id, "years_experience", 9, "service:hermes");
+    facts = factsOf(profile.id).filter((item) => item.type === "years_experience");
+    assert.deepEqual(facts.map((item) => [item.origin, item.state, item.value]), [["derived", "proposed", 9]]);
+    const interview = store.db.prepare("SELECT status FROM profile_interviews WHERE profile_id=? AND question_key='years_experience'").get(profile.id);
+    assert.equal(interview.status, "pending", "resposta repassada não conta como respondida pela pessoa");
+  });
+
+  test("fato do serviço sem evidência própria não é confirmado; origin=pdf exige página", () => {
+    const profile = draft();
+    const bare = store.addProfileFact(profile.id, { type: "summary", value: "Oi" }, "service:hermes");
+    assert.throws(() => store.reviewProfileFact(bare.id, "confirmed", "human:dashboard", profile.id), /profile\.fact\.evidence\.required/u);
+    assert.throws(() => store.addProfileFact(profile.id, { type: "summary", value: "Oi", origin: "pdf", state: "rejected" }, "service:hermes"), /profile\.fact\.evidence\.required/u);
+    const cited = store.addProfileFact(profile.id, { type: "skills", value: "SQL", origin: "pdf", page: 1, excerpt: "SQL e Python" }, "service:hermes");
+    assert.equal(store.reviewProfileFact(cited.id, "confirmed", "human:dashboard", profile.id).state, "confirmed");
+  });
+
+  test("PATCH do rascunho é atômico: fato inválido desfaz contexto e fatos anteriores", () => {
+    const profile = store.createProfessionalProfile({ context: { name: "Original" } }, "tester");
+    assert.throws(() => store.updateProfessionalProfile(profile.id, { context: { name: "Parcial" }, facts: [{ type: "skills", value: ["SQL"] }, { type: "skills", value: [{ x: 1 }] }] }, "tester"), /profile\.fact\.invalid/u);
+    assert.deepEqual(store.getProfile(profile.id).context, { name: "Original" });
+    assert.equal(factsOf(profile.id).length, 0);
+  });
+});
+
+describe("I49-09: nota de aderência presa ao snapshot certo", () => {
+  const scores = { role_family: 80, skills: 70, seniority: 60, location_work_model: 50, compensation: null, explicit_preferences: null };
+  const confirmed = (name) => {
+    const profile = store.createProfessionalProfile({ context: { name } }, "tester");
+    return store.confirmProfessionalProfile(profile.id, "human:dashboard").snapshot.id;
+  };
+
+  test("rodada fixa o snapshot; perfil substituído não muda a nota do quadro; rodada e snapshot validados", () => {
+    const first = confirmed("Versão 1");
+    store.upsertSourceConfig({ id: "score-source", name: "score", source_type: "custom", domain: "jobs.example.test", enabled: true, auth_strategy: "none" }, "tester");
+    store.approveSourceTerms("score-source", "tester");
+    store.setSourceReadiness("score-source", "ready", "smoke-ok", "tester");
+    const round = store.startSearchRound({ run_id: "round-score", source_ids: ["score-source"] }, undefined, "tester");
+    assert.equal(round.profile_snapshot_id, first);
+    const second = confirmed("Versão 2");
+    assert.notEqual(second, first);
+    const job = store.upsertJob({ id: "score-job", title: "Analista", company: "Acme", source: "fixture", source_url: "https://jobs.example.test/score" });
+
+    const current = store.recordMatchScore({ job_id: job.id, scores });
+    assert.equal(current.profile_snapshot_id, second, "sem rodada, usa o snapshot ativo");
+    const board = store.getJob(job.id).match_score;
+    assert.equal(board, Math.round(current.score_final));
+
+    const inRound = store.recordMatchScore({ job_id: job.id, scores: { ...scores, skills: 10 }, round_id: "round-score" });
+    assert.deepEqual([inRound.profile_snapshot_id, inRound.round_id], [first, "round-score"], "a rodada usa o snapshot com que começou");
+    assert.equal(store.getJob(job.id).match_score, board, "nota de perfil substituído não sobrescreve a do quadro");
+    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "round-score", profile_snapshot_id: second }), /PROFILE_SNAPSHOT_INVALID/u);
+    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "rodada-inexistente" }), /round\.not_found/u);
+    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "round-score", project_id: "outro-projeto" }), /round\.not_found/u, "rodada de outro projeto");
+
+    const stale = store.recordMatchScore({ job_id: job.id, scores: { ...scores, skills: 0 }, profile_snapshot_id: first });
+    assert.equal(stale.profile_snapshot_id, first, "fica no histórico");
+    assert.equal(store.getJob(job.id).match_score, board);
+  });
+
+  test("snapshot confirmado em outro projeto é PROFILE_SNAPSHOT_INVALID", () => {
+    const other = store.createProfessionalProfile({ context: { name: "Projeto B" } }, "tester", "projeto-b");
+    const foreign = store.confirmProfessionalProfile(other.id, "human:dashboard", "projeto-b").snapshot.id;
+    store.upsertJob({ id: "score-job-b", title: "Analista", company: "Acme", source: "fixture", source_url: "https://jobs.example.test/score-b" });
+    assert.throws(() => store.recordMatchScore({ job_id: "score-job-b", scores, profile_snapshot_id: foreign }), /PROFILE_SNAPSHOT_INVALID/u);
   });
 });
 

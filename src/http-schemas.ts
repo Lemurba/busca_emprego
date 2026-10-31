@@ -131,8 +131,8 @@ const factPrimitive = z.union([z.string().max(20_000), z.number().finite(), z.bo
 /** Valor de fato: primitivo, lista ou objeto (JSON Resume). Item de lista não primitivo → profile.fact.invalid no domínio. */
 const factValue = z.union([factPrimitive, z.array(z.unknown()).max(500), z.record(z.string(), z.unknown())]).nullable().optional();
 const optPage = z.union([z.number().int().min(1).max(10_000), z.string().regex(/^\s*\d{1,5}\s*$/u)]).nullable().optional();
+// Sem `id`: o servidor gera o id do fato (id do cliente colidiria com fato existente → 500).
 const profileFact = z.strictObject({
-  id: optId,
   type: shortText.optional(),
   value: factValue,
   origin: optShort,

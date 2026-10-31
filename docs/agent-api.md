@@ -459,11 +459,13 @@ Resposta: `201` com `AgentRun` salvo.
 
 | Método e rota | Uso |
 | --- | --- |
-| `POST /api/profiles` | Rascunho de perfil: `{ base_resume_id?, context?, facts? }` (corpo estrito; `id` e `source` não vêm do cliente) |
-| `POST /api/profiles/{id}/facts` | Fato: `{ type, value, origin?, state?, evidence_page?, evidence_excerpt?, confidence? }`. Lista só com itens texto/número/sim-não; item objeto → `422 profile.fact.invalid` |
-| `POST /api/profiles/{id}/interview` | `{ question_key, answer }`. Com o token de serviço a resposta vira fato `derived`/`proposed` para revisão |
+| `POST /api/profiles` | Rascunho de perfil: `{ base_resume_id?, context?, facts? }` (corpo estrito; `id` e `source` não vêm do cliente). `context` só com a sessão do painel: com o token de serviço → `403 human_session_required` (o serviço propõe por fatos) |
+| `PATCH /api/profiles/{id}` | `{ context?, facts? }`, atômico: um fato inválido desfaz o pedido inteiro. Mesma regra de `context` |
+| `POST /api/profiles/{id}/facts` | Fato: `{ type, value, origin?, state?, evidence_page?, evidence_excerpt?, confidence? }` (o `id` é gerado pelo servidor). Lista só com itens texto/número/sim-não; item objeto → `422 profile.fact.invalid`. Com o token de serviço, `origin: "pdf"` exige `evidence_page` e o fato sem evidência própria não pode ser confirmado como está |
+| `POST /api/profiles/{id}/interview` | `{ question_key, answer }`. Com o token de serviço a resposta vira fato `derived`/`proposed` para revisão (um por pergunta: reenviar não duplica; valor novo volta a `proposed`) e não sobrescreve a resposta dada pela pessoa |
 | `POST /api/profiles/{id}/facts/{factId}/review`, `/confirm` | Só com a sessão do painel |
-| `POST /api/jobs/{id}/score` | `{ scores, profile_snapshot_id?, round_id?, evidence?, strengths?, gaps? }` (token interno). Exige perfil confirmado: sem `profile_snapshot_id` usa o snapshot ativo; sem perfil → `422 PROFILE_SNAPSHOT_REQUIRED`; snapshot de outro projeto/inexistente → `422 PROFILE_SNAPSHOT_INVALID` |
+| `POST /api/jobs/{id}/score` | `{ scores, profile_snapshot_id?, round_id?, evidence?, strengths?, gaps? }` (token interno). Exige perfil confirmado: sem `profile_snapshot_id` usa o snapshot ativo; sem perfil → `422 PROFILE_SNAPSHOT_REQUIRED`; snapshot de outro projeto/inexistente → `422 PROFILE_SNAPSHOT_INVALID`. Com `round_id`, a rodada precisa existir no projeto (`404 round.not_found`) e a nota usa o snapshot fixado nela; outro `profile_snapshot_id` → `422 PROFILE_SNAPSHOT_INVALID`. Nota de um perfil já substituído fica no histórico e não muda `match_score` da vaga |
+| `POST /api/rounds/{id}/batch` | O lote no próprio corpo (`{ source_id?, items, next_cursor? }`) ou embrulhado em `{ source_id?, batch: { ... } }`. Havendo a chave `batch`, o corpo é tratado como envelope: `batch` nulo, lista ou com campo extra → `400 invalid_body` |
 
 Todas as rotas que alteram dados validam o corpo com um schema estrito (`src/http-schemas.ts`): campo desconhecido ou de tipo errado → `400 invalid_body` com `details[].path`. Rotas sem corpo aceitam só `{}`.
 
