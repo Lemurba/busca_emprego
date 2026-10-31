@@ -46,7 +46,7 @@ Servidores MCP (no `/opt/data/.env` do Hermes, repassados pelo `env` de cada `mc
 | --- | --- | --- |
 | `RADAR_API_URL` | não | API do dashboard; padrão `http://127.0.0.1:PORT` (8787). Com `RADAR_BASE_PATH`, chame o loopback sem o prefixo ou inclua-o na URL |
 | `RADAR_INTERNAL_SERVICE_TOKEN` | sim | mesmo valor do `.env.local`; sem ele as ferramentas respondem `internal_token_not_configured` |
-| `RADAR_FORWARDED_PROTO` | não | `https` quando o dashboard roda com `RADAR_TRUST_PROXY_TLS=true` (senão a API responde 426) |
+| `RADAR_FORWARDED_PROTO` | não | `https` quando o dashboard roda com `RADAR_TRUST_PROXY_TLS=true` (senão a API responde 426); defina no `.env` (vazio sem proxy TLS), pois o `env` de cada servidor a repassa por referência. Outro valor que não `http`/`https` é ignorado |
 | `RADAR_MCP_ROLE` / `RADAR_MCP_AGENT_ID` | sim / por papel | papel do processo e agente fixo (coordenador e executor exigem) |
 | `RADAR_DB_PATH` | não | não declare: o MCP não abre o banco. Só registra o heartbeat do restore (§5) quando definido e gravável |
 

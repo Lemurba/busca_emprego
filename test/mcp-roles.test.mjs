@@ -71,6 +71,8 @@ try {
       // #10: o MCP fala com a API (URL + token de serviço por referência), nunca com o banco.
       assert.match(block, /RADAR_API_URL: "\$\{env:RADAR_API_URL\}"/u, `${name} sem RADAR_API_URL`);
       assert.match(block, /RADAR_INTERNAL_SERVICE_TOKEN: "\$\{env:RADAR_INTERNAL_SERVICE_TOKEN\}"/u, `${name} sem o token de serviço`);
+      // Ambiente filtrado: sem o repasse, o dashboard com RADAR_TRUST_PROXY_TLS=true responde 426.
+      assert.match(block, /RADAR_FORWARDED_PROTO: "\$\{env:RADAR_FORWARDED_PROTO\}"/u, `${name} sem RADAR_FORWARDED_PROTO`);
       assert.doesNotMatch(block, /RADAR_DB_PATH/u, `${name} ainda aponta para o SQLite`);
     }
     assert.deepEqual(configuredRoles.sort(), ["coleta", "coordenador", "curriculo", "executor"]);
@@ -81,6 +83,7 @@ try {
     for (const [name, spec] of Object.entries(pluginServers)) {
       assert.equal(spec.env.RADAR_API_URL, envRef("RADAR_API_URL"), `${name} sem RADAR_API_URL`);
       assert.equal(spec.env.RADAR_INTERNAL_SERVICE_TOKEN, envRef("RADAR_INTERNAL_SERVICE_TOKEN"), `${name} sem o token de serviço`);
+      assert.equal(spec.env.RADAR_FORWARDED_PROTO, envRef("RADAR_FORWARDED_PROTO"), `${name} sem RADAR_FORWARDED_PROTO`);
       assert.equal(spec.env.RADAR_DB_PATH, undefined, `${name} ainda aponta para o SQLite`);
     }
 

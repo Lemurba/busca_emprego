@@ -92,8 +92,10 @@ Acrescente ao `/opt/data/.env` (por máquina):
 ```sh
 RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
 # API do dashboard que os servidores MCP chamam (padrão http://127.0.0.1:PORT, PORT 8787).
-# Com RADAR_TRUST_PROXY_TLS=true no dashboard, acrescente RADAR_FORWARDED_PROTO=https.
 RADAR_API_URL=http://127.0.0.1:8787
+# "https" quando o dashboard roda com RADAR_TRUST_PROXY_TLS=true (senão a API responde 426);
+# vazio sem o proxy TLS. O `env` de cada servidor MCP repassa a variável por referência.
+RADAR_FORWARDED_PROTO=
 # IDs no dashboard (Agentes) ou por `radar_list_agents`:
 RADAR_COORDINATOR_AGENT_ID=<id do Coordenador do Radar>
 RADAR_EXECUTOR_AGENT_ID=<id do Assistente de candidatura>
@@ -124,11 +126,11 @@ Cada processo registra só as ferramentas do papel (`tools.include` igual a `RAD
 Pontos do fragmento ("MCP Config Reference"):
 
 - `${env:VAR}` é resolvido a partir do `.env` do perfil ("Environment variable references").
-- O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_API_URL` e `RADAR_INTERNAL_SERVICE_TOKEN` (por referência `${env:…}`, nunca o valor) estão no `env` do servidor ("Security" → "MCP Credential Handling").
+- O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_API_URL`, `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_FORWARDED_PROTO` (por referência `${env:…}`, nunca o valor) estão no `env` do servidor ("Security" → "MCP Credential Handling").
 - `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics"); o servidor já se limita ao papel, e o filtro é a segunda barreira.
 - `trust: untrusted`: toda chamada sem `readOnlyHint: true` pede aprovação e falha fechada em execuções desassistidas, como cron ("Server keys" → `trust`). Agendamentos que precisem gravar devem usar os scripts de `scripts/ops/` com o token interno, não o MCP.
 
-Alternativa por CLI: `hermes mcp add radar-vagas-coleta --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` (um por papel) e depois ajustar `env` (`RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`), `trust` e `tools.include` no `config.yaml`.
+Alternativa por CLI: `hermes mcp add radar-vagas-coleta --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` (um por papel) e depois ajustar `env` (`RADAR_API_URL`, `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_FORWARDED_PROTO` por referência `${env:…}`, `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`), `trust` e `tools.include` no `config.yaml`.
 
 ## 6. Navegador e logins de portais
 

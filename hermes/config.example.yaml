@@ -7,8 +7,10 @@
 # Pré-requisito em ~/.hermes/.env (não secreto, mas por máquina):
 #   RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
 #   RADAR_API_URL=http://127.0.0.1:8787   # API do dashboard (padrão http://127.0.0.1:PORT)
-#   RADAR_INTERNAL_SERVICE_TOKEN=<valor>   # mesmo do .env.local; 403 nos portões humanos
+#   RADAR_FORWARDED_PROTO=                 # "https" com RADAR_TRUST_PROXY_TLS=true no dashboard (senão 426)
 #   RADAR_AUTO_APPLICATION_ENABLED=false   # "true" só com executor testado
+# Segredo em ~/.hermes/.env (modo 600; nunca imprima nem cole no chat):
+#   RADAR_INTERNAL_SERVICE_TOKEN=<valor>   # mesmo do .env.local; 403 nos portões humanos
 # TELEGRAM_ALLOWED_USERS / TELEGRAM_HOME_CHANNEL já são definidos pelo setup do Telegram do Hermes.
 #
 # Depois de mesclar: `hermes mcp test radar-vagas-coleta` (e os demais servidores).
@@ -40,6 +42,7 @@ mcp_servers:
       # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
       RADAR_API_URL: "${env:RADAR_API_URL}"
       RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: coordenador
       RADAR_MCP_AGENT_ID: "${env:RADAR_COORDINATOR_AGENT_ID}"
@@ -75,6 +78,7 @@ mcp_servers:
       # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
       RADAR_API_URL: "${env:RADAR_API_URL}"
       RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: coleta
     trust: untrusted
@@ -99,6 +103,7 @@ mcp_servers:
       # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
       RADAR_API_URL: "${env:RADAR_API_URL}"
       RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: curriculo
     trust: untrusted
@@ -120,6 +125,7 @@ mcp_servers:
       # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
       RADAR_API_URL: "${env:RADAR_API_URL}"
       RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: executor
       RADAR_MCP_AGENT_ID: "${env:RADAR_EXECUTOR_AGENT_ID}"
