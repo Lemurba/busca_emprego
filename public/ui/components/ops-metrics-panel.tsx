@@ -8,6 +8,7 @@
  * estado ocupado). Uma falha ao atualizar mantém os últimos números, com o aviso ao lado.
  */
 import { useCallback, useEffect, useState } from "preact/hooks";
+import { countLabel } from "../plural.js";
 
 export type OperationalMetrics = {
   generated_at: string;
@@ -99,7 +100,7 @@ export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus, revision }
           <div><strong>Banco de dados</strong><span>{`${formatBytes(database.bytes)}${database.wal_bytes ? ` + ${formatBytes(database.wal_bytes)} de WAL` : ""}`}</span></div>
         </article>
         <article class="ops-item">
-          <div><strong>Filas</strong><span>{`${queues.human_questions_open} pergunta(s) aberta(s) · ${queues.enrichment_pending} vaga(s) aguardando enriquecimento · ${queues.authorized_applications.issued} autorização(ões) de envio emitida(s) e ainda válida(s), ${queues.authorized_applications.claimed} em execução`}</span></div>
+          <div><strong>Filas</strong><span>{`${countLabel(queues.human_questions_open, "pergunta aberta", "perguntas abertas")} · ${countLabel(queues.enrichment_pending, "vaga aguardando", "vagas aguardando")} enriquecimento · ${countLabel(queues.authorized_applications.issued, "autorização de envio emitida e ainda válida", "autorizações de envio emitidas e ainda válidas")}, ${queues.authorized_applications.claimed} em execução`}</span></div>
         </article>
         <article class="ops-item">
           <div><strong>Última rodada</strong><span>{round ? `Iniciada em ${formatDate(round.started_at)}${round.finished_at ? ` · terminada em ${formatDate(round.finished_at)}` : ""}${round.error_code ? ` · erro ${round.error_code}` : ""}` : "Nenhuma rodada registrada."}</span></div>
@@ -112,7 +113,7 @@ export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus, revision }
   return (
     <section class="panel section-spaced" aria-labelledby="ops-metrics-title">
       <div class="section-head flush">
-        <div><h2 id="ops-metrics-title">Saúde da instalação</h2><p>Backup, banco e filas que esperam alguém. Os mesmos números saem em GET /api/metrics.</p></div>
+        <div><h2 id="ops-metrics-title">Saúde da instalação</h2><p>Backup, banco e filas que esperam alguém.</p></div>
         <button type="button" class="secondary-button" data-ops-metrics-refresh disabled={loading} aria-busy={loading ? "true" : undefined} onClick={(event) => { event.stopPropagation(); void refresh(); }}>Atualizar</button>
       </div>
       <p class="muted-text" role="status" aria-live="polite" data-ops-metrics-status>{status}</p>

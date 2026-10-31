@@ -6,6 +6,7 @@ import { atsFamilyFor } from "../src/ats-domains.js";
 
 // Tipos da visão `automation` do bootstrap: contrato compartilhado com o servidor (TD-14).
 import type { AutomationOverview } from "../src/bootstrap-payload.js";
+import { countLabel } from "./ui/plural.js";
 
 export type { AuthorizationView, AutomationOverview, FieldSummary, FinalConfirmationView } from "../src/bootstrap-payload.js";
 
@@ -34,11 +35,11 @@ export async function handleAutomationAction(target: HTMLElement, deps: ActionDe
     const turnOff = toggle.dataset.automationToggle === "off";
     if (turnOff) {
       const runs = Number(toggle.dataset.activeRuns ?? 0);
-      if (!await deps.confirmDialog("Pausar a candidatura automática?", `${runs} execução(ões) em andamento vão para revisão e nada será enviado até você religar. Autorizações emitidas continuam valendo até expirar.`, "Pausar", true)) return true;
+      if (!await deps.confirmDialog("Pausar a candidatura automática?", `${runs === 1 ? "1 execução em andamento vai" : `${runs} execuções em andamento vão`} para revisão e nada será enviado até você religar. Autorizações emitidas continuam valendo até expirar.`, "Pausar", true)) return true;
     }
     const result = await deps.fetchJson<{ paused_runs?: number; resumed_runs?: number }>("/api/settings/automation", { method: "PUT", body: JSON.stringify({ enabled: !turnOff }) });
     await deps.reload();
-    deps.toast(turnOff ? `Automação pausada (${result.paused_runs ?? 0} execução(ões) em revisão).` : `Automação religada (${result.resumed_runs ?? 0} execução(ões) retomada(s)).`);
+    deps.toast(turnOff ? `Automação pausada (${countLabel(result.paused_runs ?? 0, "execução", "execuções")} em revisão).` : `Automação religada (${countLabel(result.resumed_runs ?? 0, "execução retomada", "execuções retomadas")}).`);
     return true;
   }
   if (target.closest("[data-automation-save]")) {

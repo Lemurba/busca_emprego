@@ -71,21 +71,24 @@ function FactRow({ fact, profileId, props }: { fact: ProfileFact; profileId: str
   const label = props.factTypeLabel(fact.type);
   const meta = stateMeta[fact.state] ?? { label: fact.state, tone: "orange" };
   const confirmable = hasEvidence(fact);
+  // QAF-15: o valor entra no nome do botão; com tipos repetidos (6 competências), cada botão diz qual é.
+  const display = props.factDisplay(fact) || "—";
+  const target = `${label}: ${display.length > 60 ? `${display.slice(0, 60)}…` : display}`;
   return (
     <article class="ops-item profile-fact" id={`profile-fact-${fact.id}`} tabIndex={-1} data-fact-state={fact.state}>
       <div>
         <strong>{label}</strong>
-        <span class="profile-fact-value">{props.factDisplay(fact) || "—"}</span>
+        <span class="profile-fact-value">{display}</span>
         <span>{`Origem: ${props.originLabel(fact.origin)}`}</span>
         <Evidence fact={fact} />
       </div>
       <div class="button-row">
         <span class={`status-pill ${meta.tone}`}>{meta.label}</span>
         {fact.state !== "confirmed" ? (
-          <button type="button" class="secondary-button" data-action="review-profile-fact" data-profile-id={profileId} data-fact-id={fact.id} data-state="confirmed" disabled={!confirmable} aria-label={`Confirmar ${label}`}>Confirmar</button>
+          <button type="button" class="secondary-button" data-action="review-profile-fact" data-profile-id={profileId} data-fact-id={fact.id} data-state="confirmed" disabled={!confirmable} aria-label={`Confirmar ${target}`}>Confirmar</button>
         ) : null}
         {fact.state !== "rejected" ? (
-          <button type="button" class="secondary-button" data-action="review-profile-fact" data-profile-id={profileId} data-fact-id={fact.id} data-state="rejected" aria-label={`Rejeitar ${label}`}>Rejeitar</button>
+          <button type="button" class="secondary-button" data-action="review-profile-fact" data-profile-id={profileId} data-fact-id={fact.id} data-state="rejected" aria-label={`Rejeitar ${target}`}>Rejeitar</button>
         ) : null}
       </div>
     </article>

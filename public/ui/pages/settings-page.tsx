@@ -36,22 +36,44 @@ export type SettingsPageProps = {
   connectors: ConnectorPanelDeps;
 };
 
+/**
+ * QAF-08: leva ao formulário de "Empresas por conector" com o conector desta fonte escolhido.
+ * Para a propagação: o handler global de cliques marcaria o botão como ocupado.
+ */
+function focusConnectorForm(event: Event, connector: string) {
+  event.stopPropagation();
+  const select = document.getElementById("connector-id") as HTMLSelectElement | null;
+  if (select) {
+    select.value = connector;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  const slug = document.getElementById("connector-slug");
+  slug?.scrollIntoView({ block: "center" });
+  slug?.focus();
+}
+
 function SourceRow({ source, sourceTypeLabel, authLabel, readiness, readinessReason, formatDate }: { source: SourceConfig } & Pick<SettingsPageProps, "sourceTypeLabel" | "authLabel" | "readiness" | "readinessReason" | "formatDate">) {
   const effective = source.effectiveReadiness ?? { status: source.readiness_status ?? "configured", reason: source.readiness_reason ?? "" };
   const pill = readiness(effective.status);
+  // Conector sem empresa ativa: o teste de acesso não tem o que ler (o servidor recusaria).
+  const needsCompany = source.connector && source.connector_companies === 0;
+  const reasonId = `source-reason-${source.id}`;
   return (
     <tr data-source-row={source.id}>
       <td><strong>{source.name}</strong><br /><small>{source.domain}</small></td>
       <td>{sourceTypeLabel(source.source_type)}<br /><small>{authLabel(source.auth_strategy)}</small></td>
       <td>
         <span class={`status-pill ${pill.tone}`}>{pill.label}</span>
-        <br /><small data-source-reason>{effective.status === "ready" ? `Teste de acesso em ${formatDate(source.last_smoke_test_at)}` : readinessReason(effective.reason)}</small>
+        <br /><small data-source-reason id={reasonId}>{effective.status === "ready" ? `Teste de acesso em ${formatDate(source.last_smoke_test_at)}` : readinessReason(effective.reason)}</small>
+        {needsCompany ? <><br /><small data-source-company-hint>Cadastre uma empresa em “Empresas por conector” para testar o acesso.</small></> : null}
       </td>
       <td>{source.terms_approved_at ? <>Aceitos<br /><small>{formatDate(source.terms_approved_at)}</small></> : "Não aceitos"}</td>
       <td class="source-actions">
         <div class="button-row">
           {source.terms_approved_at ? null : <button type="button" class="primary-button" data-action="accept-source-terms" data-source-id={source.id} aria-label={`Aceitar termos de ${source.name}`}>Aceitar termos…</button>}
-          {source.connector
+          {needsCompany
+            ? <button type="button" class="secondary-button" onClick={(event) => focusConnectorForm(event, source.id)} aria-label={`Cadastrar empresa do conector ${source.name}`} aria-describedby={reasonId}>Cadastrar empresa…</button>
+            : source.connector
             ? <button type="button" class="secondary-button" data-action="smoke-source" data-source-id={source.id} aria-label={`Testar acesso de ${source.name}`}>Testar acesso…</button>
             : <button type="button" class="secondary-button" data-action="smoke-source" data-source-id={source.id} aria-label={`Registrar teste de acesso de ${source.name}`}>Registrar teste…</button>}
           <button type="button" class="secondary-button" data-edit-source={source.id} aria-label={`Editar ${source.name}`}>Editar</button>

@@ -180,6 +180,33 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("QAF-18: trocar de página fecha o modal e o diálogo abertos", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await page.goto("#/vagas");
+    await page.getByRole("button", { name: "Detalhes de Pessoa desenvolvedora TypeScript" }).click();
+    await page.locator("#modal-root .modal").getByRole("button", { name: "Editar vaga" }).click();
+    await page.locator("#modal-root #job-title").fill("Pessoa desenvolvedora TypeScript (editada)");
+    // Escape com alteração pede para descartar; o link para outra página fecha tudo sem gravar.
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("alertdialog", { name: "Descartar alterações?" })).toBeVisible();
+    await page.evaluate(() => { location.hash = "#/analises"; });
+    await expect(page.locator("#page-heading")).toHaveText("Análises");
+    await expect(page.locator("#modal-root")).toBeHidden();
+    await expect(page.locator("#dialog-root")).toBeHidden();
+    const jobs = (await pageApi(page, "GET", "api/bootstrap")).jobs as { title: string }[];
+    expect(jobs.some((job) => job.title === "Pessoa desenvolvedora TypeScript")).toBe(true);
+    // Voltar do navegador também não deixa o detalhe aberto por cima da página anterior.
+    await page.goBack();
+    await expect(page.locator("#page-heading")).toHaveText("Vagas");
+    await page.getByRole("button", { name: "Detalhes de Pessoa desenvolvedora TypeScript" }).click();
+    await expect(page.locator("#modal-root .modal")).toBeVisible();
+    await page.goForward();
+    await expect(page.locator("#page-heading")).toHaveText("Análises");
+    await expect(page.locator("#modal-root")).toBeHidden();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Currículos: cartão semeado, links de download e formulários de envio/importação", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);
@@ -350,20 +377,23 @@ test.describe("smoke de UI", () => {
     await expect(column("Entrada").locator(".job-card", { hasText: "Engenharia de dados" })).toBeVisible();
     await expect(card).toHaveAttribute("draggable", "true");
     const select = card.locator("select.move-select");
-    await expect(select.locator("option")).toHaveText(["Mover para…", "Entrada"]);
+    // QAF-09: a validação não muda de coluna, e o rótulo diz isso.
+    await expect(select.locator("option")).toHaveText(["Mover para…", "Validar (continua em Entrada)"]);
 
     // Mover para… (found → validation): fica na mesma coluna, select volta ao início com as novas opções.
     await select.selectOption("validation");
-    await expect(page.locator("#toast-root")).toContainText("Vaga movida para Entrada.");
+    await expect(page.locator("#toast-root")).toContainText("Vaga validada; continua em Entrada.");
     await expect.poll(jobStatus).toBe("validation");
-    await expect(select.locator("option")).toHaveText(["Mover para…", "Match forte", "Em revisão"]);
+    // Sem nota de aderência, "Match forte" aparece desabilitado com o motivo (o servidor recusaria).
+    await expect(select.locator("option")).toHaveText(["Mover para…", "Match forte (precisa de nota de aderência)", "Em revisão"]);
+    await expect(select.locator('option[value="strong_match"]')).toHaveJSProperty("disabled", true);
     await expect(select).toHaveValue("");
     await expect(select).toBeEnabled();
 
     // Dicas de destino durante o arraste: etapas válidas destacadas, as outras esmaecidas; somem ao soltar.
     const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
     await card.dispatchEvent("dragstart", { dataTransfer });
-    await expect(column("Match forte").locator(".column-drop")).toHaveClass(/drop-valid/);
+    await expect(column("Match forte").locator(".column-drop")).toHaveClass(/drop-invalid/);
     await expect(column("Em revisão").locator(".column-drop")).toHaveClass(/drop-valid/);
     await expect(column("Entrada").locator(".column-drop")).toHaveClass(/drop-invalid/);
     await expect(column("Preparar").locator(".column-drop")).toHaveClass(/drop-invalid/);
@@ -378,18 +408,56 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("QAF-04/QAF-05/QAF-06: Quadro e Saúde sem rolagem lateral da página no celular; quadro rolável pelo teclado", async ({ page }) => {
+    const errors = watchConsole(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page);
+    const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    await page.goto("#/quadro");
+    await expect(page.locator("#page-heading")).toHaveText("Quadro");
+    await expect(page.locator("#view .board-column")).toHaveCount(6);
+    expect(await overflow(), "o quadro rola dentro dele, não a página").toBeLessThanOrEqual(0);
+    // As etapas rolam na horizontal: o quadro é uma região nomeada que recebe foco.
+    const board = page.getByRole("region", { name: "Etapas do quadro" });
+    await expect(board).toHaveAttribute("tabindex", "0");
+    await board.focus();
+    await expect(board).toBeFocused();
+    await page.goto("#/saude");
+    await expect(page.locator("#page-heading")).toHaveText("Saúde das buscas");
+    // Automação desligada no servidor (padrão): pílula curta e a variável numa nota que quebra linha.
+    await expect(page.locator("#view .status-pill", { hasText: "Desligada no servidor" })).toHaveText("Desligada no servidor");
+    await expect(page.locator("#view .automation-server-note")).toContainText("RADAR_AUTO_APPLICATION_ENABLED=true");
+    expect(await overflow(), "Saúde das buscas sem rolagem lateral").toBeLessThanOrEqual(0);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Candidaturas: tabela com estado, modo e etapa; Abrir mostra o detalhe da vaga", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);
     await page.goto("#/candidaturas");
     const row = page.locator("#view table.data-table tbody tr", { hasText: "Analista de candidaturas smoke" });
     await expect(row).toHaveCount(1);
+    // QAF-19: a vaga que já tem candidatura (aqui, na fila) não aparece em "Vagas ainda sem candidatura".
+    await expect(page.locator("#view .company-card", { hasText: "Pessoa desenvolvedora TypeScript" })).toHaveCount(1);
+    await expect(page.locator("#view .company-card", { hasText: "Analista de candidaturas smoke" })).toHaveCount(0);
     await expect(row.locator('[data-label="Estado"]')).toHaveText("Na fila");
     await expect(row.locator('[data-label="Modo"]')).toHaveText("Manual");
     await expect(row.locator('[data-label="Autorização"]')).toHaveText("—");
     await expect(row.locator('[data-label="Etapa"]')).toHaveText("Etapa smoke");
     await row.getByRole("button", { name: "Abrir Analista de candidaturas smoke" }).click();
     await expect(page.locator("#modal-root .modal")).toBeVisible();
+    // QAF-07: automação desligada no servidor (padrão): sem "Mudar para automático", com o motivo.
+    await expect(page.locator("#modal-root .modal").getByRole("button", { name: "Registrar envio" })).toBeVisible();
+    await expect(page.locator("#modal-root .modal").getByRole("button", { name: /automático/u })).toHaveCount(0);
+    await expect(page.locator("#modal-root .modal")).toContainText("A candidatura automática está desligada no servidor");
+    // QAF-17: "Registrar envio" pede a data (padrão hoje) antes de gravar; cancelar não grava nada.
+    await page.locator("#modal-root .modal").getByRole("button", { name: "Registrar envio" }).click();
+    const dialog = page.getByRole("alertdialog", { name: "Registrar envio da candidatura" });
+    await expect(dialog.getByLabel("Data do envio")).toHaveValue(/^\d{4}-\d{2}-\d{2}$/u);
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dialog).toBeHidden();
+    const applications = (await pageApi(page, "GET", "api/bootstrap")).applications as { status: string; submitted_at: string | null }[];
+    expect(applications.every((item) => item.status !== "submitted" && !item.submitted_at)).toBe(true);
     await page.keyboard.press("Escape");
     await expect(page.locator("#modal-root .modal")).toBeHidden();
     expect(errors, "erros de console").toEqual([]);
@@ -430,7 +498,11 @@ test.describe("smoke de UI", () => {
     // Banco do smoke recém-criado, sem diretório de backup: "Nenhum backup" (status missing).
     await expect(panel).toContainText(metrics.backup.status === "missing" ? "Nenhum backup" : "Último backup");
     await expect(panel).toContainText("Banco de dados");
-    await expect(panel).toContainText(`${metrics.queues.human_questions_open} pergunta(s) aberta(s)`);
+    // QAF-20: singular e plural de verdade, sem "(s)" e sem a rota da API no texto.
+    const open = metrics.queues.human_questions_open;
+    await expect(panel).toContainText(`${open} ${open === 1 ? "pergunta aberta" : "perguntas abertas"}`);
+    await expect(panel).not.toContainText("(s)");
+    await expect(panel).not.toContainText("/api/metrics");
     await expect(panel).toContainText(metrics.last_round ? "Iniciada em" : "Nenhuma rodada registrada.");
     await expect.poll(() => reads.length).toBe(1);
     await panel.getByRole("button", { name: "Atualizar" }).click();
@@ -455,8 +527,18 @@ test.describe("smoke de UI", () => {
     const status = panel.getByRole("status");
     await expect(status).toContainText("Não foi possível atualizar");
     await expect(panel).toContainText("Banco de dados");
-    await expect(panel).toContainText("pergunta(s) aberta(s)");
+    await expect(panel).toContainText(/perguntas? abertas?/u);
     await expect(panel.getByRole("button", { name: "Atualizar" })).toBeEnabled();
+  });
+
+  test("QAF-20: Sair mostra que a pessoa saiu, não que a sessão expirou", async ({ page }) => {
+    await login(page);
+    await page.locator("#logout-button").click();
+    await page.getByRole("alertdialog", { name: "Sair do painel?" }).getByRole("button", { name: "Sair" }).click();
+    const screen = page.locator("#auth-screen");
+    await expect(screen).toBeVisible();
+    await expect(screen).toContainText("Você saiu do painel.");
+    await expect(screen).not.toContainText("expirou");
   });
 
   test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {

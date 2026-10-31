@@ -16,6 +16,8 @@ import { PageHeading } from "../components/page-heading.js";
 type Job = Data["jobs"][number];
 type Lifecycle = Job["lifecycle"];
 type StatusColumn = { title: string; statuses: string[]; target: string | null };
+/** Opção do "Mover para…": rótulo do que acontece e, se desabilitada, o motivo já no rótulo. */
+export type MoveOption = { status: string; label: string; disabled: boolean };
 
 /** Vocabulário e ações que continuam em app.ts. */
 export type BoardPageProps = {
@@ -23,8 +25,10 @@ export type BoardPageProps = {
   statusColumns: StatusColumn[];
   statusLabels: Record<string, string>;
   lifecycleMeta: Record<Lifecycle, { label: string; tone: string }>;
-  /** Próximas etapas válidas da vaga (kanbanMoves). */
+  /** Próximas etapas válidas da vaga (kanbanMoves): destinos do arraste. */
   allowedMoves: (job: Job) => string[];
+  /** Opções do "Mover para…", com as indisponíveis desabilitadas e explicadas (QAF-09). */
+  moveOptions: (job: Job) => MoveOption[];
   salaryLabel: (job: Job) => string;
   deadlineText: (job: Job) => string;
   repostText: (job: Job) => string;
@@ -46,14 +50,10 @@ function ScoreBadge({ score, evaluated = true }: { score: number; evaluated?: bo
   return <span class={`score ${tone}`} title="Aderência: estimativa de quanto a vaga combina com seu perfil (não é nota de ATS)">{score}%</span>;
 }
 
-function columnTitle(columns: StatusColumn[], statusLabels: Record<string, string>, status: string) {
-  return columns.find((column) => column.target === status)?.title ?? statusLabels[status] ?? status;
-}
-
-function JobCard({ job, columns, statusLabels, lifecycleMeta, allowedMoves, salaryLabel, deadlineText, repostText, onMove, onDragStart, onDragEnd }: CardProps & { columns: StatusColumn[] }) {
+function JobCard({ job, lifecycleMeta, allowedMoves, moveOptions, salaryLabel, deadlineText, repostText, onMove, onDragStart, onDragEnd }: CardProps) {
   const [busy, setBusy] = useState(false);
-  const moves = allowedMoves(job);
-  const draggable = moves.length > 0;
+  const options = moveOptions(job);
+  const draggable = allowedMoves(job).length > 0;
   const meta = lifecycleMeta[job.lifecycle] ?? lifecycleMeta.unknown;
   const repost = repostText(job);
   const move = async (event: Event) => {
@@ -88,12 +88,12 @@ function JobCard({ job, columns, statusLabels, lifecycleMeta, allowedMoves, sala
         {repost ? <span class="chip orange" title="Mesma empresa, título e descrição de vaga anterior">{repost}</span> : null}
       </div>
       <div class="card-footer"><span>{salaryLabel(job)}</span><span>{deadlineText(job)}</span></div>
-      {moves.length ? (
+      {options.length ? (
         <label class="move-field">
           <span class="visually-hidden">Mover {job.title} para outra etapa</span>
           <select class="move-select" data-move-id={job.id} disabled={busy} onChange={move}>
             <option value="">Mover para…</option>
-            {moves.map((status) => <option key={status} value={status}>{columnTitle(columns, statusLabels, status)}</option>)}
+            {options.map((option) => <option key={option.status} value={option.status} disabled={option.disabled}>{option.label}</option>)}
           </select>
         </label>
       ) : null}
@@ -137,7 +137,9 @@ export function BoardPage({ title, statusColumns, ...cardProps }: BoardPageProps
         subtitle="Arraste ou use “Mover para…” nas etapas iniciais. Interesse, currículo e candidatura avançam pelo detalhe da vaga."
         actions={<button type="button" class="primary-button" data-action="add-job"><span aria-hidden="true">+</span> Nova vaga</button>}
       />
-      <div class="board">
+      {/* QAF-05: as etapas rolam na horizontal; o foco no próprio quadro deixa rolar pelo teclado mesmo sem cartões. */}
+      {/* biome-ignore lint/a11y/noNoninteractiveTabindex: região rolável precisa receber foco (WCAG 2.1.1, axe scrollable-region-focusable). */}
+      <section class="board" aria-label="Etapas do quadro" tabIndex={0}>
         {statusColumns.map((column) => {
           const jobs = data.jobs.filter((job) => column.statuses.includes(job.status));
           const target = column.target;
@@ -161,13 +163,13 @@ export function BoardPage({ title, statusColumns, ...cardProps }: BoardPageProps
                 onDrop={target ? (event) => void drop(target, event) : undefined}
               >
                 {jobs.length
-                  ? jobs.map((job) => <JobCard key={job.id} job={job} columns={statusColumns} {...cardProps} onDragStart={startDrag} onDragEnd={endDrag} />)
+                  ? jobs.map((job) => <JobCard key={job.id} job={job} {...cardProps} onDragStart={startDrag} onDragEnd={endDrag} />)
                   : <p class="column-empty">{target ? "Nenhuma vaga nesta etapa" : "Avança pelo detalhe da vaga"}</p>}
               </div>
             </section>
           );
         })}
-      </div>
+      </section>
     </>
   );
 }

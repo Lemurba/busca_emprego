@@ -94,7 +94,7 @@ export async function showAgentPublishReview(agentId: string, versionId: string,
   const prompt = diff.changes.find((change) => change.field === "prompt");
   const content = `
     <div class="publish-review" data-publish-review="${escapeHtml(agentId)}">
-      <p class="publish-origin"><span class="status-pill ${originTone}">${escapeHtml(originText)}</span> <span class="muted-text">por ${escapeHtml(deps.actorLabel(diff.created_by))} · ${escapeHtml(deps.formatDate(diff.created_at))}</span></p>
+      <p class="publish-origin"><span class="status-pill ${originTone}">${escapeHtml(originText)}</span> <span class="muted-text">${reviewed ? "" : `por ${escapeHtml(deps.actorLabel(diff.created_by))} · `}${escapeHtml(deps.formatDate(diff.created_at))}</span></p>
       ${reviewed ? "" : `<div class="notice warning" role="note"><div><strong>Esta versão não foi escrita por você.</strong> Leia cada mudança, principalmente as instruções, antes de publicar. Se algo parecer estranho, descarte o rascunho.${diff.proposal_reason ? `<br>Justificativa do coordenador: “${escapeHtml(diff.proposal_reason)}”` : ""}</div></div>`}
       ${diff.changes.length ? "" : `<p class="muted-text">Nenhuma diferença em relação à versão publicada.</p>`}
       ${rows ? `<div class="table-wrap flat" role="region" aria-label="Campos alterados" tabindex="0"><table class="data-table responsive-table diff-table"><caption class="visually-hidden">Campos alterados</caption><thead><tr><th scope="col">Campo</th><th scope="col">Publicado hoje${diff.published ? ` (v${diff.published.version})` : ""}</th><th scope="col">Nesta versão (v${diff.version})</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}

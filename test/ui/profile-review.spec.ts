@@ -75,6 +75,14 @@ test.describe("perfil profissional: revisão e confirmação (#49)", () => {
     await expect(page.locator("#toast-root .toast").last()).toContainText("PDF salvo na biblioteca.");
 
     const card = page.locator("#view .resume-card", { hasText: "Currículo Joana" });
+    // §2 "Ver extração do PDF": o texto lido (de onde saem os fatos) abre num modal.
+    await card.getByRole("button", { name: "Ver texto lido de Currículo Joana" }).click();
+    const extraction = page.locator("#modal-root .modal");
+    await expect(extraction.getByRole("heading", { name: "Texto lido de Currículo Joana" })).toBeVisible();
+    await expect(extraction.getByRole("region", { name: "Texto extraído do PDF" })).toContainText("joana.pereira@example.com");
+    await expectAxeClean(page);
+    await page.keyboard.press("Escape");
+    await expect(extraction).toBeHidden();
     await card.getByRole("button", { name: "Criar perfil a partir deste PDF" }).click();
     await expect(page).toHaveURL(/#\/saude/u);
     const heading = page.locator("#profile-draft-heading");
@@ -95,9 +103,10 @@ test.describe("perfil profissional: revisão e confirmação (#49)", () => {
 
     // Rejeitar uma informação e confirmar outra uma a uma.
     const phone = factRow(panel, "Telefone");
-    await phone.getByRole("button", { name: "Rejeitar Telefone" }).click();
+    await phone.getByRole("button", { name: /^Rejeitar Telefone: /u }).click();
     await expect(phone.locator(".status-pill")).toHaveText("Rejeitado");
-    await email.getByRole("button", { name: "Confirmar E-mail" }).click();
+    // QAF-15: o nome do botão traz o valor (tipos repetidos não ficam com nomes iguais).
+    await email.getByRole("button", { name: "Confirmar E-mail: joana.pereira@example.com" }).click();
     await expect(email.locator(".status-pill")).toHaveText("Confirmado");
 
     // Entrevista dos eliminatórios no rascunho.
@@ -150,6 +159,12 @@ test.describe("perfil profissional: revisão e confirmação (#49)", () => {
     const panel = page.locator("#view .profile-draft");
     await expect(panel).toContainText("JSON Resume importado");
     await expect(factRow(panel, "Nome")).toContainText("/basics/name");
+    // QAF-14: fatos estruturados do JSON Resume em texto legível, sem as chaves em inglês.
+    const values = await panel.locator(".profile-fact-value").allTextContents();
+    expect(values.filter((value) => /\b(?:institution|studyType|startDate|network|username):/u.test(value)), "chaves cruas do JSON Resume").toEqual([]);
+    // QAF-15: nenhum par de botões Confirmar/Rejeitar com o mesmo nome acessível.
+    const names = await panel.locator(".profile-fact button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")));
+    expect(names.filter((name, index) => names.indexOf(name) !== index), "nomes de botão repetidos").toEqual([]);
     await expect(confirmButton(page)).toBeDisabled();
     await expectAxeClean(page);
 

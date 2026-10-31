@@ -61,6 +61,8 @@ test.describe("agentes e filas", () => {
     const modal = page.locator("#modal-root .modal");
     await expect(modal.getByRole("heading", { name: `Publicar ${agent.name}?` })).toBeVisible();
     await expect(modal.locator(".publish-origin")).toContainText("Editada por você");
+    // QAF-16: origem humana sem "por você" repetido.
+    await expect(modal.locator(".publish-origin")).not.toContainText("por você, no dashboard");
     await expect(modal.locator(".diff-table")).toContainText("Tempo limite (segundos)");
     await expect(modal.locator(".diff-table")).toContainText("300");
     await expect(modal.locator(".prompt-diff .diff-line.add")).toContainText("Linha nova revisada no smoke.");

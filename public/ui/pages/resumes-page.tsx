@@ -6,6 +6,7 @@
  * #view (`handleForm`), e Usar como base/Excluir/Editar (`data-action`, `data-edit-resume`)
  * pela delegação de cliques (`handleAction`). O editor/aprovação segue no modal legado.
  * #49: "Criar perfil a partir deste PDF" (`create-profile-from-base`) abre a revisão do rascunho.
+ * §2: "Ver texto lido" (`show-base-extraction`) mostra o texto que o extrator leu do PDF.
  * Os campos dos formulários não são controlados: depois de um envio, `handleForm` limpa o
  * formulário (`form.reset()`), já que o diff do Preact preserva os mesmos elementos.
  */
@@ -48,6 +49,7 @@ function BaseResumeCard({ resume, draftVersion }: { resume: BaseResume; draftVer
       <div class="button-row">
         <button type="button" class="primary-button" data-action="create-profile-from-base" data-resume-id={resume.id} disabled={!extracted || draftVersion != null} aria-describedby={!extracted || draftVersion != null ? hintId : undefined}>Criar perfil a partir deste PDF</button>
         <a class="secondary-button" href={`api/base-resumes/${encodeURIComponent(resume.id)}/file`}>Baixar PDF</a>
+        <button type="button" class="secondary-button" data-action="show-base-extraction" data-resume-id={resume.id} aria-label={`Ver texto lido de ${resume.title}`}>Ver texto lido</button>
         {!resume.is_base ? <button type="button" class="secondary-button" data-action="select-base-resume" data-resume-id={resume.id}>Usar como base</button> : null}
         <button type="button" class="danger-button" data-action="delete-base-resume" data-resume-id={resume.id} data-resume-title={resume.title}>Excluir</button>
       </div>

@@ -9,6 +9,7 @@
  */
 import { type AutomationOverview, type FinalConfirmationView, evidenceUrl } from "../../automation-panel.js";
 import { EmptyState } from "./empty-state.js";
+import { countLabel } from "../plural.js";
 
 type FormatDate = (value: string | null | undefined) => string;
 
@@ -28,7 +29,8 @@ export function authorizationText(automation: AutomationOverview | undefined, ap
 function StatusPill({ automation }: { automation: AutomationOverview }) {
   if (automation.effective) return <span class="status-pill teal">Ligada</span>;
   if (!automation.enabled) return <span class="status-pill red">Pausada (kill-switch)</span>;
-  return <span class="status-pill neutral">Desligada no servidor (RADAR_AUTO_APPLICATION_ENABLED)</span>;
+  // QAF-06: pílula curta (não quebra linha); o nome da variável vai no title e no texto do painel.
+  return <span class="status-pill neutral" title="RADAR_AUTO_APPLICATION_ENABLED não está ligada no servidor">Desligada no servidor</span>;
 }
 
 function FinalConfirmationCard({ item, jobLabel, formatDate }: { item: FinalConfirmationView; jobLabel: string; formatDate: FormatDate }) {
@@ -69,16 +71,19 @@ export function AutomationPanel({ automation, jobLabel, formatDate }: {
           <div><h2 id="automation-title">Automação de candidaturas</h2><p>Envio automático só em ATS de empresa, sempre com sua confirmação final. LinkedIn e portais amplos ficam no envio manual.</p></div>
           <StatusPill automation={automation} />
         </div>
+        {!automation.effective && automation.enabled
+          ? <p class="muted-text automation-server-note">Para ligar, defina <code>RADAR_AUTO_APPLICATION_ENABLED=true</code> no servidor e reinicie o serviço.</p>
+          : null}
         <div class="ops-list">
           <article class="ops-item">
-            <div><strong>Kill-switch</strong><span>{automation.enabled ? `${automation.active_runs} execução(ões) em andamento e ${automation.issued_authorizations} autorização(ões) emitida(s). Pausar manda as execuções para revisão e mantém as autorizações.` : "Pausada: nada é autorizado, reservado ou enviado até você religar."}</span></div>
+            <div><strong>Kill-switch</strong><span>{automation.enabled ? `${countLabel(automation.active_runs, "execução", "execuções")} em andamento e ${countLabel(automation.issued_authorizations, "autorização emitida", "autorizações emitidas")}. Pausar manda as execuções para revisão e mantém as autorizações.` : "Pausada: nada é autorizado, reservado ou enviado até você religar."}</span></div>
             {automation.enabled
               ? <button type="button" class="danger-button" data-automation-toggle="off" data-active-runs={String(automation.active_runs)}>Pausar automação</button>
               : <button type="button" class="primary-button" data-automation-toggle="on">Religar automação</button>}
           </article>
           <article class="ops-item">
             <div><strong>Envios de hoje</strong><span>{`${automation.usage.total} de ${automation.daily_limit} (${automation.usage.date}, horário de São Paulo)${byAts ? ` · ${byAts}` : ""}`}</span></div>
-            <span class={`status-pill ${automation.remaining_today > 0 ? "teal" : "red"}`}>{`${automation.remaining_today} restante(s)`}</span>
+            <span class={`status-pill ${automation.remaining_today > 0 ? "teal" : "red"}`}>{countLabel(automation.remaining_today, "restante", "restantes")}</span>
           </article>
         </div>
         {/* Campos lidos por `handleAutomationAction` pelo `name` dentro de [data-automation-form]. */}

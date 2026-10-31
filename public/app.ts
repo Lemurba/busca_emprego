@@ -3,7 +3,7 @@ import { type PageEntry, mountPage, preactPage } from "./ui/mount.js";
 import { SCORE_BADGE_TITLE, SCORE_UNRATED_TITLE, scoreTone } from "./ui/components/job-badges.js";
 import { AgentsPage } from "./ui/pages/agents-page.js";
 import { AnalyticsPage } from "./ui/pages/analytics-page.js";
-import { BoardPage } from "./ui/pages/board-page.js";
+import { BoardPage, type MoveOption } from "./ui/pages/board-page.js";
 import { OverviewPage } from "./ui/pages/overview-page.js";
 import { ApplicationsPage } from "./ui/pages/applications-page.js";
 import { OperationsPage } from "./ui/pages/operations-page.js";
@@ -13,9 +13,11 @@ import { CompaniesPage } from "./ui/pages/companies-page.js";
 import { type SettingsPref, SettingsPage } from "./ui/pages/settings-page.js";
 import { AGENT_ROLE_SCOPES, DEFAULT_AGENT_PROMPT, DEFAULT_JOB_PORTALS } from "../src/agent-defaults.js";
 import { DEFAULT_RADAR_TZ, daysUntilDeadline, formatRadarDate } from "../src/deadline.js";
+import { factValueText } from "../src/ats-content.js";
 import { handleAutomationAction, isAutomaticAllowed } from "./automation-panel.js";
 import { handleAgentReviewAction } from "./agent-review.js";
 import { type HumanQuestion, handleOpsAction } from "./ops-actions.js";
+import { countLabel } from "./ui/plural.js";
 
 // Contrato do GET /api/bootstrap (TD-14): tipos compartilhados com o servidor (só `import type`).
 import type {
@@ -132,6 +134,8 @@ function actorLabel(actor: string) {
     const id = actor.slice("agent:".length);
     return `agente ${currentData().agentConfigs.find((agent) => agent.id === id)?.name ?? id}`;
   }
+  // QAF-16: o token interno sem nome declarado é o Hermes; com nome (x-radar-service-name), o nome.
+  if (actor === "service:internal") return "Hermes (token interno)";
   if (actor.startsWith("service:")) return `serviço ${actor.slice("service:".length)}`;
   if (actor.startsWith("worker:")) return `executor ${actor.slice("worker:".length)}`;
   if (actor.startsWith("system")) return "sistema";
@@ -165,12 +169,15 @@ function label(dictionary: Record<string, string>, value: unknown) {
   return dictionary[String(value ?? "")] ?? humanize(value);
 }
 
-/* Kanban: só a próxima etapa válida é oferecida. */
+/*
+ * Kanban: só a próxima etapa válida é oferecida. QAF-09: nota, cobertura e validação vêm da nota
+ * registrada no servidor (o workflow lê do banco); o cliente não manda número inventado.
+ */
 const kanbanMoves: Record<string, Record<string, (job: Job) => { command: string; data: Record<string, unknown> }>> = {
   found: { validation: (job) => ({ command: "normalize", data: { source_ref: job.source_url || job.job_url, normalized: true } }) },
   validation: {
-    strong_match: (job) => ({ command: "mark_strong_match", data: { validation_sufficient: true, score: job.match_score, coverage: 100 } }),
-    review: (job) => ({ command: "request_review", data: { score: job.match_score, review_required: true } })
+    strong_match: () => ({ command: "mark_strong_match", data: {} }),
+    review: () => ({ command: "request_review", data: { review_required: true } })
   },
   strong_match: { review: () => ({ command: "present_for_review", data: { presented_to_user: true } }) }
 };
@@ -459,6 +466,8 @@ function factDisplay(fact: { type: string; value: unknown }) {
     const auth = value as { countries?: unknown; needs_sponsorship?: unknown };
     return `${Array.isArray(auth.countries) ? auth.countries.join(", ") : "—"}${auth.needs_sponsorship ? " · precisa de patrocínio" : " · sem patrocínio"}`;
   }
+  // Fato estruturado (import de JSON Resume): mesmo texto do currículo ATS, sem as chaves em inglês.
+  if (value && typeof value === "object") return factValueText(fact.type, value) || factText(value);
   return factText(value);
 }
 
@@ -502,8 +511,31 @@ function resumeDownloadLinks(resume: Pick<Resume, "id">) {
 /* Kanban                                                              */
 /* ------------------------------------------------------------------ */
 
+/** Mesmo corte do workflow (mark_strong_match): nota ≥ 80 e cobertura do perfil ≥ 60%. */
+function strongMatchBlock(job: Job): string | null {
+  const score = job.match_evaluated === false ? null : currentData().matchScores.find((item) => item.job_id === job.id);
+  if (!score) return "precisa de nota de aderência";
+  if (score.score_final < 80) return "nota abaixo de 80%";
+  if (score.coverage_percent < 60) return "cobertura do perfil abaixo de 60%";
+  return null;
+}
+
+/**
+ * Opções do "Mover para…" (QAF-09). A validação (found → validation) não muda de coluna, então o
+ * rótulo diz o que acontece; "Match forte" sem nota suficiente aparece desabilitado com o motivo.
+ */
+function moveOptions(job: Job): MoveOption[] {
+  return Object.keys(kanbanMoves[job.status] ?? {}).map((status) => {
+    const column = statusColumns.find((item) => item.target === status);
+    const title = column?.title ?? statusLabels[status] ?? status;
+    const sameColumn = Boolean(column?.statuses.includes(job.status));
+    const blocked = status === "strong_match" ? strongMatchBlock(job) : null;
+    return { status, label: sameColumn ? `Validar (continua em ${title})` : blocked ? `${title} (${blocked})` : title, disabled: Boolean(blocked) };
+  });
+}
+
 function allowedMoves(job: Job) {
-  return Object.keys(kanbanMoves[job.status] ?? {});
+  return moveOptions(job).filter((option) => !option.disabled).map((option) => option.status);
 }
 
 /* ------------------------------------------------------------------ */
@@ -601,6 +633,7 @@ const boardPage = preactPage(BoardPage, () => ({
   statusLabels,
   lifecycleMeta,
   allowedMoves,
+  moveOptions,
   salaryLabel,
   deadlineText,
   repostText,
@@ -679,7 +712,7 @@ const settingsPage = preactPage(SettingsPage, () => ({
   readinessReason: readinessReasonLabel,
   formatDate,
   onPrefChange: setBrowserPref,
-  connectors: { fetchJson, formatDate, toast, confirm: confirmDialog }
+  connectors: { fetchJson, formatDate, toast, confirm: confirmDialog, onCompaniesChange: () => void loadData() }
 }));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
@@ -891,10 +924,18 @@ function friendlyError(code: string, serverMessage?: string): string {
   return serverMessage || "Não foi possível concluir a operação.";
 }
 
-function showAuthScreen(show: boolean) {
+/** QAF-20: depois de "Sair", a tela diz que a pessoa saiu, não que a sessão expirou. */
+const AUTH_MESSAGES = {
+  expired: "Sua sessão expirou ou não foi encontrada.",
+  logout: "Você saiu do painel.",
+};
+
+function showAuthScreen(show: boolean, reason: keyof typeof AUTH_MESSAGES = "expired") {
   document.body.classList.toggle("auth-required", show);
   const screen = document.getElementById("auth-screen");
   if (screen) screen.hidden = !show;
+  const message = document.getElementById("auth-message");
+  if (show && message) message.textContent = AUTH_MESSAGES[reason];
   if (show) document.getElementById("auth-retry")?.focus();
 }
 
@@ -929,7 +970,7 @@ async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> 
 async function logout() {
   try { await fetchJson("/api/logout", { method: "POST" }); } catch { /* a tela de acesso aparece de qualquer forma */ }
   state.data = null;
-  showAuthScreen(true);
+  showAuthScreen(true, "logout");
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -1067,6 +1108,15 @@ function closeModal() {
   root.innerHTML = "";
   state.modalDirty = false;
   popLayer(root);
+}
+
+/**
+ * QAF-18: trocar de página (Voltar do navegador, link #/…) fecha o diálogo e o modal abertos, para
+ * nada ficar por cima de outra página. O diálogo resolve como cancelado; o modal é descartado.
+ */
+function closeOverlays() {
+  layers.find((layer) => layer.root === dialogRoot())?.onEscape();
+  closeModal();
 }
 
 async function requestCloseModal() {
@@ -1316,7 +1366,7 @@ async function recordSourceSmokeTest(id: string) {
     if (!await confirmDialog(`Testar o acesso a ${source.name}?`, `O Radar consulta agora a API pública de ${source.name} para a primeira empresa ativa da sua lista de conectores. Nenhuma candidatura é enviada.`, "Testar agora")) return;
     const { result, source: updated } = await fetchJson<{ result: { status: string; items?: number; reason?: string }; source: SourceConfig | null }>(`/api/sources/${encodeURIComponent(id)}/smoke-test`, { method: "POST", body: "{}" });
     await loadData();
-    toast(result.status === "ready" ? `Teste de ${source.name} passou (${result.items ?? 0} vaga(s) lida(s)). ${readinessOutcome(updated)}` : `O teste de ${source.name} falhou: ${result.reason ?? "erro do conector"}. A fonte fica fora das buscas.`, result.status !== "ready");
+    toast(result.status === "ready" ? `Teste de ${source.name} passou (${countLabel(result.items ?? 0, "vaga lida", "vagas lidas")}). ${readinessOutcome(updated)}` : `O teste de ${source.name} falhou: ${result.reason ?? "erro do conector"}. A fonte fica fora das buscas.`, result.status !== "ready");
     return;
   }
   const result = await openDialog({
@@ -1354,11 +1404,11 @@ async function startRound() {
     const noProfile = !profileSnapshot(data);
     const message = noProfile
       ? "A rodada usa o perfil profissional confirmado para buscar e pontuar as vagas. Revise e confirme o perfil antes de começar."
-      : `Nenhuma fonte está pronta agora.${ignored ? ` ${ignored} fonte(s) ativa(s) ainda não estão prontas (termos de uso, acesso ou teste).` : ""} Em ${pageMeta.settings.label}, aceite os termos e teste o acesso de cada fonte.`;
+      : `Nenhuma fonte está pronta agora.${ignored ? ` ${countLabel(ignored, "fonte ativa ainda não está pronta", "fontes ativas ainda não estão prontas")} (termos de uso, acesso ou teste).` : ""} Em ${pageMeta.settings.label}, aceite os termos e teste o acesso de cada fonte.`;
     if (await confirmDialog("Ainda não dá para iniciar a rodada", message, noProfile ? "Revisar perfil" : `Abrir ${pageMeta.settings.label}`)) navigate(noProfile ? "operations" : "settings");
     return;
   }
-  if (!await confirmDialog("Iniciar uma rodada de busca?", `Fontes prontas: ${ready.map((source) => source.name).join(", ")}.${ignored ? ` ${ignored} fonte(s) ativa(s) não estão prontas e ficam de fora (o motivo de cada uma está em ${pageMeta.settings.label}).` : ""} Os agentes do Hermes fazem a coleta; nenhuma candidatura é enviada.`, "Iniciar rodada")) return;
+  if (!await confirmDialog("Iniciar uma rodada de busca?", `Fontes prontas: ${ready.map((source) => source.name).join(", ")}.${ignored ? ` ${countLabel(ignored, "fonte ativa não está pronta e fica", "fontes ativas não estão prontas e ficam")} de fora (o motivo de cada uma está em ${pageMeta.settings.label}).` : ""} Os agentes do Hermes fazem a coleta; nenhuma candidatura é enviada.`, "Iniciar rodada")) return;
   const round = await fetchJson<{ source_ids?: string[] }>("/api/rounds", { method: "POST", body: "{}" });
   await loadData();
   const count = round.source_ids?.length ?? 0;
@@ -1372,6 +1422,19 @@ async function showAgentHistory(agentId: string) {
   openModal("Versões do agente", "Restaurar uma versão cria uma nova versão publicada; nada é apagado.", `<div class="version-list">${versions.map((version) => `<article class="ops-item"><div><strong>Versão ${version.version}</strong><span>${escapeHtml(formatDate(version.created_at))}${version.origin ? ` · ${escapeHtml(label(versionOriginLabels, version.origin))}` : ""}</span></div><div class="button-row"><span class="status-pill ${version.status === "published" ? "teal" : "neutral"}">${escapeHtml(label(versionStatusLabels, version.status))}</span>${version.status === "draft" && version.id === currentDraftId ? `<button class="secondary-button" data-publish-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Revisar e publicar</button>` : version.status !== "published" && version.published_at ? `<button class="secondary-button" data-rollback-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Restaurar</button>` : ""}</div></article>`).join("") || `<p>Nenhuma versão registrada.</p>`}</div>`);
 }
 
+/**
+ * QAF-07: com a candidatura automática desligada (no servidor ou pelo kill-switch), o detalhe da
+ * vaga não oferece "Autorizar envio automático": o motivo aparece no lugar do botão.
+ */
+function automationOffNotice(data: Data) {
+  const automation = data.automation;
+  if (!automation || automation.effective) return "";
+  const reason = automation.enabled
+    ? "A candidatura automática está desligada no servidor (RADAR_AUTO_APPLICATION_ENABLED)."
+    : `A candidatura automática está pausada pelo kill-switch em “${pageMeta.operations.label}”.`;
+  return `<div class="notice"><span aria-hidden="true">i</span><div>${escapeHtml(reason)} Siga pelo envio manual.</div></div>`;
+}
+
 function showJobDetail(id: string) {
   const data = currentData();
   const job = data.jobs.find((item) => item.id === id);
@@ -1382,6 +1445,8 @@ function showJobDetail(id: string) {
   const applicationBlock = application ? `<div class="detail-box"><span>Candidatura</span><strong>${escapeHtml(application.status === "submitted" ? "Enviada" : label(applicationStatusLabels, application.status))}</strong><small>${escapeHtml(application.submitted_at ? `${formatDate(application.submitted_at)} · ${relativeApplication(job)}` : application.current_step || "Sem data de envio")}</small></div>` : `<div class="detail-box"><span>Candidatura</span><strong>Ainda não registrada</strong><small>${escapeHtml(job.lifecycle === "lost" ? "Prazo encerrou sem envio" : "Você decide quando registrar")}</small></div>`;
   let primary = "";
   let notice = "";
+  const automationOff = automationOffNotice(data);
+  const autoButton = (text: string) => automationOff ? "" : `<button class="secondary-button" data-action="authorize-auto" data-job-id="${escapeHtml(job.id)}">${escapeHtml(text)}</button>`;
   if (job.lifecycle === "applied") {
     primary = `<button class="primary-button" data-action="application-detail" data-job-id="${escapeHtml(job.id)}">Atualizar candidatura</button>`;
   } else if (job.lifecycle !== "lost") {
@@ -1402,15 +1467,17 @@ function showJobDetail(id: string) {
     } else if (application?.status === "in_progress") {
       notice = `<div class="notice warning"><span aria-hidden="true">!</span><div>O envio automático está em andamento. Decisões e modo ficam travados até o executor terminar.</div></div>`;
     } else if (!application) {
-      primary = `<button class="primary-button" data-action="prepare-manual" data-job-id="${escapeHtml(job.id)}">Vou me candidatar manualmente</button><button class="secondary-button" data-action="authorize-auto" data-job-id="${escapeHtml(job.id)}">Autorizar envio automático</button>`;
+      notice = automationOff;
+      primary = `<button class="primary-button" data-action="prepare-manual" data-job-id="${escapeHtml(job.id)}">Vou me candidatar manualmente</button>${autoButton("Autorizar envio automático")}`;
     } else if (application.automation_mode === "authorized_auto" && application.status !== "submitted") {
       notice = `<div class="notice warning"><span aria-hidden="true">!</span><div>${application.status === "failed" ? "O envio automático falhou. Revise o motivo antes de tentar de novo." : "Envio automático autorizado para este currículo. O executor configurado no Hermes fará o envio."}</div></div>`;
       primary = `<button class="secondary-button" data-action="revoke-auto" data-application-id="${escapeHtml(application.id)}">Revogar autorização</button><button class="secondary-button" data-action="prepare-manual" data-job-id="${escapeHtml(job.id)}">Revogar e enviar manualmente</button>`;
     } else if (application.automation_mode === "manual" && application.status !== "submitted") {
-      notice = `<div class="notice"><span aria-hidden="true">✓</span><div>Fluxo manual escolhido. Envie pelo portal e registre aqui depois.</div></div>`;
-      primary = `<button class="primary-button" data-action="mark-applied" data-job-id="${escapeHtml(job.id)}">Registrar envio</button><button class="secondary-button" data-action="authorize-auto" data-job-id="${escapeHtml(job.id)}">Mudar para automático</button>`;
+      notice = `<div class="notice"><span aria-hidden="true">✓</span><div>Fluxo manual escolhido. Envie pelo portal e registre aqui depois.</div></div>${automationOff}`;
+      primary = `<button class="primary-button" data-action="mark-applied" data-job-id="${escapeHtml(job.id)}">Registrar envio</button>${autoButton("Mudar para automático")}`;
     } else {
-      primary = `<button class="primary-button" data-action="prepare-manual" data-job-id="${escapeHtml(job.id)}">Vou me candidatar manualmente</button><button class="secondary-button" data-action="authorize-auto" data-job-id="${escapeHtml(job.id)}">Autorizar envio automático</button>`;
+      notice = automationOff;
+      primary = `<button class="primary-button" data-action="prepare-manual" data-job-id="${escapeHtml(job.id)}">Vou me candidatar manualmente</button>${autoButton("Autorizar envio automático")}`;
     }
   }
   const executing = Boolean(application && ["in_progress", "awaiting_final_confirmation"].includes(application.status));
@@ -1429,7 +1496,7 @@ function showJobDetail(id: string) {
   notice = decisionNotice + insecureNotice + notice;
   const sourceLinks = `${externalLink(job.job_url, "Abrir vaga ↗")}${externalLink(job.application_url, "Página de candidatura ↗")}${externalLink(job.linkedin_post_url, "Post do LinkedIn ↗")}${externalLink(job.salary_source_url, "Fonte do salário ↗")}`;
   const mapButton = job.latitude != null && job.longitude != null ? `<button class="secondary-button" data-show-on-map="${escapeHtml(job.id)}">Ver no mapa</button>` : "";
-  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score, job.match_evaluated !== false)}</strong><small>${blockedBlockers(job).length ? `${escapeHtml(blockedBlockers(job).length)} eliminatório(s) — fora da nota` : "Estimativa, não é nota de ATS"}</small></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${livenessBox(job)}${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${executing ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
+  openModal(job.title, `${job.company} · ${job.location}`, `${job.lifecycle === "lost" ? `<div class="modal-alert">Vaga encerrada antes de uma candidatura enviada${job.decision === "no_time" ? " (marcada como sem tempo)" : ""}.</div>` : ""}<div class="detail-grid"><div class="detail-box"><span>Aderência ao perfil</span><strong>${scoreBadge(job.match_score, job.match_evaluated !== false)}</strong><small>${blockedBlockers(job).length ? `${escapeHtml(countLabel(blockedBlockers(job).length, "eliminatório", "eliminatórios"))} — fora da nota` : "Estimativa, não é nota de ATS"}</small></div><div class="detail-box"><span>Situação</span><strong>${lifecycleChip(job)}</strong></div><div class="detail-box"><span>Faixa salarial</span><strong>${escapeHtml(salaryLabel(job))}</strong><small>${escapeHtml(job.salary_source)}${job.salary_checked_at ? ` · ${escapeHtml(formatDate(job.salary_checked_at))}` : ""}</small></div><div class="detail-box"><span>Prazo da vaga</span><strong>${escapeHtml(deadlineText(job))}</strong><small>${escapeHtml(job.deadline_at ? formatDate(job.deadline_at) : "Não informado")}</small></div>${livenessBox(job)}${applicationBlock}<div class="detail-box"><span>Currículo</span><strong>${escapeHtml(resume ? resume.title : "Ainda não criado")}</strong><small>${escapeHtml(resume ? (resume.status === "approved" ? "Aprovado" : "Precisa de revisão") : "Criado depois de “Tenho interesse”")}</small></div></div>${notice}<div class="button-row">${sourceLinks}${mapButton}<button class="secondary-button" data-action="edit-job" data-job-id="${escapeHtml(job.id)}">Editar vaga</button>${executing ? "" : `<button class="text-button danger-text" data-action="archive-job" data-job-id="${escapeHtml(job.id)}">Excluir vaga…</button>`}</div><div class="detail-description"></div><div class="modal-actions detail-actions">${secondary ? `<div class="secondary-actions">${secondary}</div>` : ""}${primary}</div>`);
   const descriptionRoot = modalRoot().querySelector<HTMLElement>(".detail-description");
   if (descriptionRoot) {
     const enrichmentEvents = data.enrichmentEvents.filter((event) => event.job_id === job.id);
@@ -1648,6 +1715,21 @@ function jobFormBody(form: HTMLFormElement, get: (name: string) => string, editi
 
 type ProfileResponse = { id: string; version: number; facts?: ProfileFact[] };
 
+type BaseResumeExtraction = { extraction_status: string; extracted_text: string; extraction_error: string | null; page_count: number; extracted_at: string | null };
+const extractionStatusLabels: Record<string, string> = { extracted: "Texto lido", needs_review: "Leitura incompleta", failed: "Falha na leitura" };
+
+/**
+ * §2 da auditoria ("Ver extração do PDF"): o texto que o extrator leu do PDF-base, o mesmo de
+ * onde saem os fatos propostos do perfil. Ajuda a entender um fato faltando ou cortado.
+ */
+async function showBaseExtraction(baseResumeId: string) {
+  const base = currentData().baseResumes.find((item) => item.id === baseResumeId);
+  const extraction = await fetchJson<BaseResumeExtraction>(`/api/base-resumes/${encodeURIComponent(baseResumeId)}/extraction`);
+  const meta = [label(extractionStatusLabels, extraction.extraction_status), extraction.page_count ? countLabel(extraction.page_count, "página", "páginas") : "", extraction.extracted_at ? `lido em ${formatDate(extraction.extracted_at)}` : ""].filter(Boolean).join(" · ");
+  const text = extraction.extracted_text.trim();
+  openModal(`Texto lido de ${base?.title ?? "currículo-base"}`, meta, `${extraction.extraction_error ? `<div class="notice warning"><span aria-hidden="true">!</span><div>${escapeHtml(friendlyError(extraction.extraction_error))}</div></div>` : ""}${text ? `<div class="extraction-text" role="region" aria-label="Texto extraído do PDF" tabindex="0"><pre>${escapeHtml(text)}</pre></div>` : `<p class="muted-text">Nenhum texto foi lido deste PDF. Envie um PDF com texto selecionável ou importe um JSON Resume.</p>`}<p class="muted-text">Os fatos propostos do perfil saem deste texto. Se algo faltar ou vier cortado, corrija na revisão do perfil.</p>`);
+}
+
 /** Leva à revisão do rascunho em "Saúde das buscas" (sem recarregar) e põe o foco no título dela. */
 function showProfileDraft() {
   closeMobileMore();
@@ -1838,7 +1920,20 @@ async function markApplied(jobId: string) {
   const data = currentData();
   const existing = data.applications.find((item) => item.job_id === jobId);
   if (existing?.automation_mode !== "manual") throw new Error("Escolha primeiro o fluxo manual e aprove o currículo desta vaga.");
-  await mutate(`/api/applications/${encodeURIComponent(existing.id)}`, "PATCH", { status: "submitted", submitted_at: new Date().toISOString(), current_step: "Candidatura registrada manualmente" }, "Candidatura registrada com a data de hoje.");
+  // QAF-17: a data do envio é a que a pessoa confirma (padrão hoje; nunca no futuro).
+  const job = data.jobs.find((item) => item.id === jobId);
+  const now = new Date();
+  const today = new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+  const form = await openDialog({
+    title: "Registrar envio da candidatura",
+    body: `<p>${escapeHtml(job ? `${job.title} · ${job.company}` : "Candidatura manual")}. Registre só depois de enviar pelo portal da empresa.</p><div class="form-field"><label for="submitted-on">Data do envio</label><input class="input" id="submitted-on" name="submitted_on" type="date" required max="${today}" value="${today}" data-message="Informe a data do envio (hoje ou antes)." /></div>`,
+    confirmLabel: "Registrar envio",
+  });
+  if (!form) return;
+  const day = String(form.get("submitted_on") ?? "");
+  // Hoje: o instante atual; outro dia: meio-dia local daquela data (sem virar o dia por fuso).
+  const submittedAt = day === today ? now.toISOString() : new Date(`${day}T12:00:00`).toISOString();
+  await mutate(`/api/applications/${encodeURIComponent(existing.id)}`, "PATCH", { status: "submitted", submitted_at: submittedAt, current_step: "Candidatura registrada manualmente" }, day === today ? "Candidatura registrada com a data de hoje." : `Candidatura registrada com a data de ${formatShortDate(submittedAt)}.`);
   closeModal();
 }
 
@@ -1921,7 +2016,7 @@ async function authorizeAutomaticApplication(jobId: string) {
         }).catch((error) => { if (status) status.textContent = error instanceof Error ? error.message : "Falha ao registrar a confirmação."; });
       });
     },
-    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button> <button type="button" class="text-button" data-dialog-confirm-open hidden>Conferi no portal: está aberta</button></div></div>`}${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><p>Autorizo o envio automático desta candidatura.</p>${typedConfirmationField("AUTORIZO", "authorize-confirmation")}`
+    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button> <button type="button" class="text-button" data-dialog-confirm-open hidden>Conferi no portal: está aberta</button></div></div>`}${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>${blockedBlockers(job).length === 1 ? "Esta vaga tem um eliminatório" : "Esta vaga tem eliminatórios"} para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><p>Autorizo o envio automático desta candidatura.</p>${typedConfirmationField("AUTORIZO", "authorize-confirmation")}`
   });
   if (!result) return;
   const application = existing ?? await fetchJson<Application>("/api/applications", { method: "POST", body: JSON.stringify({ job_id: jobId, resume_id: resume.id, automation_mode: "assisted" }) });
@@ -2091,9 +2186,13 @@ async function moveJob(jobId: string, status: string) {
   if (!job || job.status === status) return;
   const move = kanbanMoves[job.status]?.[status];
   if (!move) throw new Error("Essa vaga só pode ir para a próxima etapa. Decisões de interesse, currículo e candidatura ficam no detalhe da vaga.");
+  const blocked = status === "strong_match" ? strongMatchBlock(job) : null;
+  if (blocked) throw new Error(`Para ir a Match forte a vaga ${blocked === "precisa de nota de aderência" ? "precisa de uma nota de aderência registrada" : `está com ${blocked}`}. Use “Em revisão”.`);
   const { command, data } = move(job);
-  const target = statusColumns.find((column) => column.target === status)?.title ?? statusLabels[status] ?? status;
-  await mutate(`/api/jobs/${encodeURIComponent(jobId)}/transitions`, "POST", { command, expected_version: job.version, data }, `Vaga movida para ${target}.`);
+  const column = statusColumns.find((item) => item.target === status);
+  const target = column?.title ?? statusLabels[status] ?? status;
+  const message = column?.statuses.includes(job.status) ? `Vaga validada; continua em ${target}.` : `Vaga movida para ${target}.`;
+  await mutate(`/api/jobs/${encodeURIComponent(jobId)}/transitions`, "POST", { command, expected_version: job.version, data }, message);
 }
 
 function activateChartFilter(element: HTMLElement) {
@@ -2179,6 +2278,7 @@ async function handleAction(target: HTMLElement) {
     case "application-detail": showApplicationModal(jobId); return;
     case "select-base-resume": await fetchJson(`/api/base-resumes/${encodeURIComponent(action.dataset.resumeId ?? "")}/select`, { method: "POST" }); await loadData(); toast("Currículo-base selecionado."); return;
     case "create-profile-from-base": await createProfileFromBase(action.dataset.resumeId ?? ""); return;
+    case "show-base-extraction": await showBaseExtraction(action.dataset.resumeId ?? ""); return;
     case "goto-profile-draft": showProfileDraft(); return;
     case "review-profile-fact": await reviewProfileFact(action.dataset.profileId ?? "", action.dataset.factId ?? "", action.dataset.state ?? ""); return;
     case "confirm-pending-facts": await confirmPendingProfileFacts(action.dataset.profileId ?? ""); return;
@@ -2314,6 +2414,7 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("hashchange", () => {
     const page = readHash();
     const changedPage = page !== state.page;
+    if (changedPage) closeOverlays();
     state.page = page;
     render();
     if (changedPage) focusHeading();

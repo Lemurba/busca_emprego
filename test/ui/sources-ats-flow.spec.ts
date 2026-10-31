@@ -101,6 +101,45 @@ test.describe("fluxos de fontes e currículo ATS", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("conector sem empresa leva ao cadastro (QAF-08) e Excluir fonte pede confirmação", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    await openPage(page, "#/configuracoes", "Configurações");
+    // Greenhouse sem empresa ativa: o teste de acesso não tem o que ler, então a linha explica e
+    // oferece o cadastro no lugar de "Testar acesso…".
+    const greenhouse = page.locator('#view tr[data-source-row="greenhouse"]');
+    await expect(greenhouse.locator("[data-source-company-hint]")).toHaveText("Cadastre uma empresa em “Empresas por conector” para testar o acesso.");
+    await expect(greenhouse.getByRole("button", { name: "Testar acesso de Greenhouse" })).toHaveCount(0);
+    await greenhouse.getByRole("button", { name: "Cadastrar empresa do conector Greenhouse" }).click();
+    await expect(page.locator("#connector-id")).toHaveValue("greenhouse");
+    await expect(page.locator("#connector-slug")).toBeFocused();
+    // Com uma empresa ativa, a linha volta a oferecer o teste de acesso.
+    await page.locator("#connector-slug").fill("exemplo-ui");
+    await page.locator("#connector-name").fill("Exemplo UI");
+    await page.getByRole("button", { name: "Adicionar empresa" }).click();
+    await expect(page.locator("#toast-root")).toContainText("Empresa adicionada à coleta automática.");
+    await expect(greenhouse.getByRole("button", { name: "Testar acesso de Greenhouse" })).toBeVisible();
+    await expect(greenhouse.locator("[data-source-company-hint]")).toHaveCount(0);
+    expect(await axeBlocking(page), "axe em Configurações com o cadastro de empresa").toEqual([]);
+
+    // Excluir fonte: confirmação antes do DELETE; cancelar mantém a fonte.
+    await api(page, "POST", "api/sources", { id: "fonte-ui-excluir", name: "Fonte UI Excluir", source_type: "job_board", domain: "fonte-ui-excluir.example", enabled: true, auth_strategy: "none" });
+    await openPage(page, "#/configuracoes", "Configurações");
+    const row = page.locator('#view tr[data-source-row="fonte-ui-excluir"]');
+    const dialog = page.locator("#dialog-root form.dialog");
+    await row.getByRole("button", { name: "Excluir Fonte UI Excluir" }).click();
+    await expect(dialog.getByRole("heading", { name: "Excluir a fonte Fonte UI Excluir?" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    await expect(row).toHaveCount(1);
+    await row.getByRole("button", { name: "Excluir Fonte UI Excluir" }).click();
+    const deleted = page.waitForResponse((response) => response.url().endsWith("/api/sources/fonte-ui-excluir") && response.request().method() === "DELETE");
+    await dialog.getByRole("button", { name: "Excluir fonte" }).click();
+    expect((await deleted).status()).toBe(200);
+    await expect(page.locator("#toast-root")).toContainText("Fonte Fonte UI Excluir excluída.");
+    await expect(row).toHaveCount(0);
+    expect(errors, "erros de console").toEqual([]);
+  });
+
   test("Tenho interesse digitado → Gerar currículo ATS → editar → portão do APROVO", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);

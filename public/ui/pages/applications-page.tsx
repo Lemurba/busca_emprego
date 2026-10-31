@@ -35,8 +35,10 @@ export function ApplicationsPage(props: ApplicationsPageProps) {
   const data = appData();
   const byId = new Map(data.jobs.map((job) => [job.id, job]));
   const applications = data.applications.filter((application) => byId.has(application.job_id));
+  // QAF-19: vaga com candidatura em qualquer estado (na fila, autorizada, em revisão) já está no histórico acima.
+  const withApplication = new Set(applications.map((application) => application.job_id));
   const pending = data.jobs
-    .filter((job) => job.lifecycle === "open" || job.lifecycle === "unknown")
+    .filter((job) => (job.lifecycle === "open" || job.lifecycle === "unknown") && !withApplication.has(job.id))
     .sort((a, b) => (daysUntil(a.deadline_at) ?? 999) - (daysUntil(b.deadline_at) ?? 999));
   return (
     <>

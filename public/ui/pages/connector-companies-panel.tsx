@@ -20,6 +20,8 @@ export type ConnectorPanelDeps = {
   formatDate: (value: string | null | undefined) => string;
   toast: (message: string, error?: boolean) => void;
   confirm: (title: string, body: string, confirmLabel: string, danger?: boolean) => Promise<boolean>;
+  /** Avisa que a lista mudou: a tabela de fontes conta as empresas ativas de cada conector (QAF-08). */
+  onCompaniesChange?: () => void;
 };
 
 const statusLabels: Record<string, [string, string]> = { ok: ["Coletada", "teal"], failed: ["Falhou", "red"], skipped: ["Interrompida", "orange"] };
@@ -51,7 +53,7 @@ function CompanyRow({ company, connectorName, formatDate, onToggle, onRemove }: 
   );
 }
 
-export function ConnectorCompaniesPanel({ fetchJson, formatDate, toast, confirm }: ConnectorPanelDeps) {
+export function ConnectorCompaniesPanel({ fetchJson, formatDate, toast, confirm, onCompaniesChange }: ConnectorPanelDeps) {
   const [data, setData] = useState<ConnectorsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -73,14 +75,19 @@ export function ConnectorCompaniesPanel({ fetchJson, formatDate, toast, confirm 
   const run = (operation: () => Promise<unknown>) => {
     void operation().catch((error) => toast(errorMessage(error, "Falha na operação"), true));
   };
+  // Depois de mudar a lista: recarrega o painel e avisa a página (contagem por conector nas fontes).
+  const changed = async () => {
+    await refresh();
+    onCompaniesChange?.();
+  };
   const toggle = (company: ConnectorCompany) => run(async () => {
     await fetchJson(`/api/connectors/companies/${encodeURIComponent(company.id)}`, { method: "PATCH", body: JSON.stringify({ enabled: !company.enabled }) });
-    await refresh();
+    await changed();
   });
   const remove = (company: ConnectorCompany) => run(async () => {
     if (!await confirm("Remover empresa?", `“${company.name}” sai da coleta automática. As vagas já coletadas continuam no painel.`, "Remover", true)) return;
     await fetchJson(`/api/connectors/companies/${encodeURIComponent(company.id)}`, { method: "DELETE" });
-    await refresh();
+    await changed();
   });
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
@@ -93,7 +100,7 @@ export function ConnectorCompaniesPanel({ fetchJson, formatDate, toast, confirm 
         // Como no painel antigo (que redesenhava o formulário), volta ao formulário vazio.
         form.reset();
         setSelectedConnector(null);
-        await refresh();
+        await changed();
         toast("Empresa adicionada à coleta automática.");
       })
       .catch((error) => toast(errorMessage(error, "Falha ao salvar"), true));
