@@ -431,8 +431,24 @@ try {
   // ---------- 7. redator + revisor ATS ----------
   section("7. redator de currículo (ATS) e revisor independente");
   let resumeA = "";
-  await t("interesse registrado e currículo ATS gerado a partir de fatos confirmados", async () => {
+  // Roda antes do currículo factual: gerar de novo para a mesma vaga substitui o rascunho
+  // anterior (superseded), e o currículo que segue para APROVO precisa ser o mais recente.
+  await t("revisor detecta conteúdo inventado e bloqueia aprovação", async () => {
     expect("interesse", await api("POST", `/api/jobs/${job0}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" }), 200);
+    const gen = expect("gerar 2", await api("POST", "/api/resumes/generate", {
+      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: [skillFactId], keywords: ["SQL"],
+    }), 201);
+    expect("editar", await api("PATCH", `/api/resumes/${gen.id}`, { status: "review", content: "skills: Analista de Dados\ncertificacao: INVENTADA" }), 200);
+    const review = expect("review fail", await api("POST", `/api/resumes/${gen.id}/review`, { verdict: "pass" }), 200);
+    assert.equal(review.review_status, "fail");
+    assert.ok((review.review_findings ?? []).some((finding) => String(finding).startsWith("facts.unverified")), "certificação inventada sem checagem de fatos");
+    // A certificação inventada cai primeiro na checagem de fatos (#31): 409, sem exceção por justificativa.
+    const approve = await api("POST", `/api/resumes/${gen.id}/approve`, { confirmation: "APROVO", override_reason: "Revisado manualmente pelo smoke" });
+    expect("aprovar inválido", approve, 409);
+    assert.equal(approve.data?.error, "resume.unverified_facts");
+  });
+
+  await t("interesse registrado e currículo ATS gerado a partir de fatos confirmados", async () => {
     const r = await api("POST", "/api/resumes/generate", {
       job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId,
       facts_used: [skillFactId], keywords: ["SQL"], gaps: ["Power BI avançado fica como lacuna"],
@@ -453,20 +469,6 @@ try {
     const resume = expect("review pass", r, 200);
     assert.equal(resume.review_status, "pass");
   });
-  await t("revisor detecta conteúdo inventado e bloqueia aprovação", async () => {
-    const gen = expect("gerar 2", await api("POST", "/api/resumes/generate", {
-      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: [skillFactId], keywords: ["SQL"],
-    }), 201);
-    expect("editar", await api("PATCH", `/api/resumes/${gen.id}`, { status: "review", content: "skills: Analista de Dados\ncertificacao: INVENTADA" }), 200);
-    const review = expect("review fail", await api("POST", `/api/resumes/${gen.id}/review`, { verdict: "pass" }), 200);
-    assert.equal(review.review_status, "fail");
-    assert.ok((review.review_findings ?? []).some((finding) => String(finding).startsWith("facts.unverified")), "certificação inventada sem checagem de fatos");
-    // A certificação inventada cai primeiro na checagem de fatos (#31): 409, sem exceção por justificativa.
-    const approve = await api("POST", `/api/resumes/${gen.id}/approve`, { confirmation: "APROVO", override_reason: "Revisado manualmente pelo smoke" });
-    expect("aprovar inválido", approve, 409);
-    assert.equal(approve.data?.error, "resume.unverified_facts");
-  });
-
   // ---------- 8. candidatura ----------
   section("8. assistente de candidatura: autorização explícita, fila, pergunta humana, envio");
   let applicationId = "";
