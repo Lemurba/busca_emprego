@@ -1,13 +1,18 @@
 // Cliente HTTP dos conectores determinísticos.
 //
-// - Toda URL passa por assertResolvablePublicHttpsUrl (HTTPS público, DNS sem destino privado),
-//   inclusive cada redirecionamento, que é seguido manualmente.
+// - Toda URL passa por assertPublicHttpsUrl (HTTPS público, sem IP privado literal), inclusive
+//   cada redirecionamento, que é seguido manualmente. O transporte é o cliente seguro único de
+//   src/safe-http.ts: DNS resolvido uma vez, IPs privados recusados e conexão só no IP validado
+//   (sem rebinding); corpo lido em streaming com o limite aplicado durante a leitura.
 // - Um "worker" por domínio: requisições ao mesmo host são serializadas e espaçadas por um
 //   atraso adaptativo que dobra a cada 429/503 (respeitando Retry-After) e volta aos poucos
 //   ao valor-base depois de respostas boas.
 // - Limites por execução: número de requisições, custo acumulado e prazo global (AbortSignal).
 // - User-Agent identificável, com contato configurável (RADAR_CONNECTOR_CONTACT).
-import { assertResolvablePublicHttpsUrl } from "../domain.js";
+import { assertPublicHttpsUrl } from "../domain.js";
+import { defaultLookup, pinnedHttpsFetch, readBodyCapped, safeFetch, SafeHttpError, type FetchLike, type LookupAll } from "../safe-http.js";
+
+export type { FetchLike } from "../safe-http.js";
 
 export const DEFAULT_USER_AGENT = `RadarDeVagas/0.2 (+coleta determinística; ${process.env.RADAR_CONNECTOR_CONTACT?.trim() || "https://github.com/lemurba/busca_emprego"})`;
 
@@ -26,7 +31,6 @@ export class ConnectorHttpError extends Error {
 }
 
 export type UrlGuard = (url: string) => Promise<URL> | URL;
-export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface ConnectorHttpOptions {
   userAgent?: string;
@@ -44,7 +48,10 @@ export interface ConnectorHttpOptions {
   maxBodyBytes?: number;
   maxRedirects?: number;
   signal?: AbortSignal;
+  /** Transporte; padrão: node:https conectando só no IP já validado (src/safe-http.ts). */
   fetchImpl?: FetchLike;
+  /** Resolução DNS da checagem de destino privado (testes injetam um resolvedor falso). */
+  lookup?: LookupAll;
   assertUrl?: UrlGuard;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   clock?: () => number;
@@ -74,6 +81,8 @@ export class ConnectorHttpClient {
   requests = 0;
   cost = 0;
   private readonly domains = new Map<string, DomainState>();
+  /** Início (relógio monotônico) da tentativa que produziu cada resposta: o prazo da requisição cobre o corpo. */
+  private readonly startedAt = new WeakMap<Response, number>();
   private readonly options: Required<Omit<ConnectorHttpOptions, "signal" | "maxCost">> & Pick<ConnectorHttpOptions, "signal" | "maxCost">;
 
   constructor(options: ConnectorHttpOptions = {}) {
@@ -90,8 +99,9 @@ export class ConnectorHttpClient {
       maxBodyBytes: options.maxBodyBytes ?? 5 * 1024 * 1024,
       maxRedirects: options.maxRedirects ?? 3,
       signal: options.signal,
-      fetchImpl: options.fetchImpl ?? ((url, init) => fetch(url, init)),
-      assertUrl: options.assertUrl ?? ((url) => assertResolvablePublicHttpsUrl(url)),
+      fetchImpl: options.fetchImpl ?? pinnedHttpsFetch,
+      lookup: options.lookup ?? defaultLookup,
+      assertUrl: options.assertUrl ?? ((url) => assertPublicHttpsUrl(url)),
       sleep: options.sleep ?? defaultSleep,
       clock: options.clock ?? Date.now
     };
@@ -131,15 +141,30 @@ export class ConnectorHttpClient {
     throw new ConnectorHttpError("connector.redirect.too_many");
   }
 
+  /**
+   * Corpo em streaming: para no limite (sem ler o resto) e respeita o mesmo prazo da requisição,
+   * contado do início da tentativa (cabeçalhos + corpo cabem em requestTimeoutMs).
+   */
   private async readBody(response: Response): Promise<string> {
-    const declared = Number(response.headers.get("content-length") ?? 0);
-    if (declared > this.options.maxBodyBytes) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new ConnectorHttpError("connector.response.too_large");
+    const controller = new AbortController();
+    const started = this.startedAt.get(response) ?? performance.now();
+    const remaining = Math.max(0, this.options.requestTimeoutMs - (performance.now() - started));
+    const timer = setTimeout(() => controller.abort(), remaining);
+    const onAbort = () => controller.abort();
+    // O prazo global pode ter vencido entre os cabeçalhos e a leitura: aborta já.
+    if (this.options.signal?.aborted) controller.abort();
+    else this.options.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const { bytes } = await readBodyCapped(response, this.options.maxBodyBytes, { onLimit: "error", signal: controller.signal });
+      return new TextDecoder("utf-8").decode(bytes);
+    } catch (error) {
+      if (this.options.signal?.aborted) throw new ConnectorBudgetError("connector.timeout");
+      if (error instanceof SafeHttpError && error.kind === "too_large") throw new ConnectorHttpError("connector.response.too_large");
+      throw new ConnectorHttpError(controller.signal.aborted ? "connector.request_timeout" : "connector.network_error");
+    } finally {
+      clearTimeout(timer);
+      this.options.signal?.removeEventListener("abort", onAbort);
     }
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    if (buffer.byteLength > this.options.maxBodyBytes) throw new ConnectorHttpError("connector.response.too_large");
-    return new TextDecoder("utf-8").decode(buffer);
   }
 
   private state(hostname: string): DomainState {
@@ -176,18 +201,22 @@ export class ConnectorHttpClient {
       const wait = state.nextAt - this.options.clock();
       if (wait > 0) await this.options.sleep(wait, this.options.signal);
       this.reserve();
+      const started = performance.now();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
       const onAbort = () => controller.abort();
       this.options.signal?.addEventListener("abort", onAbort, { once: true });
       let response: Response;
       try {
-        response = await this.options.fetchImpl(url, {
-          method: "GET", redirect: "manual", signal: controller.signal,
+        // DNS resolvido uma vez e validado; o transporte conecta só nesses IPs.
+        response = await safeFetch(new URL(url), {
+          method: "GET", signal: controller.signal,
           headers: { "user-agent": this.userAgent, accept, "accept-language": "pt-BR,pt;q=0.9,en;q=0.8" }
-        });
+        }, { fetch: this.options.fetchImpl, lookup: this.options.lookup });
       } catch (error) {
         if (this.options.signal?.aborted) throw new ConnectorBudgetError("connector.timeout");
+        // Destino privado não se resolve com retentativa.
+        if (error instanceof SafeHttpError && error.kind === "refused") throw new ConnectorHttpError("connector.destination.private");
         state.nextAt = this.options.clock() + state.delayMs;
         if (attempt < this.options.maxRetries) continue;
         throw new ConnectorHttpError(controller.signal.aborted ? "connector.request_timeout" : "connector.network_error");
@@ -208,6 +237,7 @@ export class ConnectorHttpClient {
       // Resposta boa: o atraso decai pela metade até o valor-base.
       state.delayMs = Math.max(this.options.baseDelayMs, Math.floor(state.delayMs / 2));
       state.nextAt = this.options.clock() + state.delayMs;
+      this.startedAt.set(response, started);
       return response;
     }
   }

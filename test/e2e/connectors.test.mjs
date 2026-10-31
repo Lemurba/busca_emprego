@@ -23,12 +23,14 @@ const { connectorRoutes } = await import("../../dist/src/connectors/routes.js");
 const company = (slug, name = "Exemplo") => ({ slug, name });
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 const html = (body) => new Response(body, { status: 200, headers: { "content-type": "text/html" } });
-/** Cliente sem DNS nem espera real: guarda síncrona, relógio e sleep falsos. */
+/** Resolvedor falso: todo host "resolve" para um IP público (nenhuma consulta DNS real). */
+const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+/** Cliente sem DNS nem espera real: guarda síncrona, DNS falso, relógio e sleep falsos. */
 function testClient(fetchImpl, options = {}) {
   let clock = 0;
   const sleeps = [];
   const client = new ConnectorHttpClient({
-    fetchImpl, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 100, maxDelayMs: 10_000,
+    fetchImpl, lookup: publicLookup, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 100, maxDelayMs: 10_000,
     clock: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += ms; }, ...options
   });
   return { client, sleeps, advance: (ms) => { clock += ms; } };
@@ -169,7 +171,7 @@ try {
       let fetched = 0;
       const guarded = new ConnectorHttpClient({ fetchImpl: async () => { fetched += 1; return json({}); } });
       for (const url of ["https://127.0.0.1/x", "https://localhost/x", "http://example.com/x", "https://[::1]/x", "https://user:pw@example.com/"]) {
-        await assert.rejects(guarded.getJson(url), "o guarda padrão (assertResolvablePublicHttpsUrl) recusa destino privado/não HTTPS");
+        await assert.rejects(guarded.getJson(url), "o guarda padrão (assertPublicHttpsUrl) recusa destino privado/não HTTPS");
       }
       assert.equal(fetched, 0, "nada é buscado antes da validação");
       const { client } = testClient(async (url) => url.includes("publico") ? new Response(null, { status: 302, headers: { location: "https://10.0.0.5/interno" } }) : json({}));
@@ -284,7 +286,7 @@ try {
       if (url.startsWith("https://jobs.lever.co/")) return html(payloads.emptyPage);
       return new Response("", { status: 404 });
     };
-    const http = { fetchImpl: fakeFetch, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 0, sleep: async () => {} };
+    const http = { fetchImpl: fakeFetch, lookup: publicLookup, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 0, sleep: async () => {} };
 
     // Fontes ainda sem teste de acesso: a rodada não começa e nada é buscado.
     const notReady = await runConnectorCollection({ http });

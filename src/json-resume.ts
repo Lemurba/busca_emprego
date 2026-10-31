@@ -227,8 +227,9 @@ export function factsToJsonResume(facts: readonly FactLike[], options: { work?: 
     const value = fact.value;
     const record = asRecord(value);
     switch (type) {
-      case "name": basics.name ??= asText(value) || undefined; break;
-      case "role": basics.label ??= asText(value) || undefined; break;
+      // "full_name"/"target_role" vêm do extrator de PDF e da entrevista; "name"/"role" do JSON Resume.
+      case "name": case "full_name": basics.name ??= asText(value) || undefined; break;
+      case "role": case "target_role": basics.label ??= asText(value) || undefined; break;
       case "contact_email": basics.email ??= asText(value) || undefined; break;
       case "contact_phone": basics.phone ??= asText(value) || undefined; break;
       case "summary": if (asText(value)) summaries.push(asText(value)); break;

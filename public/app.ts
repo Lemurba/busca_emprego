@@ -140,7 +140,7 @@ const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Blo
 const readinessTone: Record<string, string> = { ready: "teal", blocked: "red" };
 const profileStatusLabels: Record<string, string> = { confirmed: "Confirmado", draft: "Rascunho", needs_review: "Em revisão" };
 const factTypeLabels: Record<string, string> = {
-  name: "Nome", contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link profissional", summary: "Resumo", skills: "Habilidades", skill: "Habilidade",
+  name: "Nome", full_name: "Nome completo", target_role: "Cargo-alvo", contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link profissional", summary: "Resumo", skills: "Habilidades", skill: "Habilidade",
   experience: "Experiência", education: "Formação", languages: "Idiomas", certifications: "Certificações", projects: "Projetos", role: "Cargo", seniority: "Senioridade", location: "Localização",
   accepted_locations: "Locais aceitos", work_models: "Modelos de trabalho aceitos", work_authorization: "Autorização de trabalho", years_experience: "Anos de experiência"
 };

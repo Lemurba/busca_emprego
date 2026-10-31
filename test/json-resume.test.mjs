@@ -11,7 +11,7 @@ import { openDb } from "../src/db/connection.ts";
 import { migrate } from "../src/db/migrate.ts";
 import { MIGRATIONS } from "../src/db/migrations/index.ts";
 import { mapContentToWork } from "../src/db/profile-import.ts";
-import { isIsoPartialDate, jsonResumeToFacts, validateJsonResume } from "../src/json-resume.ts";
+import { factsToJsonResume, isIsoPartialDate, jsonResumeToFacts, validateJsonResume } from "../src/json-resume.ts";
 import { openTempStore, useTempDb } from "./helpers/temp-db.mjs";
 
 const sample = JSON.parse(readFileSync(new URL("./fixtures/json-resume-sample.json", import.meta.url), "utf8"));
@@ -63,6 +63,18 @@ describe("schema e mapeamento", () => {
     const { work, unmapped } = mapContentToWork(content, works);
     assert.deepEqual(work.map((item) => item.highlights), [["Successfully won Techcrunch Disrupt", "Led the compression team"], ["Prototyped middle-out"], ["fato Raviga"]]);
     assert.deepEqual(unmapped, ["University of Oklahoma"]);
+  });
+
+  test("nome e cargo-alvo vindos do PDF ou da entrevista vão para basics na exportação", () => {
+    const doc = factsToJsonResume([
+      { type: "full_name", value: "Maria Souza", state: "confirmed" },
+      { type: "target_role", value: "Engenheira de Software", state: "confirmed" },
+      { type: "contact_email", value: "m@example.com", state: "confirmed" },
+    ]);
+    assert.equal(doc.basics.name, "Maria Souza");
+    assert.equal(doc.basics.label, "Engenheira de Software");
+    assert.equal(doc.basics.email, "m@example.com");
+    assert.equal(factsToJsonResume([{ type: "target_role", value: ["Analista", "Engenheiro"] }]).basics.label, "Analista, Engenheiro");
   });
 });
 
