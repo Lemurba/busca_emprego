@@ -1,4 +1,5 @@
 /** Contratos da verificação de vaga aberta (#33). Determinística, sem LLM. */
+import type { FetchLike, LookupAll } from "../safe-http.js";
 
 export type LivenessStatus = "open" | "closed" | "unknown";
 
@@ -12,11 +13,8 @@ export interface LivenessResult {
   evidence: Record<string, unknown>;
 }
 
-/** Endereço resolvido (formato de `dns.lookup(..., { all: true })`). */
-export interface ResolvedAddress { address: string; family: number }
-export type LookupAll = (hostname: string) => Promise<ResolvedAddress[]>;
-/** Mesmo contrato do `fetch` global; injetável para testes (fixtures locais). */
-export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+/** Contratos do transporte seguro compartilhado (src/safe-http.ts); `fetch` é injetável em testes. */
+export type { FetchLike, LookupAll, ResolvedAddress } from "../safe-http.js";
 
 export interface LivenessDeps {
   /** Transporte HTTP. Padrão: node:https com DNS fixado nos IPs já validados como públicos. */

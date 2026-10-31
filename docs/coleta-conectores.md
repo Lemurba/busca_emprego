@@ -73,12 +73,17 @@ Com `--quiet`, o script não escreve nada quando não há vaga nova nem falha (t
 `src/connectors/http.ts`:
 
 - toda URL (inclusive cada redirecionamento, seguido manualmente) passa por
-  `assertResolvablePublicHttpsUrl` — só HTTPS público, sem credenciais e sem DNS para rede privada;
+  `assertPublicHttpsUrl` — só HTTPS público, sem credenciais e sem IP privado literal;
+- o transporte é o cliente seguro único de `src/safe-http.ts` (o mesmo da verificação de vaga
+  aberta): o host é resolvido **uma vez**, qualquer IP privado/loopback/link-local recusa a
+  requisição e a conexão vai só para os IPs validados, sem nova consulta ao DNS (sem DNS rebinding);
 - `User-Agent` identificável: `RadarDeVagas/0.2 (+coleta determinística; <contato>)`, com o contato
   em `RADAR_CONNECTOR_CONTACT`;
 - um worker por domínio, com intervalo mínimo entre requisições; o atraso **dobra a cada 429/503**
   (respeita `Retry-After`, teto de 60 s) e cai pela metade a cada resposta boa;
-- teto de requisições por execução, corpo máximo de 5 MB, timeout por requisição.
+- teto de requisições por execução, timeout por requisição (vale também para a leitura do corpo) e
+  corpo máximo de 5 MB, conferido **durante** a leitura em streaming (`content-length` acima do
+  limite é recusado sem ler nada; um corpo maior que o declarado é cortado no limite e recusado).
 
 ## Limites da execução
 

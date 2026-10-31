@@ -4,7 +4,7 @@
  * Nenhuma chamada a LLM. Na dúvida o resultado é `unknown` e a vaga não é fechada.
  */
 import { ATS_ADAPTERS, checkPage } from "./adapters.js";
-import { createHttpsFetch, defaultLookup, LIVENESS_MAX_BYTES, LIVENESS_MAX_REDIRECTS, LIVENESS_TIMEOUT_MS } from "./http.js";
+import { defaultLookup, LIVENESS_MAX_BYTES, LIVENESS_MAX_REDIRECTS, LIVENESS_TIMEOUT_MS, pinnedHttpsFetch } from "./http.js";
 import type { LivenessDeps, LivenessJob, LivenessResult } from "./types.js";
 
 export type { LivenessDeps, LivenessJob, LivenessResult, LivenessStatus } from "./types.js";
@@ -32,7 +32,7 @@ export async function checkJobLiveness(job: LivenessJob, deps: LivenessDeps = {}
   const resolved = {
     ...deps,
     lookup,
-    fetch: deps.fetch ?? createHttpsFetch(lookup),
+    fetch: deps.fetch ?? pinnedHttpsFetch,
     now: deps.now ?? Date.now,
     timeoutMs: deps.timeoutMs ?? LIVENESS_TIMEOUT_MS,
     maxBytes: deps.maxBytes ?? LIVENESS_MAX_BYTES,

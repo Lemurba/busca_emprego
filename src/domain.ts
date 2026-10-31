@@ -1,7 +1,6 @@
 /** Deterministic domain rules from the production SDD. No persistence or I/O. */
 
 import { isIP } from "node:net";
-import { lookup } from "node:dns/promises";
 import { DomainError } from "./errors.js";
 
 /** Campo inválido: sempre 422, com `field` nos detalhes e mensagem pt-BR segura. */
@@ -108,16 +107,6 @@ export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly st
 /** true só para URL https: válida (o executor recusa qualquer outra). */
 export function isHttpsUrl(input: string | null | undefined): boolean {
   try { return new URL(String(input ?? "").trim()).protocol === "https:"; } catch { return false; }
-}
-
-/** Resolves every address to avoid accepting a public hostname that points at LAN. */
-export async function assertResolvablePublicHttpsUrl(input: string, allowedDomains?: readonly string[]): Promise<URL> {
-  const url = assertPublicHttpsUrl(input, allowedDomains);
-  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some(({ address }) => isPrivateDestination(address))) {
-    throw new DomainValidationError("Destino DNS privado não permitido", "url");
-  }
-  return url;
 }
 
 /**

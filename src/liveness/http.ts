@@ -3,17 +3,16 @@
  *
  * Travas, em toda URL e em todo salto de redirecionamento:
  * - `assertPublicHttpsUrl` (HTTPS, sem credenciais, sem localhost/IP privado literal);
- * - DNS: todos os IPs resolvidos precisam ser públicos (e o transporte padrão conecta só
- *   nesses IPs, fixando o lookup, para não sofrer DNS rebinding entre a checagem e a conexão);
+ * - DNS: o host é resolvido uma vez, todos os IPs precisam ser públicos e o transporte padrão
+ *   conecta só nesses IPs, sem nova consulta (DNS fixado contra rebinding; ver src/safe-http.ts);
  * - no máximo 3 redirecionamentos, seguidos manualmente;
- * - 10 s de tempo total e corpo cortado em 2 MB (lido em streaming);
+ * - 10 s de tempo total (DNS, conexão e leitura) e corpo cortado em 2 MB (lido em streaming);
  * - User-Agent identificado e no máximo 1 requisição por segundo por host.
  */
-import { lookup as dnsLookup } from "node:dns/promises";
-import { request } from "node:https";
-import { Readable } from "node:stream";
-import { assertPublicHttpsUrl, isPrivateDestination } from "../domain.js";
-import type { FetchLike, LookupAll, ResolvedAddress } from "./types.js";
+import { assertPublicHttpsUrl } from "../domain.js";
+import { readBodyCapped, safeFetch, SafeHttpError, type FetchLike, type LookupAll, type SafeHttpErrorKind } from "../safe-http.js";
+
+export { assertPublicResolution, defaultLookup, pinnedHttpsFetch, pinnedLookup } from "../safe-http.js";
 
 export const LIVENESS_USER_AGENT = "RadarVagas/1.0 (+verificação de vaga)";
 export const LIVENESS_TIMEOUT_MS = 10_000;
@@ -21,71 +20,10 @@ export const LIVENESS_MAX_BYTES = 2 * 1024 * 1024;
 export const LIVENESS_MAX_REDIRECTS = 3;
 export const LIVENESS_HOST_INTERVAL_MS = 1_000;
 
-export type LivenessFetchErrorKind = "refused" | "network" | "timeout" | "too_many_redirects";
-
-export class LivenessFetchError extends Error {
-  constructor(readonly kind: LivenessFetchErrorKind, message: string, readonly url?: string) {
-    super(message);
-    this.name = "LivenessFetchError";
-  }
-}
-
-export const defaultLookup: LookupAll = async (hostname) => (await dnsLookup(hostname, { all: true, verbatim: true })) as ResolvedAddress[];
-
-/** Rejeita o host se algum IP resolvido for privado/loopback/link-local (ou se não resolver). */
-export async function assertPublicResolution(hostname: string, lookup: LookupAll): Promise<ResolvedAddress[]> {
-  let addresses: ResolvedAddress[];
-  try {
-    addresses = await lookup(hostname.replace(/^\[|\]$/gu, ""));
-  } catch {
-    throw new LivenessFetchError("network", "Não foi possível resolver o host.");
-  }
-  if (!addresses.length || addresses.some(({ address }) => isPrivateDestination(address))) {
-    throw new LivenessFetchError("refused", "Destino DNS privado não permitido.");
-  }
-  return addresses;
-}
-
-/** `lookup` para net/https que só entrega IPs públicos (o mesmo filtro da checagem prévia). */
-export function guardedLookup(lookup: LookupAll) {
-  return (hostname: string, options: { all?: boolean; family?: number } | number | undefined, callback: (...args: unknown[]) => void) => {
-    const opts = typeof options === "object" && options ? options : {};
-    assertPublicResolution(hostname, lookup).then((addresses) => {
-      if (opts.all) { callback(null, addresses); return; }
-      const first = addresses.find((item) => !opts.family || item.family === opts.family) ?? addresses[0]!;
-      callback(null, first.address, first.family);
-    }, (error: unknown) => callback(error));
-  };
-}
-
-/** Transporte padrão: node:https com lookup protegido; devolve um `Response` padrão sem seguir redirects. */
-export function createHttpsFetch(lookup: LookupAll = defaultLookup): FetchLike {
-  return (url, init) => new Promise<Response>((resolvePromise, reject) => {
-    const target = new URL(url);
-    if (target.protocol !== "https:") { reject(new LivenessFetchError("refused", "A URL deve usar HTTPS")); return; }
-    const headers = Object.fromEntries(new Headers(init.headers).entries());
-    const req = request(target, { method: "GET", headers, lookup: guardedLookup(lookup) as never, signal: init.signal ?? undefined }, (res) => {
-      const status = res.statusCode ?? 0;
-      const responseHeaders = new Headers();
-      for (const [key, value] of Object.entries(res.headers)) {
-        if (value == null) continue;
-        if (Array.isArray(value)) for (const item of value) responseHeaders.append(key, item);
-        else responseHeaders.set(key, String(value));
-      }
-      if (status < 200 || status > 599) { res.destroy(); reject(new LivenessFetchError("network", "Status HTTP inválido.")); return; }
-      const nullBody = [204, 205, 304].includes(status);
-      if (nullBody) res.resume();
-      try {
-        resolvePromise(new Response(nullBody ? null : Readable.toWeb(res) as ReadableStream, { status, headers: responseHeaders }));
-      } catch (error) {
-        res.destroy();
-        reject(error);
-      }
-    });
-    req.on("error", reject);
-    req.end();
-  });
-}
+export type LivenessFetchErrorKind = SafeHttpErrorKind;
+/** Os erros da verificação são os do transporte seguro compartilhado (src/safe-http.ts). */
+export const LivenessFetchError = SafeHttpError;
+export type LivenessFetchError = SafeHttpError;
 
 /** Espaçamento mínimo por host dentro do processo (fila simples por host). */
 export class HostRateLimiter {
@@ -104,7 +42,8 @@ export class HostRateLimiter {
 export const defaultRateLimiter = new HostRateLimiter();
 
 export interface SafeGetOptions {
-  fetch: FetchLike;
+  /** Transporte; padrão: node:https com DNS fixado (`pinnedHttpsFetch`). */
+  fetch?: FetchLike;
   lookup: LookupAll;
   timeoutMs: number;
   maxBytes: number;
@@ -135,41 +74,6 @@ function assertSafeUrl(input: string): URL {
   }
 }
 
-async function readCapped(response: Response, maxBytes: number): Promise<{ body: string; truncated: boolean }> {
-  if (!response.body) return { body: "", truncated: false };
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  let truncated = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (total + value.byteLength > maxBytes) {
-      chunks.push(value.subarray(0, maxBytes - total));
-      total = maxBytes;
-      truncated = true;
-      await reader.cancel().catch(() => undefined);
-      break;
-    }
-    chunks.push(value);
-    total += value.byteLength;
-  }
-  const buffer = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
-  return { body: new TextDecoder("utf-8", { fatal: false }).decode(buffer), truncated };
-}
-
-/** A resolução DNS também respeita o tempo total da verificação. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal, url: string): Promise<T> {
-  if (signal.aborted) return Promise.reject(new LivenessFetchError("timeout", "Tempo esgotado.", url));
-  return new Promise<T>((resolvePromise, reject) => {
-    const onAbort = () => reject(new LivenessFetchError("timeout", "Tempo esgotado.", url));
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(resolvePromise, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
-
 /** GET com todas as travas; lança LivenessFetchError (nunca devolve conteúdo de destino recusado). */
 export async function safeGet(input: string, options: SafeGetOptions): Promise<SafeResponse> {
   const controller = new AbortController();
@@ -180,19 +84,18 @@ export async function safeGet(input: string, options: SafeGetOptions): Promise<S
   try {
     for (let hop = 0; ; hop += 1) {
       const url = assertSafeUrl(current);
-      await untilAborted(assertPublicResolution(url.hostname, options.lookup), controller.signal, url.href);
       await limiter.wait(url.hostname);
       if (controller.signal.aborted) throw new LivenessFetchError("timeout", "Tempo esgotado.", url.href);
       let response: Response;
       try {
-        response = await options.fetch(url.href, {
+        // Resolve uma vez, recusa IP privado e entrega ao transporte só os IPs validados.
+        response = await safeFetch(url, {
           method: "GET",
-          redirect: "manual",
           headers: { "user-agent": LIVENESS_USER_AGENT, accept: options.accept ?? "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5" },
           signal: controller.signal
-        });
+        }, { fetch: options.fetch, lookup: options.lookup });
       } catch (error) {
-        if (error instanceof LivenessFetchError) throw error;
+        if (error instanceof SafeHttpError) throw new LivenessFetchError(error.kind, error.message, error.url ?? url.href);
         if (controller.signal.aborted) throw new LivenessFetchError("timeout", "Tempo esgotado.", url.href);
         throw new LivenessFetchError("network", "Falha de rede.", url.href);
       }
@@ -208,7 +111,8 @@ export async function safeGet(input: string, options: SafeGetOptions): Promise<S
       }
       let read: { body: string; truncated: boolean };
       try {
-        read = await readCapped(response, options.maxBytes);
+        const capped = await readBodyCapped(response, options.maxBytes, { onLimit: "truncate", signal: controller.signal });
+        read = { body: new TextDecoder("utf-8", { fatal: false }).decode(capped.bytes), truncated: capped.truncated };
       } catch {
         throw new LivenessFetchError(controller.signal.aborted ? "timeout" : "network", "Falha ao ler a resposta.", url.href);
       }
