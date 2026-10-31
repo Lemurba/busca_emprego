@@ -12,8 +12,28 @@ export function openDb(path: string): DatabaseSync {
   // busy_timeout vem primeiro: trocar o journal_mode de um banco novo também disputa lock
   // quando o dashboard e o servidor MCP oficial (processos distintos, mesmo RADAR_DB_PATH)
   // sobem ao mesmo tempo. Depois disso o WAL segue seguro para escritas concorrentes.
-  db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
+  db.exec("PRAGMA busy_timeout = 5000;");
+  setWalMode(db);
+  db.exec("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
   return db;
+}
+
+/**
+ * Liga o WAL tolerando a corrida de dois processos abrindo um banco novo: a troca de
+ * journal_mode pode devolver SQLITE_BUSY sem passar pelo busy_timeout, então tenta de novo
+ * por até ~5 s (visto na CI no teste de migração concorrente).
+ */
+function setWalMode(db: DatabaseSync): void {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL;");
+      return;
+    } catch (error) {
+      if ((error as { errcode?: number }).errcode !== 5 || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }
 
 export type TxMode = "IMMEDIATE" | "EXCLUSIVE";
