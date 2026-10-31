@@ -62,7 +62,7 @@ Use uma cópia por release, com responsável, data, commit e links de evidência
 ## Hermes
 
 - [ ] Skill `radar-vagas` carregada (`hermes skills trust` ou pacote `hermes/plugin` habilitado — não os dois)
-- [ ] Um `mcp_servers.radar-vagas-<papel>` por papel (coordenador, coleta, currículo, executor) com `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID` (coordenador/executor), `tools.include` e `trust: untrusted`; `hermes mcp test radar-vagas-<papel>` verde nos quatro
+- [ ] Um `mcp_servers.radar-vagas-<papel>` por papel (coordenador, coleta, currículo, executor) com `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID` (coordenador/executor), `RADAR_API_URL` e `RADAR_INTERNAL_SERVICE_TOKEN` por referência (sem `RADAR_DB_PATH`, #10), `tools.include` e `trust: untrusted`; `hermes mcp test radar-vagas-<papel>` verde nos quatro
 - [ ] `browser.cdp_url` aponta para o Chrome do serviço; nenhum navegador paralelo para candidatura
 - [ ] Watchdog `radar-watchdog.sh` instalado em `/opt/data/scripts` e agendado com `hermes cron create ... --no-agent`; silencioso com o app no ar
 

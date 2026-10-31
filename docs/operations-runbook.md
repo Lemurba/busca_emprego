@@ -7,12 +7,12 @@ Para uma instalação nova, siga primeiro [`ops/hermes/ONBOARDING.md`](../ops/he
 ## 1. Premissas e topologia suportada
 
 - Uma única instância HTTP do Radar por arquivo SQLite. Dois servidores jamais devem abrir o mesmo `RADAR_DB_PATH` por volume compartilhado.
-- Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI usa Node 24).
+- Node.js 22.16 ou superior no container Hermes (`node:sqlite`; a CI roda em Node 22.16 e 24).
 - Código e dados no volume persistente `/opt/data` (padrão `/opt/data/dashboard/busca_emprego`, banco em `data/radar.sqlite`); `/opt/hermes` é do root e somente leitura na imagem oficial.
 - Porta canônica 8787, escutando em `RADAR_BIND_HOST` (padrão `127.0.0.1`). Uma instalação pode trocar a porta em `.env.local`. Não publicar diretamente na internet.
 - Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`). Interesse, `APROVO`, candidatura, `AUTORIZO`, revogação e demais portões humanos exigem a sessão e respondem `403 human_session_required` ao token de serviço.
 - O processo roda como serviço s6 do container (`ops/hermes/radar-s6-run.sh`) com **usuário Unix dedicado** (`s6-setuidgid radar`), nunca com o usuário do Hermes, recriado a cada boot por um gateway hook do Hermes.
-- `.env.local`, o banco (`radar.sqlite`, `-wal`, `-shm`) e os backups pertencem a `radar` com modo `600` (diretórios `700`); o `hermes` não os lê. `radar-s6-run.sh` recusa subir com `.env.local` fora do modo 600 e usa `umask 077`. Pendente: o MCP ainda abre o SQLite diretamente (ver `ops/hermes/ONBOARDING.md` §5). `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
+- `.env.local`, o banco (`radar.sqlite`, `-wal`, `-shm`) e os backups pertencem a `radar` com modo `600` (diretórios `700`); o `hermes` não os lê. `radar-s6-run.sh` recusa subir com `.env.local` fora do modo 600 e usa `umask 077`. O servidor MCP não abre o SQLite (#10): roda como `hermes` e fala com a API do dashboard pelo token de serviço (ver `ops/hermes/ONBOARDING.md` §5), então o dashboard é o único processo que grava no banco. `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
 
 O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node recebe os sinais do supervisor. Não execute o Node desacoplado em background no entrypoint.
 
@@ -27,7 +27,7 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_INTERNAL_SERVICE_TOKEN` | sim | 32 bytes aleatórios; header `x-radar-service-token`; nunca imprimir |
 | `RADAR_DASHBOARD_TOKEN` | sim | trocado por cookie de sessão em `/auth`; link via `scripts/ops/dashboard-link.mjs` |
 | `RADAR_OPERATOR_ID` | sim | pessoa responsável (auditoria) |
-| `RADAR_PROJECT_ID` | não | projeto (tenant) do servidor HTTP e do MCP; padrão `busca-emprego` |
+| `RADAR_PROJECT_ID` | não | projeto (tenant) do servidor HTTP; padrão `busca-emprego`. Todas as listagens e escritas usam só esse projeto; ao subir com um projeto novo, as fontes e os agentes padrão são semeados para ele. O MCP não o lê: usa o projeto do dashboard pela API |
 | `RADAR_DB_PATH` | sim | caminho absoluto em `/opt/data`, modo 0600 |
 | `RADAR_BACKUP_DIR` | recomendado | fora do diretório do banco; copiar para destino externo criptografado |
 | `RADAR_LOG_DIR` | não | padrão `/opt/data/logs` |
@@ -40,6 +40,16 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_BROWSER_VIEWER_URL` | não | visualizador remoto do navegador, se existir |
 | `GEOAPIFY_API_KEY` | não implementado | o mapa usa tiles do OpenStreetMap |
 
+Servidores MCP (no `/opt/data/.env` do Hermes, repassados pelo `env` de cada `mcp_servers.radar-vagas-<papel>`; não vão no `.env.local`):
+
+| Nome | Obrigatório | Observação |
+| --- | --- | --- |
+| `RADAR_API_URL` | não | API do dashboard; padrão `http://127.0.0.1:PORT` (8787). Com `RADAR_BASE_PATH`, chame o loopback sem o prefixo ou inclua-o na URL |
+| `RADAR_INTERNAL_SERVICE_TOKEN` | sim | mesmo valor do `.env.local`; sem ele as ferramentas respondem `internal_token_not_configured` |
+| `RADAR_FORWARDED_PROTO` | não | `https` quando o dashboard roda com `RADAR_TRUST_PROXY_TLS=true` (senão a API responde 426); defina no `.env` (vazio sem proxy TLS), pois o `env` de cada servidor a repassa por referência. Outro valor que não `http`/`https` é ignorado |
+| `RADAR_MCP_ROLE` / `RADAR_MCP_AGENT_ID` | sim / por papel | papel do processo e agente fixo (coordenador e executor exigem) |
+| `RADAR_DB_PATH` | não | não declare: o MCP não abre o banco. Só registra o heartbeat do restore (§5) quando definido e gravável |
+
 O bot token do Telegram fica só no `.env` do Hermes. Logins de portais ficam no cofre do Hermes (`hermes vault add`). `.env*` é ignorado pelo Git.
 
 ## 3. Instalação ou atualização
@@ -47,7 +57,7 @@ O bot token do Telegram fica só no `.env` do Hermes. Logins de portais ficam no
 Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver proxy TLS, `nginx-radar.conf.example`. `RADAR_OPERATOR_ID` identifica a pessoa responsável pela instalação e é obrigatório.
 
 1. Criar release imutável a partir de commit identificado; registrar o SHA.
-2. Dentro do release, executar `npm ci`, `npm run build`, `npm test` (inclui `test/ops.test.mjs` e `test/migrations.test.mjs`) e `npm run test:e2e`.
+2. Dentro do release, executar `npm ci`, `npm run build`, `npm test` (inclui `test/ops.test.mjs` e `test/migrations.test.mjs`) e `npm run test:e2e`. `npm run migrate` aplica as migrações e as sementes do projeto sem subir o dashboard (o `dist/src/server.js` também faz isso ao iniciar).
 3. Se já existir uma instalação, executar backup do banco atual:
 
    ```bash
@@ -65,14 +75,14 @@ Use `ops/hermes/radar.env.example`, `ops/hermes/radar-s6-run.sh` e, se houver pr
    node scripts/ops/health-check.mjs
    ```
 
-6. Gerar o link de sessão como `radar` (`s6-setuidgid radar node scripts/ops/dashboard-link.mjs --send`), abrir o dashboard pelo link recebido e criar uma vaga sintética removível. Confirmar que `/api/bootstrap` sem cookie nem token responde 401, que `POST /api/jobs/<id>/decision` só com o token de serviço responde 403 e que `ls -l .env.local data/` mostra dono `radar` e modo 600.
+6. Gerar o link de sessão como `radar` (`s6-setuidgid radar node scripts/ops/dashboard-link.mjs --send`), abrir o dashboard pelo link recebido e conferir que as páginas carregam (sem criar vagas ou perfis fictícios: o banco de produção só recebe dados reais). Confirmar que `/api/bootstrap` sem cookie nem token responde 401, que `POST /api/jobs/<id>/decision` só com o token de serviço responde 403 e que `ls -l .env.local data/` mostra dono `radar` e modo 600.
 7. Executar `RADAR_PUBLIC_URL=<url do dashboard> node scripts/ops/verify-environment.mjs --environment production`. O verificador aceita HTTP somente em endereço privado/localhost.
 8. Verificar o Telegram do gateway do Hermes (`TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL`): `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e `node scripts/ops/notify-human-questions.mjs` (simulação; `--send` entrega via `hermes send`).
 9. Executar os cenários BDD obrigatórios e anexar evidências ao release. Não ativar agendamentos ou candidatura automática com falhas, skips ou gates sem aprovação registrada.
 
 ### Publicação e rollback de agentes
 
-Editar um agente cria uma versão `draft`; a versão publicada continua governando novas execuções. Publique com `POST /api/agents/{id}/publish` e `version_id`. Rollback usa `POST /api/agents/{id}/rollback`, clona o snapshot escolhido como uma nova versão monotônica e a publica, preservando toda a auditoria. Nunca altere `config_json` diretamente no SQLite.
+Editar um agente cria uma versão `draft`; a versão publicada continua governando novas execuções. No dashboard, "Publicar" abre a revisão: diferença campo a campo contra a versão publicada e a origem do rascunho (você, proposta do coordenador ou automação); proposta que não é sua só é publicada depois de marcar "Revisei as mudanças", e pode ser descartada. Pela API, publique com `POST /api/agents/{id}/publish`, `version_id` e o `checksum` de `GET /api/agents/{id}/versions/{versionId}/diff`. Rollback usa `POST /api/agents/{id}/rollback`, clona o snapshot escolhido como uma nova versão monotônica e a publica, preservando toda a auditoria. Nunca altere `config_json` diretamente no SQLite.
 
 ### Fontes e credenciais
 
@@ -101,7 +111,7 @@ node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref cnh 
 
 **Limite diário:** padrão de 5 envios automáticos por dia (America/Sao_Paulo), contados no envio final; opcionalmente também por ATS. Atingido o limite (no pedido de confirmação ou no envio), a rota responde 429 `application.daily_limit_reached`, a autorização é revogada e a candidatura volta para revisão. Ajuste no painel ou com `node scripts/ops/automation.mjs limit <n>` / `ats-limit <n|none>`.
 
-**Kill-switch ("pausar e manter"):** no painel (Automação de candidaturas → Pausar) ou `node scripts/ops/automation.mjs off`. Vale na hora para o dashboard e para o servidor MCP (ambos releem o SQLite a cada verificação): autorizar, reservar, pedir/confirmar a confirmação final e enviar respondem 403 `AUTOMATION_DISABLED`. Autorizações emitidas continuam (com o TTL) e voltam a poder ser reservadas ao religar (`automation.mjs on`). Execuções já reservadas mantêm a reserva, vão para `needs_review` com a etapa "Automação pausada (kill-switch)" e perdem qualquer confirmação final; ao religar voltam ao mesmo executor, que precisa pedir nova confirmação. `fail` continua permitido durante a pausa. `RADAR_AUTO_APPLICATION_ENABLED` segue como teto: diferente de `true`, tudo fica desligado independentemente do painel.
+**Kill-switch ("pausar e manter"):** no painel (Automação de candidaturas → Pausar) ou `node scripts/ops/automation.mjs off`. Vale na hora para o dashboard e para o servidor MCP (o dashboard relê o SQLite a cada verificação e o MCP passa pela API): autorizar, reservar, pedir/confirmar a confirmação final e enviar respondem 403 `AUTOMATION_DISABLED`. Autorizações emitidas continuam (com o TTL) e voltam a poder ser reservadas ao religar (`automation.mjs on`). Execuções já reservadas mantêm a reserva, vão para `needs_review` com a etapa "Automação pausada (kill-switch)" e perdem qualquer confirmação final; ao religar voltam ao mesmo executor, que precisa pedir nova confirmação. `fail` continua permitido durante a pausa. `RADAR_AUTO_APPLICATION_ENABLED` segue como teto: diferente de `true`, tudo fica desligado independentemente do painel.
 
 Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `--evidence-ref` observado no portal o envio não é confirmado; URL observada diferente da autorizada (mesma canonicalização do app) aborta a execução — nesse caso use `ask` para revisão humana; `fail` grava apenas o código do motivo (nada de conteúdo de página, token ou URL com credencial). Pergunta humana criada com `ask` pausa a candidatura e é entregue por `notify-human-questions.mjs`.
 
@@ -124,20 +134,40 @@ Antes de habilitar os agentes, confirmar operador, canal de incidente, release a
 **Vaga viva (revalidação sem LLM, #33):** `hermes/cron/radar-liveness.sh` é copiado para o mesmo diretório de scripts e registrado com `hermes cron create "every 6h" --no-agent --script radar-liveness.sh --deliver telegram --name radar-liveness`. Ele roda `scripts/ops/check-liveness.mjs --report`, que lista as vagas pendentes em `GET /api/liveness/due` (token interno; interesse/candidatura em preparo a cada 6 h, demais abertas/desconhecidas a cada 48 h), pede `POST /api/jobs/{id}/check-liveness` para cada uma (em sequência, 1 s entre vagas do mesmo host). Vaga encerrada expira na hora; a expiração por prazo segue com o timer do servidor e `radar-expire-jobs.sh` (não há cron duplicado). Só escreve no Telegram quando alguma vaga foi encerrada na fonte. Diagnóstico manual: `node scripts/ops/check-liveness.mjs --dry-run` (lista sem verificar) e `--limit N`.
 
 - A verificação é feita pelo servidor do Radar, determinística: API pública do Greenhouse (`boards-api.greenhouse.io`), Lever (`api.lever.co`) e Ashby (`api.ashbyhq.com`, vaga ausente do quadro = fechada); Gupy e demais páginas por HTTP 404/410, JSON-LD `JobPosting.validThrough` e marcadores de encerramento ("vaga encerrada", "no longer accepting applications"...). Redirect para listagem, erro de rede, destino recusado ou sinais conflitantes resultam em `unknown` — a vaga **nunca** é fechada na dúvida.
-- Travas de saída: só HTTPS público, todo IP resolvido precisa ser público (o transporte conecta só nesses IPs), no máximo 3 redirects (cada salto revalidado), 10 s, corpo cortado em 2 MB, User-Agent `RadarVagas/1.0 (+verificação de vaga)` e 1 req/s por host.
+- Travas de saída: só HTTPS público, todo IP resolvido precisa ser público (DNS resolvido uma vez e o transporte conecta só nesses IPs; cliente único em `src/safe-http.ts`, compartilhado com os conectores), no máximo 3 redirects (cada salto revalidado), 10 s, corpo cortado em 2 MB, User-Agent `RadarVagas/1.0 (+verificação de vaga)` e 1 req/s por host.
 - Vaga fechada pela verificação segue o mesmo caminho de "fechada pela fonte" (expira se não houver candidatura em andamento) e não entra mais na avaliação de compatibilidade (`radar_record_score` → `job.closed`).
 - **AUTORIZO** exige a vaga confirmada aberta nas últimas 24 h (`job.liveness.stale`, HTTP 422) por uma verificação do próprio Radar ou por confirmação manual do usuário na sessão do dashboard; `opening_status` gravado por agente, ingestão ou token de serviço não vale como prova. No dashboard, use "Verificar agora" no detalhe da vaga ou no diálogo de autorização. Quando a página não dá sinal determinístico (`unknown`), o usuário pode confirmar manualmente editando a vaga (estado aberta + data da verificação).
 - Repostagem: na ingestão a descrição recebe um SimHash de 64 bits; vaga da mesma empresa, título ≥ 0,92 e descrição a ≤ 6 bits de uma anterior mais antiga (inclusive arquivada/fechada) é registrada em `job_reposts`. A deduplicação exata/multi-chave (`dedup_key`, `description_hash`) continua juntando a mesma vaga numa só; quando essa vaga revista chega com data de publicação ao menos 7 dias mais nova que a última conhecida, a republicação também conta como repostagem. O cartão mostra "Repostada N vezes desde dd/mm/aaaa"; não há penalidade fixa — o motivo de feedback "Vaga repostada" alimenta a faceta `repost_bucket`, que só reduz o score se o usuário costuma rejeitar vagas repostadas.
 
 - verificar API, SQLite e volume com `health-check.mjs`;
 - verificar logs sem CV, tokens, URLs privadas ou conteúdo de prompts;
-- verificar fila/latência/falhas de fonte quando essas métricas forem implementadas;
-- executar uma busca controlada sem candidatura automática;
+- verificar filas, idade do backup e a última rodada em `GET /api/metrics` (painel “Saúde da instalação”); latência e falhas por fonte ainda não têm métrica;
+- concluir o primeiro uso (§4.1) e executar uma rodada controlada sem candidatura automática;
 - ligar a candidatura automática (`RADAR_AUTO_APPLICATION_ENABLED=true`) somente depois de Telegram entregando e `test/e2e/executor.test.mjs` verde; com o gate ligado, a fila autorizada exige o token interno e a vaga só é marcada como candidatada com evidência observável do portal.
+
+### 4.1 Primeiro uso (onboarding pelo painel)
+
+Uma instalação nova só busca vagas depois de dois portões humanos, ambos na sessão do dashboard. A sequência completa está no README ([Primeiro uso](../README.md#primeiro-uso-onboarding)); em resumo: link de sessão → PDF-base ou JSON Resume → revisão e **Confirmar perfil** → **Aceitar termos** e teste de acesso das fontes → **Iniciar rodada** → interesse e **Gerar currículo ATS** → `APROVO` → envio manual ou `AUTORIZO`.
+
+Diagnóstico quando o fluxo para:
+
+| Resposta | Onde aparece | O que fazer |
+| --- | --- | --- |
+| `403 human_session_required` | qualquer portão humano chamado com o token de serviço (Hermes, scripts) | É o comportamento esperado: a ação precisa ser feita pela pessoa no painel |
+| `409 profile.draft_exists` | criar perfil do PDF, importar JSON Resume, nova versão | Já há um rascunho: revise-o ou descarte-o em *Saúde das buscas* |
+| `422 PROFILE_FACTS_UNCONFIRMED` / `PROFILE_EMPTY` | Confirmar perfil | Revise as informações pendentes (ou confirme ao menos uma) |
+| `409 profile.draft_stale` | Confirmar perfil | O rascunho é mais velho que o perfil ativo: descarte e use **Criar nova versão** |
+| `422 BASE_RESUME_EXTRACTION_REQUIRED` | Gerar currículo ATS com perfil de PDF | O PDF-base não tem texto extraível (digitalizado como imagem); no painel, **Criar perfil a partir deste PDF** já fica desabilitado nesse caso. Use um PDF com texto ou um JSON Resume |
+| `422 PROFILE_CONFIRMATION_REQUIRED` | Iniciar rodada | Confirme o perfil antes |
+| `422 ROUND_NO_SOURCES` / `ROUND_SOURCES_NOT_READY` | Iniciar rodada | Nenhuma fonte ativa, ou nenhuma pronta: aceite os termos e teste o acesso em *Configurações* (o motivo de cada fonte aparece na coluna de prontidão) |
+| `422 source.smoke_test.company_required` | Testar acesso de um conector | Cadastre e ative uma empresa do conector em *Configurações* → *Empresas por conector* |
+| `422 PROFILE_SNAPSHOT_REQUIRED` | nota de aderência, Gerar currículo ATS | Sem perfil confirmado não há snapshot |
+| `409 resume.unverified_facts` | `APROVO` | Confirme, corrija ou remova cada afirmação pendente na checagem de fatos do currículo |
+| `422 job.liveness.stale` / `application.domain.not_ats` | `AUTORIZO` | Use “Verificar agora” na vaga; link fora de ATS de empresa só aceita envio manual |
 
 ## 5. Backup, retenção e restore
 
-`backup-sqlite.mjs` usa `VACUUM INTO`, valida a origem (`quick_check`) e o snapshot (`PRAGMA integrity_check`), aplica permissões 0600 e gera manifesto SHA-256.
+`backup-sqlite.mjs` usa `VACUUM INTO`, valida a origem (`quick_check`) e o snapshot (`PRAGMA integrity_check`), aplica permissões 0600 e gera manifesto SHA-256. Sem `--db`/`--out` nem `RADAR_DB_PATH`/`RADAR_BACKUP_DIR` no ambiente, usa os valores do `$RADAR_APP_DIR/.env.local` (caminhos relativos ao diretório do app), o mesmo arquivo que o serviço lê. Todos os scripts de `scripts/ops` leem o `.env.local` pelo mesmo módulo (`scripts/ops/lib/env-local.mjs`), sem `source`.
 
 ### Agendamento (cron sem LLM)
 
@@ -157,6 +187,8 @@ hermes cron create "every 24h" --no-agent --script radar-backup.sh \
 hermes cron run <job_id>      # primeira execução manual: stdout vazio = sucesso
 ```
 
+Para conferir sem abrir o diretório: `GET /api/metrics` devolve `backup.status` (`stale` depois de 36 h sem backup novo) e `backup.age_seconds`; o painel "Saúde da instalação" da página "Saúde das buscas" mostra o mesmo.
+
 Contrato igual ao do watchdog: sucesso é tick silencioso (`RADAR_BACKUP_NOTIFY_SUCCESS=true` avisa também os sucessos); qualquer falha (backup, teste de restore, criptografia, envio) chega no Telegram com as últimas linhas do resumo JSON. Para rodar à mão: `node scripts/ops/scheduled-backup.mjs` (uma linha JSON; código 1 em falha). Rotação e teste de restore também rodam isolados: `node scripts/ops/rotate-backups.mjs --dir DIR --dry-run` e `node scripts/ops/restore-test.mjs --dir DIR`.
 
 ### Cópia criptografada fora do host
@@ -172,13 +204,13 @@ Para restaurar de uma cópia off-host, decifre **fora do container** (ou traga a
 
 ### PDFs dos currículos
 
-Os PDFs de currículo-base ficam em `base_resumes.file_blob` (BLOB), não mais em base64 dentro de `file_data` (TEXT, 33% maior). A migração roda sozinha na primeira abertura do banco pela versão nova (dashboard ou MCP), em uma transação, e é idempotente; a API (`GET /api/base-resumes/{id}/file`) devolve os mesmos bytes. O espaço liberado volta a ser usado pelo SQLite; os backups (`VACUUM INTO`) já saem compactados.
+Os PDFs de currículo-base ficam em `base_resumes.file_blob` (BLOB), não mais em base64 dentro de `file_data` (TEXT, 33% maior). A migração roda sozinha na primeira abertura do banco pela versão nova (o dashboard; o MCP não abre o banco), em uma transação, e é idempotente; a API (`GET /api/base-resumes/{id}/file`) devolve os mesmos bytes. O espaço liberado volta a ser usado pelo SQLite; os backups (`VACUUM INTO`) já saem compactados.
 
 ### Restore
 
 Teste restore periodicamente em caminho/ambiente isolado (o backup agendado já faz isso a cada execução). Para restaurar o banco ativo:
 
-1. Parar o processo Radar e confirmar que `/api/health` não responde. Parar também o servidor MCP `radar-vagas` do Hermes (subprocesso stdio de vida longa, aberto pelo gateway): ele segura o inode antigo e continuaria gravando no arquivo substituído, e essas gravações se perderiam.
+1. Parar o processo Radar e confirmar que `/api/health` não responde. O servidor MCP `radar-vagas` do Hermes não abre o banco (#10): sem o dashboard as ferramentas falham fechadas (`radar_api.unavailable`). Mesmo assim, não deixe um executor no meio de uma candidatura durante a troca.
 2. Identificar explicitamente o arquivo de backup e seu manifesto adjacente (`.sqlite.json`). O restore confere formato, tamanho e SHA-256; backups legados sem manifesto exigem a opção explícita `--allow-missing-manifest` e validação por outro meio.
 3. Executar:
 
@@ -197,13 +229,13 @@ O restore recusa serviço HTTP ativo e exige confirmação literal, mas isso nã
 
 ### Processos abertos sobre o banco
 
-O dashboard e o servidor MCP gravam um heartbeat (a cada 15 s) em `<db>.processes/<papel>-<pid>.json` e removem o arquivo ao sair. O restore consulta esse registro, além do health check e da varredura de `/proc`:
+O dashboard grava um heartbeat (a cada 15 s) em `<db>.processes/<papel>-<pid>.json` e remove o arquivo ao sair. O servidor MCP só grava o seu quando recebe `RADAR_DB_PATH` (instalação antiga, com o MCP como `radar`); na configuração recomendada ele roda como `hermes`, sem acesso ao diretório do banco. O restore consulta esse registro, além do health check e da varredura de `/proc`:
 
 - dashboard registrado com heartbeat recente: recusa sempre (`service_process_registered`); pare o serviço;
-- servidor MCP ativo: recusa com `mcp_process_active` e a lista de PIDs. `--force` segue mesmo assim, com o aviso `mcp_process_active_forced` no stderr e `forced_with_mcp_active: true` no resultado; tudo que esse MCP gravar depois da troca se perde, então reinicie-o imediatamente;
+- servidor MCP registrado: recusa com `mcp_process_active` e a lista de PIDs. `--force` segue mesmo assim, com o aviso `mcp_process_active_forced` no stderr e `forced_with_mcp_active: true` no resultado; como o MCP só grava pela API, o risco é um executor em curso ver o estado mudar — reinicie-o depois da troca;
 - registros órfãos (heartbeat com mais de 60 s ou PID morto no mesmo host) são ignorados e podem ser apagados.
 
-Preferência de longo prazo (fora deste runbook): o MCP deixa de abrir o SQLite e passa a falar com o dashboard por HTTP com o token interno, tornando o dashboard o único escritor; aí o restore só precisa parar um processo.
+Desde #10 o MCP fala com o dashboard por HTTP com o token interno e o dashboard é o único escritor: o restore só precisa parar um processo.
 
 ## 6. Rollback
 
@@ -228,16 +260,16 @@ Não fazer downgrade de código sobre schema incompatível. O schema é versiona
 - **DB `quick_check` falha:** parar imediatamente, não executar reparo no original, copiar arquivos SQLite/sidecars para investigação e restaurar o último backup testado.
 - **disco quase cheio:** pausar coleta/escrita; liberar espaço apenas por política aprovada. Não excluir banco, WAL ou backups ad hoc.
 - **Geoapify indisponível/quota:** manter Kanban/lista; desabilitar mapa/geocoding e não inventar coordenadas.
-- **Telegram indisponível:** manter candidatura em `needs_review`; nunca usar resposta padrão nem submeter. Diagnostique o gateway com `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e reentregue com `node scripts/ops/notify-human-questions.mjs --send`. Pergunta em `delivery_failed` continua respondível na conversa e só é reenviada com `--retry-failed`, porque a rota de entrega marca uma única vez (`pending` → `delivered`).
+- **Telegram indisponível:** manter candidatura em `needs_review`; nunca usar resposta padrão nem submeter. Diagnostique o gateway com `node scripts/ops/telegram-diagnose.mjs` (não imprime segredo) e reentregue com `node scripts/ops/notify-human-questions.mjs --send`. Pergunta em `delivery_failed` pode ser respondida no dashboard (Saúde das buscas › Perguntas para você › Responder aqui) e só é reenviada com `--retry-failed`, porque a rota de entrega marca uma única vez (`pending` → `delivered`).
 - **possível vazamento de secret:** revogar no provedor, rotacionar no Hermes, revisar logs e auditoria; não imprimir o novo valor em teste.
 
 ## 8. Limitações operacionais conhecidas
 
-- `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume, mas ainda não mede filas/dependências.
+- `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume. `GET /api/metrics` (token interno ou sessão) mede idade do último backup, tamanho do banco, filas (perguntas abertas, enriquecimento, autorizações de envio) e a última rodada, mas não há alerta automático sobre esses números nem métricas de latência.
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
 - A API distingue apenas dois papéis (token interno e sessão do dashboard), sem escopos por rota. SQLite continua em instância única.
-- O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
+- `npm test` exige cobertura mínima de `src/` (50% de linhas, 52% de branches, 42% de funções), ainda abaixo dos 80% exigidos pelo SDD; o limite sobe conforme os testes entram.
 - As migrações são versionadas, mas não há rollback automático de schema (use o backup pré-deploy), alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
-- A anonimização legada permanece opt-in (`RADAR_RUN_LEGACY_ANONYMIZATION=true`) e deve ficar desabilitada em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.
+- A anonimização legada não roda mais na inicialização (importar `src/db.ts` não altera dados). Ela é um comando explícito: `RADAR_RUN_LEGACY_ANONYMIZATION=true node scripts/ops/anonymize-legacy.mjs --db CAMINHO` (sem a variável o script sai com código 2). Faça backup antes e não a use em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.
 
 Essas limitações são bloqueadores de produção, não exceções aceitas por este runbook.

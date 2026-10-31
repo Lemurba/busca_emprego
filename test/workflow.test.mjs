@@ -59,17 +59,25 @@ old.close();
 
 process.env.RADAR_DB_PATH = dbPath;
 process.env.RADAR_RUN_LEGACY_ANONYMIZATION = "true";
-// Banco legado sem schema_migrations: o baseline roda sobre ele ao importar.
+// Banco legado sem schema_migrations: o baseline roda sobre ele ao importar. A anonimização
+// legada não roda no import (TD-13); o teste a chama explicitamente.
 const store = await importStore("workflow");
 const { renderResumeFile } = await import("../src/resume-files.ts");
 after(() => {
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 });
 
 describe("Workflow, privacy migration, PDF library, and authorization checks", () => {
 
   test("migração de privacidade legada roda uma única vez", () => {
+    // TD-13: importar o módulo com a variável ligada não anonimiza nada (sem efeito colateral).
+    assert.equal(store.getJob("legacy-job").title, "Private role", "o import não pode anonimizar o banco");
+    const previous = process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
+    delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
+    assert.throws(() => store.runLegacyAnonymization(), /legacy_anonymization\.disabled/u, "sem a variável o comando recusa");
+    process.env.RADAR_RUN_LEGACY_ANONYMIZATION = previous;
+    assert.deepEqual(store.runLegacyAnonymization(), { applied: true, jobs: 1 });
     const first = store.getBootstrap();
     assert.equal(first.jobs.length, 1);
     assert.equal(first.jobs[0].id, "legacy-job", "job ID remains stable through anonymization");
@@ -83,8 +91,8 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(first.applications[0].auto_authorized_at, null);
     assert.equal(store.db.prepare("SELECT payload FROM audit_events").get().payload, '{"redacted":true}');
     assert.equal(store.db.prepare("SELECT agent_name FROM agent_runs").get().agent_name, "Agente");
-    store.getBootstrap();
-    assert.equal(store.getJob("legacy-job").title, "Vaga anonimizada 001", "the privacy migration runs only once");
+    assert.deepEqual(store.runLegacyAnonymization(), { applied: false, jobs: 0 }, "the privacy migration runs only once");
+    assert.equal(store.getJob("legacy-job").title, "Vaga anonimizada 001");
   });
 
   test("currículo base, interesse, aprovação e autorização automática", async () => {
@@ -99,8 +107,8 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(job.decision, "pending");
     const jobAudit = store.db.prepare("SELECT payload FROM audit_events WHERE entity_id = ? AND event_type = 'discovered'").get(job.id).payload;
     assert.equal(jobAudit.includes("Analyst"), false, "audit events store changed field names instead of vacancy details");
-    assert.throws(() => store.createResume({ job_id: job.id, title: "Too early" }), /interesse/i);
-    assert.throws(() => store.recordJobDecision(job.id, "interested", ""), /confirme/i);
+    assert.throws(() => store.createResume({ job_id: job.id, title: "Too early" }), /resume\.interest_required/);
+    assert.throws(() => store.recordJobDecision(job.id, "interested", ""), /decision\.confirmation_required/);
     store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
     const draft = store.createResume({ job_id: job.id, base_resume_id: uploaded.id, title: "ATS", status: "approved", content: "Reviewed content" });
     assert.equal(draft.status, "draft", "agent-created resumes cannot self-approve");
@@ -108,7 +116,7 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     const generatedDocx = await renderResumeFile(draft, "docx");
     assert.equal(generatedPdf.data.subarray(0, 5).toString("ascii"), "%PDF-");
     assert.equal(generatedDocx.data.subarray(0, 2).toString("ascii"), "PK");
-    assert.throws(() => store.approveResume(draft.id, ""), /APROVO/);
+    assert.throws(() => store.approveResume(draft.id, ""), /resume\.approval\.confirmation_required/);
     // SDD-ATS-003: every resume (manual included) needs an ATS review before APROVO.
     assert.throws(() => store.approveResume(draft.id, "APROVO"), /ATS_REVIEW_REQUIRED/);
     store.reviewResume(draft.id, { verdict: "pass" }, "test-reviewer");
@@ -118,19 +126,19 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(automatic.automation_mode, "assisted", "creation cannot self-authorize automation");
     assert.equal(automatic.status, "queued", "creation cannot register an unconfirmed submission");
     assert.equal(store.listAuthorizedApplications().length, 0);
-    assert.throws(() => store.updateApplication(automatic.id, { status: "not_a_status" }), /inválido/i);
+    assert.throws(() => store.updateApplication(automatic.id, { status: "not_a_status" }), /application\.status\.invalid/);
     assert.throws(() => store.updateApplication(automatic.id, { status: "in_progress" }), /claim/i);
-    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, ""), /AUTORIZO/);
+    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, ""), /application\.authorization\.confirmation_required/);
     assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /job\.liveness\.stale/, "AUTORIZO exige verificação recente de vaga aberta");
     markJobOpen(store, job.id);
     store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO");
     assert.equal(store.listAuthorizedApplications().length, 1);
     assert.equal(store.listAuthorizedApplications()[0].authorized_resume_version, store.listResumes().find((item) => item.id === draft.id).version);
-    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /já recebeu/i);
+    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /application\.authorization\.already_granted/);
     store.recordJobFeedback(job.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" });
     assert.equal(store.listAuthorizedApplications().length, 0, "withdrawing interest removes an automatic application from the queue");
     assert.equal(store.listApplications().find((item) => item.id === automatic.id).automation_mode, "assisted");
-    assert.throws(() => store.updateApplication(automatic.id, { status: "submitted" }), /autorização automática explícita/i);
+    assert.throws(() => store.updateApplication(automatic.id, { status: "submitted" }), /application\.submission\.manual_only/);
     store.transitionJob(job.id, { command: "reopen", expected_version: store.getJob(job.id).version, actor: "test", data: { reason: "Quero reconsiderar esta vaga." } });
     store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
     assert.equal(store.getJob(job.id).status, "ready_to_apply", "renewed interest restores the stage for its approved resume and existing application");
@@ -139,8 +147,8 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(store.listAuthorizedApplications().length, 0, "manual selection removes the item from the automatic queue");
     store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO");
     assert.equal(store.listAuthorizedApplications().length, 1, "an explicit new confirmation can authorize the same vacancy again");
-    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /já recebeu/i);
-    assert.throws(() => store.updateResume(draft.id, { content: "changed" }), /revisão/i);
+    assert.throws(() => store.authorizeAutoApplication(automatic.id, draft.id, "AUTORIZO"), /application\.authorization\.already_granted/);
+    assert.throws(() => store.updateResume(draft.id, { content: "changed" }), /resume\.approved_locked/);
     store.updateResume(draft.id, { status: "review", content: "changed" });
     assert.equal(store.listAuthorizedApplications().length, 0, "editing the approved version removes it from the authorized queue");
     assert.equal(store.listApplications().find((item) => item.id === automatic.id).automation_mode, "assisted");
@@ -156,10 +164,10 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     markJobOpen(store, runningJob.id);
     store.authorizeAutoApplication(runningApplication.id, runningResume.id, "AUTORIZO");
     store.claimAuthorizedApplication(runningApplication.id, "test-worker", store.listAuthorizedApplications().find((item) => item.id === runningApplication.id).nonce);
-    assert.throws(() => store.updateResume(runningResume.id, { status: "review" }), /em andamento/i);
-    assert.throws(() => store.recordJobFeedback(runningJob.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" }), /em andamento/i);
+    assert.throws(() => store.updateResume(runningResume.id, { status: "review" }), /resume\.application_in_progress/);
+    assert.throws(() => store.recordJobFeedback(runningJob.id, { mode: "total", reason_code: "role", detail_key: "role_family", explanation: "Não quero vagas semelhantes a esta função.", confirmation: "SEM INTERESSE" }), /feedback\.application_locked/);
     assert.throws(() => store.revokeAutoApplication(runningApplication.id), /após o início/i);
-    assert.throws(() => store.updateApplication(runningApplication.id, { status: "queued" }), /recolocada na fila/i);
+    assert.throws(() => store.updateApplication(runningApplication.id, { status: "queued" }), /application\.status\.requeue_forbidden/);
     // C1: an authorized submission is only recorded by the claiming worker through the internal route.
     assert.throws(() => store.updateApplication(runningApplication.id, { status: "submitted", submitted_at: timestamp, evidence_ref: "portal:confirmation:running" }), /application\.internal_route_required/);
     const observedUrl = "https://boards.greenhouse.io/exemplo/jobs/running";
@@ -178,7 +186,7 @@ describe("Workflow, privacy migration, PDF library, and authorization checks", (
     assert.equal(manualApplication.automation_mode, "manual");
     store.updateResume(manualResume.id, { status: "review", content: "Updated manual resume" });
     // Editing the approved resume removes the approval: the manual flow is kept, but submission is refused until re-approval.
-    assert.throws(() => store.updateApplication(manualApplication.id, { status: "submitted", submitted_at: timestamp }), /precisa estar aprovado/i);
+    assert.throws(() => store.updateApplication(manualApplication.id, { status: "submitted", submitted_at: timestamp }), /application\.submission\.resume_not_approved/);
     assert.equal(store.getJob(manualJob.id).status, "resume", "removing the approval returns the job to the resume stage via revise_resume");
     store.reviewResume(manualResume.id, { verdict: "pass" }, "test-reviewer");
     store.approveResume(manualResume.id, "APROVO");

@@ -1,6 +1,7 @@
 // Gate de checagem de fatos antes do APROVO (#31): fluxo completo sobre banco temporário.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { DomainError } from "../src/errors.ts";
 import { errorResponse } from "../src/http-security.ts";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
@@ -126,9 +127,9 @@ test("revisor pode endurecer o veredito, nunca afrouxar", () => {
 });
 
 test("códigos HTTP: resume.unverified_facts é 409; demais resume.fact.* seguem 4xx de domínio", () => {
-  assert.equal(errorResponse(new Error("resume.unverified_facts")).status, 409);
-  assert.match(errorResponse(new Error("resume.unverified_facts")).body.message, /fatos novos/u);
-  assert.equal(errorResponse(new Error("resume.fact.not_found")).status, 404);
-  assert.equal(errorResponse(new Error("resume.fact.stale")).status, 422);
-  assert.equal(errorResponse(new Error("resume.content.empty")).status, 422);
+  assert.equal(errorResponse(new DomainError("resume.unverified_facts")).status, 409);
+  assert.match(errorResponse(new DomainError("resume.unverified_facts")).body.message, /fatos novos/u);
+  assert.equal(errorResponse(new DomainError("resume.fact.not_found")).status, 404);
+  assert.equal(errorResponse(new DomainError("resume.fact.stale")).status, 422);
+  assert.equal(errorResponse(new DomainError("resume.content.empty")).status, 422);
 });

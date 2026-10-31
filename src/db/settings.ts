@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_ATS_ALLOWLIST, atsFamilyFor, normalizeAtsDomain } from "../ats-domains.js";
 import { now } from "./util.js";
+import { DomainError } from "../errors.js";
 
 /**
  * Configurações operacionais guardadas na tabela `settings` (migração 0003).
@@ -11,10 +12,10 @@ import { now } from "./util.js";
  * as rotas e ferramentas de automação ficam desligadas, qualquer que seja o valor no banco.
  */
 
-export const AUTOMATION_TIME_ZONE = "America/Sao_Paulo";
-export const DEFAULT_DAILY_LIMIT = 5;
-export const MAX_DAILY_LIMIT = 100;
-export const MAX_ALLOWLIST_ENTRIES = 100;
+const AUTOMATION_TIME_ZONE = "America/Sao_Paulo";
+const DEFAULT_DAILY_LIMIT = 5;
+const MAX_DAILY_LIMIT = 100;
+const MAX_ALLOWLIST_ENTRIES = 100;
 
 export type AutomationSettings = {
   enabled: boolean;
@@ -80,23 +81,23 @@ export type AutomationPatch = Partial<Pick<AutomationSettings, "enabled" | "dail
 export function validateAutomationPatch(input: Record<string, unknown>): AutomationPatch {
   const patch: AutomationPatch = {};
   if (input.enabled !== undefined) {
-    if (typeof input.enabled !== "boolean") throw new Error("settings.automation.enabled.invalid");
+    if (typeof input.enabled !== "boolean") throw new DomainError("settings.automation.enabled.invalid");
     patch.enabled = input.enabled;
   }
   if (input.daily_limit !== undefined) {
     const value = validLimit(input.daily_limit, false);
-    if (value == null) throw new Error("settings.automation.daily_limit.invalid");
+    if (value == null) throw new DomainError("settings.automation.daily_limit.invalid");
     patch.daily_limit = value;
   }
   if (input.per_ats_limit !== undefined) {
     const value = validLimit(input.per_ats_limit, true);
-    if (value === undefined) throw new Error("settings.automation.per_ats_limit.invalid");
+    if (value === undefined) throw new DomainError("settings.automation.per_ats_limit.invalid");
     patch.per_ats_limit = value;
   }
   if (input.ats_allowlist !== undefined) {
-    if (!Array.isArray(input.ats_allowlist) || input.ats_allowlist.length > MAX_ALLOWLIST_ENTRIES) throw new Error("settings.automation.ats_allowlist.invalid");
+    if (!Array.isArray(input.ats_allowlist) || input.ats_allowlist.length > MAX_ALLOWLIST_ENTRIES) throw new DomainError("settings.automation.ats_allowlist.invalid");
     const normalized = input.ats_allowlist.map(normalizeAtsDomain);
-    if (normalized.some((item) => !item)) throw new Error("settings.automation.ats_allowlist.invalid");
+    if (normalized.some((item) => !item)) throw new DomainError("settings.automation.ats_allowlist.invalid");
     patch.ats_allowlist = [...new Set(normalized as string[])];
   }
   return patch;

@@ -15,6 +15,13 @@ process.env.RADAR_UI_SMOKE_DIR ??= mkdtempSync(join(tmpdir(), "radar-ui-smoke-")
 process.env.RADAR_UI_SMOKE_TOKEN ??= `ui-smoke-${"d".repeat(32)}`;
 const port = Number(process.env.RADAR_UI_SMOKE_PORT ?? 8797);
 const dashboardToken = process.env.RADAR_UI_SMOKE_TOKEN;
+// Ambientes com um Chromium pré-instalado de outra revisão (ex.: containers de dev) apontam
+// o executável aqui em vez de baixar o navegador da versão fixada do Playwright.
+const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
+const chromium = {
+  ...devices["Desktop Chrome"],
+  ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
+};
 
 export default defineConfig({
   testDir: "test/ui",
@@ -32,7 +39,14 @@ export default defineConfig({
     timezoneId: "America/Sao_Paulo",
     trace: "retain-on-failure"
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // Todas as specs dividem um servidor e um banco. O smoke vê o banco como ele o semeia (vagas
+  // e currículos, sem perfil confirmado); os fluxos rodam depois e deixam perfil confirmado,
+  // termos aceitos e uma rodada no banco. Spec nova que dependa de banco limpo entra no
+  // projeto "chromium" (smoke); a que aceite esse estado fica nos fluxos.
+  projects: [
+    { name: "chromium", testMatch: /smoke\.spec\.ts$/u, use: chromium },
+    { name: "fluxos", testIgnore: /smoke\.spec\.ts$/u, dependencies: ["chromium"], use: chromium }
+  ],
   webServer: {
     command: "node dist/src/server.js",
     url: `http://127.0.0.1:${port}/api/ready`,

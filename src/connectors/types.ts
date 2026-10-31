@@ -1,6 +1,6 @@
 import type { ConnectorHttpClient } from "./http.js";
 
-/** Item no formato aceito por ingestRoundBatch (src/db.ts → validateSourceBatch). */
+/** Item no formato aceito por ingestRoundBatch (src/db/ingestion.ts → validateSourceBatch). */
 export interface ConnectorItem {
   source_id: string;
   source_job_id: string | null;

@@ -7,23 +7,46 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 ## Configuração operacional v0.4
 
 - `GET/POST /api/sources` e `PUT/DELETE /api/sources/{id}` configuram fonte, domínio e somente a referência de autenticação do Hermes. As fontes padrão iniciam ativas. Para sessão autenticada, use `auth_strategy=browser_profile` e `browser_profile_id`; nunca envie cookie, senha ou token.
-- `GET /api/agents/{id}/versions` lista snapshots. `POST /api/agents/{id}/publish` recebe `{"version_id":"..."}`; `POST /api/agents/{id}/rollback` recebe a versão histórica a republicar. `PATCH` cria um rascunho e não altera execuções presas ao snapshot publicado.
+- Cada fonte em `GET /api/sources` (e em `sourceConfigs` do bootstrap) traz `effectiveReadiness: { status, reason }`, a prontidão calculada que a rodada usa: `paused` (`source.disabled`), `not_ready` (`source.authentication.required` ou `source.terms.not_approved`), `ready` ou o último teste gravado (`source.smoke_test.required` enquanto não houver teste). `readiness_status` é só o resultado gravado por `POST /api/sources/{id}/readiness`. Aceitar os termos (`POST /api/sources/{id}/terms`) é decisão humana; o painel oferece o aceite, o teste de acesso, a exclusão da fonte e o início de uma rodada (`POST /api/rounds`). Fontes de conector determinístico (`connector: true`: Greenhouse, Lever, Ashby, Gupy, SmartRecruiters, Workable) têm teste executado pelo servidor, `POST /api/sources/{id}/smoke-test` (consulta a API pública para a primeira empresa ativa da lista de conectores e grava a prontidão); sem empresa ativa → `422 source.smoke_test.company_required`; `connector_companies` conta as empresas ativas do conector (`null` fora de conector) e, com zero, o painel troca “Testar acesso…” por “Cadastrar empresa…”. Nas fontes coletadas por agentes o resultado é registrado (`422 source.smoke_test.manual_only` na rota de execução).
+- `GET /api/agents/{id}/versions` lista snapshots, cada um com `origin` (`human`, `coordinator` ou `service`, derivada de `created_by`). `GET /api/agents/{id}/versions/{versionId}/diff` devolve a diferença campo a campo contra a versão publicada, a origem, a justificativa da proposta do coordenador (`proposal_reason`) e o `checksum` da versão. `POST /api/agents/{id}/publish` recebe `{"version_id":"...","checksum":"..."}`: o `checksum` é o do diff revisado e é obrigatório quando o rascunho não nasceu de uma edição humana (proposta do coordenador ou `PATCH` com o token de serviço); sem ele, ou se o rascunho mudou depois da revisão, a resposta é `409 agent.version.review_required`. `POST /api/agents/{id}/discard-draft` (`{"version_id":"..."}`) descarta o rascunho (fica `retired` no histórico). `POST /api/agents/{id}/rollback` recebe uma versão que já esteve publicada (rascunho → `agent.version.not_restorable`). `PATCH` cria um rascunho e não altera execuções presas ao snapshot publicado.
 - `GET /api/jobs/{id}/provenance` retorna evidências e conflitos por campo. `POST /api/field-conflicts/{id}/resolve` aceita `{"choice":"current"}` ou `{"choice":"candidate"}` e registra o revisor.
 - Eventos `agent.status` podem informar `agent_id`; o backend prende `config_version_id` e `config_snapshot` à execução. Versões em rascunho nunca governam uma execução.
+- Limites das execuções de agente (#16), lidos do snapshot com que a execução começou: abrir uma execução `running` além de `concurrency` responde `429 agent.run.concurrency_exceeded` (nada é gravado); execução `running` além de `timeout_seconds` é abortada (vira `failed`, "Interrompida pelo limite…") pelo próprio registro de execuções e pelo timer de expiração do servidor, e atualizá-la depois responde `409 agent.run.timeout`; `cost` acima de `max_cost_per_run`, `input_tokens`/`output_tokens` acima de `max_input_tokens`/`max_output_tokens` ou `latency_ms` acima do tempo limite gravam a execução como abortada e respondem `422 agent.run.max_cost_exceeded` (`…max_input_tokens_exceeded`, `…max_output_tokens_exceeded`) ou `409 agent.run.timeout`. Execução abortada não é reaberta (`409 agent.run.aborted`). `started_at` no futuro é trocado pelo horário do servidor.
 
 ## Conexão
 
 - Endereço padrão: `http://127.0.0.1:8787` quando o agente roda no mesmo container Hermes (porta canônica 8787; a instalação pode trocar `PORT` no `.env.local`).
 - Autenticação: toda rota `/api/*` exceto `GET /api/health` e `GET /api/ready` exige o header `x-radar-service-token` com o valor de `RADAR_INTERNAL_SERVICE_TOKEN` **ou** o cookie `radar_session` do dashboard (obtido em `GET /auth?token=<RADAR_DASHBOARD_TOKEN>`). Sem credencial: `401`. Sem token interno configurado no servidor: `503 internal_token_not_configured`.
-- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil, termos de fonte e criação/publicação/rollback de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
+- Portões humanos: interesse/descarte/desfazer (`/api/jobs/{id}/decision`, `/decision/undo`, `/feedback`, `/restore`, `/unsuppress`, `DELETE /api/jobs/{id}`), `APROVO` (`/api/resumes/{id}/approve`), criação e edição de candidatura (`POST /api/applications`, `PATCH /api/applications/{id}`), `authorize-auto`, `revoke-auto`, `select-manual`, confirmação de perfil e revisão de fatos (`/api/profiles/{id}/confirm`, `/facts/{factId}/review`, `/facts/review-all`), descarte de rascunho (`DELETE /api/profiles/{id}`) e nova versão do perfil (`/api/profiles/{id}/new-version`), fato de perfil `origin: "user"` ou já `confirmed`, mesclagem de duplicatas e o desfazer (`/api/possible-duplicates/{id}/resolve`, `/undo`), resposta a pergunta humana pelo painel (`/api/human-questions/{id}/respond`), resolução de conflito (`/api/field-conflicts/{id}/resolve`), exclusão do currículo-base (`DELETE /api/base-resumes/{id}`), exclusão de agente e de fonte (`DELETE /api/agents/{id}`, `DELETE /api/sources/{id}`), religar uma fonte desligada (`PUT /api/sources/{id}` / `POST /api/sources` sem `enabled: false`), devolver um currículo aprovado para revisão (`PATCH /api/resumes/{id}`), termos de fonte e criação/publicação/rollback/descarte de rascunho de agente exigem a **sessão do dashboard**; com o token interno respondem `403 human_session_required` (`docs/security.md`).
 - Auditoria: o ator gravado vem da credencial — `human:dashboard` (sessão), `service:<nome>` (token; `<nome>` do header opcional `x-radar-service-name`, padrão `internal`) e `agent:<agent_id>` (MCP). `GET /api/jobs/{id}/history` devolve transições e decisões da vaga com o ator.
 - O `Host` precisa estar em `RADAR_ALLOWED_HOSTS`; rotas mutantes exigem `Content-Type: application/json` e, havendo `Origin`, que ele case com o `Host`.
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
-- Não envie `Authorization` nem `X-Project-Id`: a instalação usa o projeto fixo `busca-emprego` e a única credencial de agente é `x-radar-service-token`.
+- Não envie `Authorization` nem `X-Project-Id`: o projeto vem da instalação (`RADAR_PROJECT_ID`, padrão `busca-emprego`) e a única credencial de agente é `x-radar-service-token`.
+- Escopo de projeto: listagens, bootstrap, fila do executor (`GET /api/authorized-applications`) e o painel de automação mostram só o projeto da instalação. Rotas por id (`/api/jobs/{id}…`, `/api/resumes/{id}…`, `/api/applications/{id}…`, `/api/base-resumes/{id}…`, `/api/profiles/{id}…`, `/api/human-questions/{id}…`, `/api/agents/{id}/jobs/{jobId}…`, `/api/field-conflicts/{id}/resolve`, `/api/preference-rules/{id}`) e ids no corpo (`job_id`, `resume_id`, `application_id`, `base_resume_id`, `profile_id`) de outro projeto respondem `404 <recurso>.not_found`, sem revelar que o recurso existe. Um id inexistente segue para a rota: a maioria também responde `404 <recurso>.not_found`, algumas respondem o genérico `404 not_found` e algumas sub-listas respondem `200` vazio (ver a nota ao fim deste documento). O mesmo PDF-base e a mesma vaga manual podem existir em projetos diferentes. O kill-switch, os limites e o uso diário da automação são da instalação (valem para todos os projetos: protegem a mesma pessoa).
 - Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. O servidor confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
 - O aplicativo não cria dados exemplificativos: o banco inicia vazio e só recebe vagas de agentes, rodadas ou uso real do dashboard. A anonimização legada permanece opt-in e deve ficar desabilitada em produção.
+
+## Onboarding: ordem das chamadas
+
+Uma instalação nova só descobre vagas depois de um perfil confirmado e de pelo menos uma fonte pronta. Os passos de decisão são portões humanos: o painel os faz com a sessão, e o token de serviço (Hermes, scripts) recebe `403 human_session_required`. A sequência que o painel segue:
+
+| # | Passo | Rota | Credencial | Erros típicos |
+| --- | --- | --- | --- | --- |
+| 1 | Abrir o dashboard | `GET /auth?token=<RADAR_DASHBOARD_TOKEN>` (link de `scripts/ops/dashboard-link.mjs`) | link de sessão | `401` com token errado; tentativas limitadas por IP |
+| 2 | Enviar o currículo-base | `POST /api/base-resumes` | sessão ou token | `413 PDF_TOO_LARGE`, `422 PDF_SIGNATURE_INVALID`, `409 PDF_DUPLICATE` |
+| 3 | Criar o rascunho do perfil | `POST /api/base-resumes/{id}/create-profile` ou `POST /api/profiles/import/json-resume` | sessão ou token (o serviço só propõe) | `409 profile.draft_exists`, `422 profile.import.invalid` / `profile.import.empty` |
+| 4 | Revisar as informações | `POST /api/profiles/{id}/facts/{factId}/review`, `POST /api/profiles/{id}/facts/review-all`; eliminatórios por `POST /api/profiles/{id}/interview` | sessão (a entrevista aceita o serviço, como proposta) | `422 profile.fact.*`, `422 profile.draft_required` |
+| 5 | Confirmar o perfil | `POST /api/profiles/{id}/confirm` | sessão | `422 PROFILE_FACTS_UNCONFIRMED`, `422 PROFILE_EMPTY`, `409 profile.draft_stale` |
+| 6 | Aceitar os termos e testar as fontes | `POST /api/sources/{id}/terms`; `POST /api/sources/{id}/smoke-test` (conector) ou `POST /api/sources/{id}/readiness` (fonte de agentes) | termos: sessão; teste: sessão ou token | `422 source.smoke_test.company_required`, `422 source.smoke_test.manual_only` |
+| 7 | Primeira rodada | `POST /api/rounds` → lotes em `POST /api/rounds/{id}/batch` ou `POST /api/agents/{id}/batches` | sessão ou token; lotes só token | `422 PROFILE_CONFIRMATION_REQUIRED`, `422 ROUND_NO_SOURCES`, `422 ROUND_SOURCES_NOT_READY` |
+| 8 | Interesse | `POST /api/jobs/{id}/decision` (`TENHO INTERESSE`) | sessão | `400 decision.confirmation_required` |
+| 9 | Currículo ATS | `POST /api/resumes/generate`; edição por `PATCH /api/resumes/{id}`; revisão em `POST /api/resumes/{id}/review` | sessão ou token | `422 PROFILE_SNAPSHOT_REQUIRED`, `422 base_resume.required`, `422 BASE_RESUME_EXTRACTION_REQUIRED` |
+| 10 | `APROVO` | `POST /api/resumes/{id}/approve` | sessão | `400 resume.approval.confirmation_required`, `409 resume.unverified_facts` |
+| 11 | Envio manual ou `AUTORIZO` | `POST /api/applications`, depois `select-manual` ou `authorize-auto` (`AUTORIZO`) | sessão | `422 job.liveness.stale`, `422 application.domain.not_ats`, `403 AUTOMATION_DISABLED` |
+
+O painel exige que a pessoa digite `TENHO INTERESSE`, `APROVO`, `AUTORIZO` e `ENVIAR` (maiúsculas ou minúsculas) antes de enviar a palavra exata ao servidor; o servidor confere de novo. O app nunca envia uma candidatura sem `AUTORIZO` vigente e o `ENVIAR` da execução.
 
 ## Capacidades e allowlist
 
@@ -38,7 +61,7 @@ As capacidades fechadas dos agentes de descoberta são `browser.read`, `jobs.cre
 | `jobs.enrich` | Propor atualização descritiva com proveniência por campo | Sobrescrever silenciosamente dado humano/mais confiável |
 | `salary.lookup` | Consultar e registrar salário com moeda, período, confiança e evidência | Inventar valor ou converter sem taxa/configuração auditada |
 
-Administrar configurações exige a sessão do dashboard (ou o token interno). As capacidades acima limitam a execução dos agentes; não há perfis de usuário dentro do dashboard.
+Só a sessão do dashboard cria, publica, faz rollback e descarta rascunho de agente, aceita os termos de uma fonte e altera o kill-switch e os limites da automação (`PUT /api/settings/automation`); com o token interno essas rotas respondem `403 human_session_required`. O token interno edita e pausa agentes e propõe prompts (cada edição dele vira um rascunho que precisa de revisão humana para ser publicado), e também cria, edita e desliga fontes (excluir agente ou fonte e religar uma fonte desligada são só da sessão), registra prontidão e roda o teste de fumaça, e administra as empresas curadas dos conectores. As capacidades acima limitam a execução dos agentes; não há perfis de usuário dentro do dashboard.
 
 ## Regras de preenchimento
 
@@ -66,18 +89,21 @@ Resposta `200`:
 
 ### `GET /api/bootstrap`
 
-Carrega em uma chamada os dados usados pelo dashboard. Não recebe corpo.
+Carrega em uma chamada os dados usados pelo dashboard. Não recebe corpo. O contrato tipado (`BootstrapPayload`) fica em `src/bootstrap-payload.ts` e é o mesmo tipo que o painel usa (TD-14).
 
 Resposta `200` contém:
 
 | Campo | Tipo | Conteúdo |
 | --- | --- | --- |
 | `jobs` | `Job[]` + campos calculados | Vagas ordenadas por match; consulte os campos de vaga abaixo |
-| `resumes` | `Resume[]` | Currículos ATS |
+| `resumes` | resumo de `Resume`[] | Currículos ATS **sem** `content` (F15): cada um traz `content_length` e `fact_check`; o texto vem de `GET /api/resumes/{id}` |
 | `baseResumes` | metadados de PDF | Biblioteca local; os bytes do PDF não são incluídos |
 | `applications` | `Application[]` | Registros de candidatura |
 | `companies` | `Company[]` | Contagem de vagas, salário mínimo médio registrado, locais e fontes por empresa |
 | `agentRuns` | `AgentRun[]` | Até 20 execuções mais recentes |
+| `matchScores` | nota[] | Só a nota **mais recente** de cada vaga, com `components` explicados (F15); o histórico vem de `GET /api/jobs/{id}/scores` |
+| `activeProfile` | perfil \| `null` | Perfil confirmado com `facts` e `snapshot` |
+| `draftProfiles` | perfil[] | Rascunhos de perfil (#49), mais recente primeiro, cada um com `facts`, `pending` (informações `proposed`/`needs_review`, que bloqueiam a confirmação), `pending_without_evidence` (ficam fora do `review-all`) e `missing_blockers` (eliminatórios sem informação confirmada) |
 | `stats` | objeto | Contagens e agregados descritos a seguir |
 
 Campos calculados que aparecem dentro de cada elemento de `jobs`:
@@ -92,14 +118,33 @@ Campos calculados que aparecem dentro de cada elemento de `jobs`:
 
 `stats` contém `total`, `strongMatches`, `awaitingReview`, `selected`, `applications`, `openVacancies`, `unknownVacancies`, `applied`, `lost`, `notInterested`, `averageSalary`, `statuses`, `sources` e `locations`. Os primeiros campos são números; `averageSalary` pode ser `null`; `statuses`, `sources` e `locations` são mapas de rótulo para contagem.
 
-Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, não descrição/evidência integral. O detalhe completo é carregado sob demanda por `GET /api/jobs/{id}` para reduzir payload e exposição desnecessária.
+Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, não descrição/evidência integral. O detalhe completo é carregado sob demanda por `GET /api/jobs/{id}` para reduzir payload e exposição desnecessária. Currículos e notas já seguem essa regra (F15):
+
+| Rota | Uso |
+| --- | --- |
+| `GET /api/resumes/{id}` | Currículo completo (com `content` e `fact_check`) do projeto aberto; inexistente ou de outro projeto → `404 resume.not_found`. O editor e a aprovação do painel leem daqui |
+| `GET /api/jobs/{id}/scores?limit=&offset=` | Histórico de notas da vaga, mais recente primeiro: `{ items, total, limit, offset }`, cada item com `profile_snapshot_id` e `round_id`. `limit` de 1 a 100 (padrão 20), `offset` ≥ 0; fora disso → `400 invalid_query`. Vaga inexistente → `404 job.not_found` |
+
+### `GET /api/metrics`
+
+Métricas operacionais (F17), aceitas com a sessão do dashboard ou com o token interno; não recebe corpo e só devolve contagens e idades (nenhum dado pessoal). A página "Saúde das buscas" mostra o mesmo conteúdo no painel "Saúde da instalação".
+
+| Campo | Conteúdo |
+| --- | --- |
+| `generated_at`, `uptime_seconds` | Momento da leitura e tempo de processo do servidor |
+| `database.bytes`, `database.wal_bytes` | Tamanho do banco (`page_count × page_size`) e do arquivo `-wal` |
+| `backup` | `status` (`ok`, `stale`, `missing` ou `unavailable`), `latest_at`, `age_seconds`, `count` e `stale_after_hours` (36). Lê `RADAR_BACKUP_DIR` ou `<dir do banco>/backups` e conta só arquivos `radar-<timestamp>.sqlite` gerados por `backup-sqlite.mjs` |
+| `queues.human_questions_open` | Perguntas ao humano em `pending`, `delivered` ou `delivery_failed` |
+| `queues.enrichment_pending` | Itens `pending` em `connector_enrichment_queue` |
+| `queues.authorized_applications` | Autorizações de envio `issued` (não vencidas) e `claimed` |
+| `last_round` | `id`, `status`, `started_at`, `finished_at` e `error_code` da rodada mais recente, ou `null` |
 
 ### Configuração de agentes no dashboard
 
 | Método | Endpoint | Acesso HTTP | Uso |
 | --- | --- | --- | --- |
 | `GET` | `/api/agents` | sessão do dashboard ou token interno | Listar agentes do projeto |
-| `POST` | `/api/agents` | sessão do dashboard ou token interno | Criar agente |
+| `POST` | `/api/agents` | só sessão do dashboard (token → `403 human_session_required`) | Criar agente |
 | `PATCH` | `/api/agents/{id}` | sessão do dashboard ou token interno | Editar, habilitar ou pausar agente |
 | `DELETE` | `/api/agents/{id}` | sessão do dashboard ou token interno | Excluir agente sem histórico; com histórico, deve ser pausado |
 
@@ -107,7 +152,7 @@ Campos: `name`, `role_type`, `enabled`, `source_ids`, `allowed_domains`, `browse
 
 ### `GET /api/jobs/{id}`
 
-Retorna a vaga pelo identificador, incluindo `description`, `responsibilities`, `requirements`, `benefits`, `additional_information`, `linkedin_post_url`, `job_url` e `application_url`. Atualmente uma ausência retorna `200` com `null`; alterar isso para 404 permanece um gate de produção.
+Retorna a vaga pelo identificador, incluindo `description`, `responsibilities`, `requirements`, `benefits`, `additional_information`, `linkedin_post_url`, `job_url` e `application_url`. Vaga de outro projeto → `404 job.not_found`; vaga inexistente → `404 not_found`.
 
 ### `POST /api/jobs`
 
@@ -252,7 +297,7 @@ Cria um currículo vinculado a uma vaga existente.
 
 ### `PATCH /api/resumes/{id}`
 
-Atualiza somente `base_resume_id`, `title`, `status`, `content`, `keywords` e `changes`. `keywords` e `changes` devem ser arrays de strings. `status: "approved"` não é aceito nesta rota. Antes de editar um currículo aprovado, primeiro mude-o para `review`; isso cria outra versão e invalida qualquer autorização automática vinculada à versão anterior. Resposta `200` com o currículo atualizado ou `null` se não existir.
+Atualiza somente `base_resume_id`, `title`, `status`, `content`, `keywords` e `changes`. `keywords` e `changes` devem ser arrays de strings. `status: "approved"` não é aceito nesta rota. Antes de editar um currículo aprovado, primeiro mude-o para `review`; isso cria outra versão e invalida qualquer autorização automática vinculada à versão anterior. Resposta `200` com o currículo atualizado; inexistente → `404 resume.not_found`; currículo substituído por uma geração nova → `422 resume.superseded`.
 
 ### `POST /api/resumes/{id}/approve`
 
@@ -280,6 +325,12 @@ Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extra�
 
 `POST /api/resumes/{id}/review` calcula o veredito no servidor (`verdict: "pass"` do cliente é ignorado; `verdict: "fail"` e `findings` só endurecem). Achados: `facts.unverified:N`, `content.empty`, `content.placeholder` (rascunho-padrão do painel) e, para o redator, as checagens estritas de fatos usados. Conteúdo sem nenhuma afirmação verificável passa. O bootstrap traz `fact_check: { pending, warnings }` em cada currículo e `radar_create_resume` devolve `fact_check.pending` para o agente.
 
+### `POST /api/resumes/generate`
+
+Gera o currículo ATS só com fatos confirmados: `{ job_id, profile_snapshot_id?, facts_used: [ids], base_resume_id?, title?, keywords?, changes?, gaps? }`. Sem snapshot de perfil confirmado → `422 PROFILE_SNAPSHOT_REQUIRED`; perfil de PDF sem `base_resume_id` → `base_resume.required`. O texto sai legível, com nome e cargo no topo e seções em pt-BR (`CONTATO`, `RESUMO`, `EXPERIÊNCIA PROFISSIONAL`, `FORMAÇÃO ACADÊMICA`, `HABILIDADES`, `IDIOMAS`, `CERTIFICAÇÕES`, `PROJETOS`, `INFORMAÇÕES ADICIONAIS`), nunca com as chaves internas dos fatos; preferências de busca (`accepted_locations`, `work_models`) ficam fora do texto. Gerar de novo para a mesma vaga marca como `superseded` os rascunhos anteriores do redator ainda intactos (`draft`/`review`, sem candidatura, texto igual ao gerado): saem do bootstrap, ficam no banco e na auditoria e não podem mais ser editados, revisados, testados nem aprovados, nem ter fatos confirmados (`resume.superseded`). Rascunho manual ou editado pela pessoa nunca é substituído, por nenhum ator: convive com o novo. Currículo aprovado nunca é substituído.
+
+A pessoa pode editar o texto gerado (`PATCH /api/resumes/{id}`). Na revisão, o texto editado passa pela checagem de fatos e por uma trava estrutural: reordenar e apagar linhas é livre; cada linha nova ou alterada precisa ter todas as palavras cobertas por um único fato usado (o valor do fato e as linhas que ele gera, palavra inteira). Habilidade, idioma, nível ou empresa sem fato que os sustente gera `content.unsupported_or_modified` (o `APROVO` então exige justificativa); afirmação bloqueante sem fato confirmado gera também `facts.unverified:N` e bloqueia o `APROVO`. No painel, o botão “Gerar currículo ATS” da vaga chama esta rota com todos os fatos confirmados do perfil ativo; sem perfil confirmado, ele explica o bloqueio e leva à revisão do perfil.
+
 ### Biblioteca de PDFs-base
 
 | Método e rota | Uso |
@@ -288,7 +339,8 @@ Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extra�
 | `POST /api/base-resumes` | Envia um PDF-base |
 | `GET /api/base-resumes/{id}/file` | Baixa o PDF com `Content-Disposition: attachment` |
 | `POST /api/base-resumes/{id}/select` | Seleciona a base padrão para novas adaptações |
-| `DELETE /api/base-resumes/{id}` | Remove o PDF e limpa vínculos de base dos currículos |
+| `DELETE /api/base-resumes/{id}` | Remove o PDF e limpa vínculos de base dos currículos (só com a sessão do painel) |
+| `POST /api/base-resumes/{id}/create-profile` | Cria um perfil em rascunho com os fatos propostos do PDF (página real de cada fato); perfil e fatos numa transação. Cada seção vai do seu título até o próximo; itens listados (competências, idiomas, certificações, cada entrada de experiência/formação/projeto) viram um fato cada. `full_name` e `target_role` saem do cabeçalho como palpite (`state: needs_review`, confiança ≤ 0,4). No painel: botão “Criar perfil a partir deste PDF” em *Currículos*, que leva à revisão |
 
 O envio é JSON com `title`, `file_name` e `file_data` (bytes codificados em Base64), limite de 5 MB e cabeçalho `%PDF-` obrigatório. O primeiro PDF vira a base selecionada; a seleção pode ser alterada. O conteúdo binário fica somente no SQLite local. Não inclua PDF ou dados pessoais em `POST /api/agent-events`.
 
@@ -315,7 +367,7 @@ Atualiza `resume_id`, `status`, `current_step`, `submitted_at` e `notes`. Não p
 
 Reenviar o `status` atual (por exemplo, ao editar só as notas) não é transição e é ignorado. O PATCH nunca aceita `in_progress` (use o claim do executor, `application.claim.required`) nem, em candidaturas `authorized_auto`, `submitted` ou `failed`: esses resultados só entram pelas rotas internas `POST /api/applications/{id}/submit` e `/fail`, chamadas pelo worker dono do claim (`application.internal_route_required`). `accepted` e `rejected` exigem uma candidatura previamente enviada. A seleção manual pode confirmar um envio depois que o usuário o realizou no portal.
 
-Resposta `200` com `Application` atualizado ou `null` se não existir.
+Resposta `200` com `Application` atualizado; inexistente → `404 application.not_found`.
 
 ### Escolha e autorização do modo de candidatura
 
@@ -365,8 +417,9 @@ O PDF do currículo aprovado sai de `GET /api/resumes/{id}/files/pdf` (com o tok
 | `GET /api/human-questions` | Lista perguntas com estado de entrega, resposta e referência da mensagem |
 | `POST /api/human-questions/{id}/delivery` | Marca a entrega: `{ "delivered": true, "message_ref": "..." }` ou `{ "delivered": false, "error": "..." }` |
 | `POST /api/human-questions/{id}/answer` | Registra a resposta humana correlacionada àquela pergunta |
+| `POST /api/human-questions/{id}/respond` | Resposta dada no dashboard (só a sessão; token de serviço → 403): `{ "action": "answer", "answer": "..." }` ou `skip`/`manual`/`stop`. Vale também para pergunta em `delivery_failed` |
 
-Criar a pergunta move a candidatura para `needs_review`; ela volta a `in_progress` quando todas as perguntas obrigatórias estiverem respondidas. A entrega aceita `pending` e `delivery_failed` — um reenvio depois de falha real atualiza a mesma pergunta em vez de duplicá-la — e nunca reabre pergunta `answered` ou `cancelled`. A resposta exige uma identidade autorizada (`TELEGRAM_ALLOWED_USERS`/`TELEGRAM_HOME_CHANNEL`, nomes oficiais do Hermes; `HERMES_LINKED_RECIPIENT_ID`/`HERMES_TELEGRAM_CHAT_ID` continuam aceitos como fallback), só é aceita em `pending` ou `delivered` e é recusada com `human_question.reply_not_correlated` quando `reply_to_message_ref` não corresponde à mensagem entregue. Respostas usam `action: answer`, `skip`, `manual` ou `stop`: `skip` é recusado em pergunta obrigatória, `manual` revoga a autorização e devolve a candidatura ao envio manual e `stop` encerra a execução como `failed`. Uma resposta resolve somente o `human_question_id` correspondente e nunca concede `AUTORIZO`.
+Criar a pergunta move a candidatura para `needs_review`; ela volta a `in_progress` quando todas as perguntas obrigatórias estiverem respondidas. A entrega aceita `pending` e `delivery_failed` — um reenvio depois de falha real atualiza a mesma pergunta em vez de duplicá-la — e nunca reabre pergunta `answered` ou `cancelled`. A resposta exige uma identidade autorizada (`TELEGRAM_ALLOWED_USERS`/`TELEGRAM_HOME_CHANNEL`, nomes oficiais do Hermes; `HERMES_LINKED_RECIPIENT_ID`/`HERMES_TELEGRAM_CHAT_ID` continuam aceitos como fallback), só é aceita em `pending` ou `delivered` e é recusada com `human_question.reply_not_correlated` quando `reply_to_message_ref` não corresponde à mensagem entregue. Respostas usam `action: answer`, `skip`, `manual` ou `stop`: `skip` é recusado em pergunta obrigatória, `manual` revoga a autorização e devolve a candidatura ao envio manual e `stop` encerra a execução como `failed`. Uma resposta resolve somente o `human_question_id` correspondente e nunca concede `AUTORIZO`. Pelo painel (`/respond`), a identidade é a sessão (`answer_actor = human:dashboard`) e a pergunta pode estar em `pending`, `delivered` ou `delivery_failed` — a mensagem que não chegou ao Telegram é respondida em Saúde das buscas › Perguntas para você.
 
 A entrega na conversa do Telegram é feita por `scripts/ops/notify-human-questions.mjs`, que usa `hermes send --to telegram` (credenciais do gateway do Hermes, sem LLM) e marca esta rota; o Radar não recebe bot token.
 
@@ -400,7 +453,7 @@ Endpoint de entrada recomendado para sub-agentes. O campo `event` seleciona um d
 }
 ```
 
-`job` usa os campos de `POST /api/jobs`; `title`, `company`, `source` e `source_url` são obrigatórios. Todos os hosts enviados precisam constar em `allowed_domains`; isso pode exigir mais de um domínio na configuração. Resposta `201` com a vaga gravada. Um coletor não pode usar esse evento para sobrescrever uma vaga existente.
+`job` usa os campos de `POST /api/jobs`; `title`, `company`, `source` e `source_url` são obrigatórios. `deadline_at` (prazo, `AAAA-MM-DD` ou data-hora ISO 8601 com fuso) e `latitude`/`longitude` (em par, dentro dos limites) são gravados como nos lotes; valor inválido → `422 SCHEMA_INVALID`. `source` é o id da fonte cadastrada (`linkedin-jobs`) ou o nome dela (`LinkedIn Jobs`); sem nenhum dos dois, vale a fonte do agente (`source_ids`) cujo domínio é o da URL. A vaga é gravada com o **id** da fonte, o mesmo dos lotes e conectores. A fonte precisa estar pronta (termos aceitos no painel e teste de acesso registrado), a mesma regra do lote: fonte não cadastrada → `422 ROUND_NO_SOURCES`; sem termos, sem autenticação ou sem teste de acesso → `422 ROUND_SOURCES_NOT_READY`, e nada é gravado. Quando `opening_status` é `open` ou `closed`, a vaga grava `opening_checked_at`: a data enviada pelo agente (ISO 8601; data no futuro é ignorada) ou, sem ela, o momento da ingestão. Com `unknown`, `opening_checked_at` fica vazio. Quando a vaga já existe e continua `open`, uma nova observação só avança a data (nunca a recua); vaga informada como `closed` grava a data enviada. Datas que não sejam ISO 8601 são recusadas (`SCHEMA_INVALID`). Essa data é só a da observação do agente: não vale como prova de vaga aberta para o `AUTORIZO`, que exige verificação determinística do Radar ou confirmação da pessoa no painel (`liveness_proof_at` em cada vaga do bootstrap). O mesmo vale para os itens dos lotes de rodada (`POST /api/rounds/{id}/batch`). Todos os hosts enviados precisam constar em `allowed_domains`; isso pode exigir mais de um domínio na configuração. Resposta `201` com a vaga gravada. Um coletor não pode usar esse evento para sobrescrever uma vaga existente.
 
 #### Atualização: `job.updated`
 
@@ -454,16 +507,101 @@ Campos de `run`:
 
 Resposta: `201` com `AgentRun` salvo.
 
+### Perfil e nota de aderência
+
+| Método e rota | Uso |
+| --- | --- |
+| `POST /api/profiles` | Rascunho de perfil: `{ base_resume_id?, context?, facts? }` (corpo estrito; `id` e `source` não vêm do cliente). `context` só com a sessão do painel: com o token de serviço → `403 human_session_required` (o serviço propõe por fatos) |
+| `PATCH /api/profiles/{id}` | `{ context?, facts? }`, atômico: um fato inválido desfaz o pedido inteiro. Mesma regra de `context` |
+| `POST /api/profiles/{id}/facts` | Fato: `{ type, value, origin?, state?, evidence_page?, evidence_excerpt?, confidence? }` (o `id` é gerado pelo servidor). Lista só com itens texto/número/sim-não; item objeto → `422 profile.fact.invalid`. Com o token de serviço, `origin: "pdf"` exige `evidence_page` e o fato sem evidência própria não pode ser confirmado como está |
+| `GET /api/profiles/drafts` | Rascunhos abertos com fatos, `pending`, `pending_without_evidence` e `missing_blockers` (os mesmos `draftProfiles` do bootstrap). É a leitura do entrevistador no MCP (`radar_answer_profile_interview`), que grava pela rota abaixo |
+| `POST /api/profiles/{id}/interview` | `{ question_key, answer }`. Com o token de serviço a resposta vira fato `derived`/`proposed` para revisão (um por pergunta: reenviar não duplica; valor novo volta a `proposed`) e não sobrescreve a resposta dada pela pessoa: pergunta já respondida no painel → `200` com `already_answered: true` e nada gravado. A resposta da pessoa a um eliminatório rejeita as propostas (PDF, agente, serviço) do mesmo tipo |
+| `POST /api/profiles/{id}/facts/{factId}/review`, `/confirm` | Só com a sessão do painel. Confirmar com informação pendente (`proposed`/`needs_review`) → `422 PROFILE_FACTS_UNCONFIRMED`; sem nada confirmado → `422 PROFILE_EMPTY`; rascunho mais antigo que o perfil ativo → `409 profile.draft_stale` (descarte e crie uma nova versão) |
+| `POST /api/profiles/{id}/facts/review-all` | `{ state: "confirmed" }`, só com a sessão do painel (#49): confirma numa transação os pendentes **com evidência** (página, trecho, JSON Pointer ou declaração humana). Responde o perfil com `facts`, `confirmed` e `skipped` (pendentes sem evidência e respostas da entrevista repassadas por serviço/agente, que ficam para revisão uma a uma) |
+| `DELETE /api/profiles/{id}` | Descarta um rascunho (fatos e entrevistas juntos), só com a sessão do painel. Perfil confirmado ou substituído → `422 profile.draft_required` |
+| `POST /api/profiles/{id}/new-version` | Só com a sessão do painel: copia o perfil **confirmado** (contexto, fatos com estado e evidência, PDF-base e `source`) para um rascunho N+1, onde a entrevista e a revisão voltam a valer. Já havendo rascunho → `409 profile.draft_exists` (mesma regra em `POST /api/base-resumes/{id}/create-profile` e `POST /api/profiles/import/json-resume`: um rascunho por vez); versão descartada não é reaproveitada; perfil que não é o confirmado → `422 profile.confirmed_required` |
+| `POST /api/jobs/{id}/score` | `{ scores, profile_snapshot_id?, round_id?, evidence?, strengths?, gaps? }` (token interno). Exige perfil confirmado: sem `profile_snapshot_id` usa o snapshot ativo; sem perfil → `422 PROFILE_SNAPSHOT_REQUIRED`; snapshot de outro projeto/inexistente → `422 PROFILE_SNAPSHOT_INVALID`. Com `round_id`, a rodada precisa existir no projeto (`404 round.not_found`) e a nota usa o snapshot fixado nela; outro `profile_snapshot_id` → `422 PROFILE_SNAPSHOT_INVALID`. Nota de um perfil já substituído fica no histórico e não muda `match_score` da vaga |
+| `POST /api/rounds/{id}/batch` | O lote no próprio corpo (`{ source_id?, items, next_cursor? }`) ou embrulhado em `{ source_id?, batch: { ... } }`. Havendo a chave `batch`, o corpo é tratado como envelope: `batch` nulo, lista ou com campo extra → `400 invalid_body` |
+
+Todas as rotas que alteram dados validam o corpo com um schema estrito (`src/http-schemas.ts`): campo desconhecido ou de tipo errado → `400 invalid_body` com `details[].path`. Rotas sem corpo aceitam só `{}`.
+
+### Rodadas de busca
+
+| Método e rota | Uso |
+| --- | --- |
+| `GET /api/rounds` | Rodadas do projeto, mais recente primeiro (perfil usado, fontes, estado e contadores) |
+| `POST /api/rounds` | `{ source_ids?, run_id? }`. Abre a rodada presa ao snapshot do perfil confirmado e às fontes **prontas** (`effectiveReadiness.status = ready`); fontes pedidas que não estão prontas ficam de fora. Sem perfil → `422 PROFILE_CONFIRMATION_REQUIRED`; sem fonte ativa → `422 ROUND_NO_SOURCES`; nenhuma pronta → `422 ROUND_SOURCES_NOT_READY`. No painel: *Saúde das buscas* → *Rodadas de busca* → “Iniciar rodada” |
+| `GET /api/rounds/{id}` | Uma rodada; de outro projeto ou inexistente → `404 not_found` |
+| `GET /api/rounds/{id}/duplicates` | Possíveis duplicatas que envolvem vagas observadas nesta rodada |
+| `POST /api/rounds/{id}/status` | (token interno) estado de uma fonte na rodada: `{ source_id, status, cursor?, error_code?, batch_number?, received_count?, accepted_count? }` |
+| `POST /api/rounds/{id}/batch` | (token interno) lote da fonte; formato descrito na tabela do perfil acima. Cada item passa pela mesma deduplicação multi-chave, supressão por regra e registro de ocorrência da ingestão do MCP |
+
+### Rotas de agente do servidor MCP
+
+Usadas pelo `dist/src/mcp-server.js` (#10), com o agente no caminho (o header `x-radar-agent-id` vira o ator `agent:<id>` da auditoria). Ingestão (`/jobs`), lote (`/batches`), execuções (`/runs`) e enriquecimento (`/jobs/{jobId}/enrichment`) aceitam só o token interno, e o servidor confere que o agente existe no projeto, tem versão publicada, está habilitado e tem o escopo e os domínios exigidos. O catálogo publicado (`GET /api/agents/published`, `GET /api/agents/{id}/published`) e as propostas de prompt (`POST /api/agents/{id}/prompt-proposals`) aceitam a sessão do dashboard ou o token interno.
+
+| Método e rota | Uso |
+| --- | --- |
+| `GET /api/agents/published` | Catálogo dos agentes com a versão **publicada** (rascunho nunca aparece) |
+| `GET /api/agents/{id}/published` | `{ agent, published }` de um agente |
+| `POST /api/agents/{id}/jobs` | Vaga descoberta (`jobs.create`), mesmos campos de `POST /api/jobs`; vaga revista vira nova ocorrência |
+| `POST /api/agents/{id}/jobs/{jobId}/enrichment` | `{ patch, evidence_source_url, evidence_excerpt? }` (`jobs.enrich`), com proveniência por campo |
+| `POST /api/agents/{id}/batches` | `{ source_id, round_id?, items (≤ 25), next_cursor? }` (`jobs.create`): até 25 itens por lote, o resto em lotes seguintes da mesma rodada (`round_id` + `next_cursor`). Valida o lote e os domínios **antes** de abrir a rodada; sem `round_id` abre uma rodada só daquela fonte. Responde `{ round_id, ... }` |
+| `POST /api/agents/{id}/runs` | Execução do agente (`status`, `started_at`, `finished_at`, `found_count`, `message`, `model_effective`, `input_tokens`, `output_tokens`, `cost`, `latency_ms`), sob os limites de execução da versão publicada |
+| `POST /api/agents/{id}/prompt-proposals` | `{ prompt, reason (10–1.000) }`: proposta de prompt do coordenador (`agents.propose`). Vira um **rascunho**; só vale depois de revisado e publicado no painel |
+
+### Outras rotas
+
+| Método e rota | Uso |
+| --- | --- |
+| `POST /api/logout` | Encerra a sessão do dashboard e apaga o cookie |
+| `GET /api/profiles`, `GET /api/profiles/{id}`, `GET /api/profiles/{id}/facts` | Perfis do projeto (metadados), um perfil com fatos e os fatos de um perfil |
+| `GET /api/profile/active` | Perfil confirmado com fatos e snapshot, ou `null` |
+| `GET /api/profiles/{id}/export/json-resume` | JSON Resume com os fatos confirmados (anexo `perfil-vN.json`); botão “Exportar JSON Resume” em *Saúde das buscas* |
+| `GET /api/base-resumes/{id}/extraction` | Extração do PDF-base: `extraction_status`, `extracted_text`, `extraction_error`, `page_count`, `extracted_at` |
+| `GET /api/resumes/{id}/files/pdf`, `GET /api/resumes/{id}/files/docx`, `GET /api/resumes/{id}/files/json` | Currículo em PDF, DOCX ou JSON Resume (anexo) |
+| `GET` / `POST /api/resumes/{id}/parse-check` | Teste de leitura do PDF gerado (extrai o texto e confere contato, seções e palavras-chave); `POST` roda de novo. O diálogo do `APROVO` mostra o resultado e não habilita “Aprovar” quando o parser não lê o PDF |
+| `GET /api/jobs/{id}/occurrences` | Onde e em que rodadas a vaga foi vista |
+| `GET /api/jobs/{id}/score` | Nota mais recente da vaga, ou `null` |
+| `POST /api/jobs/{id}/unsuppress` | Só com a sessão do painel (token → `403 human_session_required`): reexibe uma vaga ocultada por regra “Não tenho interesse” (visão Ocultadas) |
+| `POST /api/jobs/{id}/check-liveness` | “Verificar agora”: verificação determinística da vaga no servidor (ver `docs/operations-runbook.md` §4); responde a verificação e a vaga |
+| `GET /api/liveness/due?limit=` | (token interno) vagas com verificação vencida, para `scripts/ops/check-liveness.mjs` (padrão 50) |
+| `GET /api/possible-duplicates` | Possíveis duplicatas ainda pendentes de decisão |
+| `POST /api/possible-duplicates/{id}/resolve` | (só sessão) `{ status: "merged" \| "distinct" \| "dismissed" }` |
+| `POST /api/possible-duplicates/{id}/undo` | (só sessão) desfaz a decisão em até 24 h (`409 possible_duplicate.undo_expired` depois) |
+| `GET /api/applications/{id}` | Uma candidatura; inexistente → `404 application.not_found` |
+| `GET /api/applications/{id}/authorization` | (token interno) autorização `issued`/`claimed` ainda válida; senão `409 application.authorization.unavailable` |
+| `GET /api/preferences` | Regras, sinais e sugestões de preferência |
+| `PATCH /api/preference-rules/{id}` | `{ state: "active" \| "paused" }`; regra desfeita junto com o feedback → `422 preference_rule.undone` |
+| `GET /api/connectors`, `POST /api/connectors/companies`, `PATCH` / `DELETE /api/connectors/companies/{id}` | Conectores determinísticos e a lista curada de empresas (`docs/coleta-conectores.md`) |
+| `GET /api/connectors/enrichment-queue`, `POST /api/connectors/enrichment-queue/{id}` | Fila de enriquecimento por LLM; resolver com `{ status: "done" \| "dismissed" }` (painel em *Saúde das buscas*) |
+
 ## Códigos de resposta e comportamento
 
-| Código | Significado |
-| --- | --- |
-| `200` | Consulta ou atualização concluída |
-| `201` | Registro criado ou upsert processado |
-| `400` | JSON inválido, evento desconhecido ou falha ao processar/gravar os dados; corpo `{ "error": "..." }` |
-| `403` | Capacidade interna negada, agente desabilitado ou URL fora de `allowed_domains` |
-| `404` | Rota ou registro desconhecido; corpo `{ "error": "not found" }` |
-| `409` | Conflito de versão, idempotência ou transição |
-| `422` | Schema, evidência, configuração, domínio ou precondição inválidos |
+Todo erro tem o corpo `{ "error": "<código estável>", "message": "<texto pt-BR>", "details"?: {...} }` (#29). O
+**código** é o contrato: o status HTTP e a mensagem saem só dele (tabela de status e dicionário em
+`src/errors.ts`), nunca do texto. Mudar a redação de uma mensagem não muda o status nem o código. Clientes (painel,
+MCP, Hermes) devem decidir pelo `error`; `message` é para exibir. Um código com sufixo (`job.salary.invalid:min`)
+repete o sufixo em `details.reason`. Qualquer erro que não seja de domínio (falha interna, SQLite, bug) responde
+`500 internal_error` com mensagem genérica; o detalhe fica só no log do servidor, com `request_id`.
 
-Algumas rotas por ID ainda retornam `200` com `null`; a uniformização para 404 é um gate pendente. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.
+| Status | Significado | Exemplos de `error` |
+| --- | --- | --- |
+| `200` | Consulta ou atualização concluída | — |
+| `201` | Registro criado ou upsert processado | — |
+| `400` | JSON ou corpo inválido, ou portão humano sem a confirmação digitada | `invalid_json`, `invalid_body`, `resume.approval.confirmation_required` (APROVO), `application.authorization.confirmation_required` (AUTORIZO), `decision.confirmation_required` (TENHO INTERESSE / SEM TEMPO), `application.status.invalid`, `resume.interest_required` |
+| `401` | Sessão ou token ausente | `unauthorized` |
+| `403` | Decisão humana pedida pelo token de serviço, capacidade negada, agente desabilitado, URL fora de `allowed_domains`, automação pausada | `human_session_required`, `profile.confirm.forbidden`, `agent.domain.forbidden`, `application.internal_route_required`, `AUTOMATION_DISABLED` |
+| `404` | Rota ou registro desconhecido, ou de outro projeto | `not_found` (rota, ou id inexistente nas rotas listadas na nota ao fim), `job.not_found`, `resume.not_found`, `application.not_found`, `base_resume.not_found`, `profile.not_found`, `round.not_found`, `human_question.not_found` |
+| `409` | Conflito de versão, idempotência, estado ou transição | `VERSION_CONFLICT`, `ILLEGAL_TRANSITION`, `PDF_DUPLICATE`, `application.already_exists`, `profile.draft_exists`, `resume.unverified_facts`, `resume.pdf_parse_failed`, `agent.version.review_required` |
+| `413` | Conteúdo maior que o limite | `payload_too_large`, `PDF_TOO_LARGE` |
+| `422` | Schema, evidência, configuração, domínio ou precondição inválidos | `validation.<campo>`, `PRECONDITION_FAILED`, `PROFILE_SNAPSHOT_REQUIRED`, `PDF_SIGNATURE_INVALID`, `job.salary.invalid:<campos>`, `profile.draft_required` |
+| `429` | Limite de execução atingido | `agent.run.concurrency_exceeded`, `application.daily_limit_reached` |
+| `500` | Erro interno | `internal_error` |
+
+O servidor MCP repete o mesmo código e status no erro da ferramenta (`{ error: { code, message, status } }`); não
+existe mais o código genérico `radar.rule_violation` para frases sem código. As mensagens vêm do dicionário único
+`ERROR_MESSAGES` (`src/errors.ts`); o MCP só troca a redação de alguns códigos para o agente. Todo código estável
+lançado em `src/` precisa de mensagem nesse dicionário (conferido por `test/error-contract.test.mjs`).
+
+Um recurso de outro projeto responde `404 <recurso>.not_found` em qualquer rota por id. Para um id inexistente, a resposta depende da rota: `GET /api/jobs/{id}`, `GET /api/profiles/{id}`, `GET /api/rounds/{id}`, `GET /api/rounds/{id}/duplicates`, os downloads `GET /api/resumes/{id}/files/(pdf|docx|json)`, `GET /api/base-resumes/{id}/file`, `DELETE /api/base-resumes/{id}` e `GET /api/applications/{id}/evidence/{evidenceId}` respondem o genérico `404 not_found`; as sub-listas `GET /api/jobs/{id}/occurrences`, `/history`, `/feedback` e `GET /api/profiles/{id}/facts` respondem `200 []`, e `GET /api/jobs/{id}/score` responde `200 null` (também quando a vaga não existe); as demais respondem `404 <recurso>.not_found`. `GET /api/profile/active` sem perfil confirmado responde `200 null`. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.

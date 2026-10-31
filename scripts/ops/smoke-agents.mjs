@@ -17,7 +17,8 @@
  *  10. Rodada de busca: prontidão de fonte, ingestão idempotente, conclusão.
  *  11. Endurecimento: token interno obrigatório, automação desligada por padrão.
  *  12. Ponte Telegram: entrega de pergunta humana pela capability vinculada.
- *  13. Servidor MCP oficial via stdio, um processo por papel (handshake, tools/list, tools/call).
+ *  13. Servidor MCP oficial via stdio, um processo por papel (handshake, tools/list, tools/call),
+ *      falando com a instância pela API HTTP (RADAR_API_URL + token de serviço, sem RADAR_DB_PATH).
  *
  * Uso: node scripts/ops/smoke-agents.mjs [--keep-db]
  * Requer: npm run build executado (dist/ presente).
@@ -141,8 +142,7 @@ function mcpCall(child, messages, timeoutMs = 8000) {
     const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error(`MCP timeout; recebido: ${JSON.stringify([...got.keys()])}`)); }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
-      let idx;
-      while ((idx = buffer.indexOf("\n")) >= 0) {
+      for (let idx = buffer.indexOf("\n"); idx >= 0; idx = buffer.indexOf("\n")) {
         const line = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 1);
         if (!line) continue;
@@ -221,6 +221,26 @@ try {
 
   // ---------- 2. coletores ----------
   section("2. coletores (source_scout × 16): descoberta + bloqueios de capacidade");
+  // Vaga de agente só entra de fonte pronta (QAF-03): sem termos aceitos, a descoberta é recusada
+  // como o lote; depois do aceite (sessão humana) e do teste de acesso, entra.
+  const seededSources = expect("GET /api/sources", await api("GET", "/api/sources"), 200);
+  await t("fonte sem termos aceitos recusa job.discovered (422 ROUND_SOURCES_NOT_READY)", async () => {
+    const [scout] = scoutAgents;
+    const domain = scout.allowed_domains[0];
+    const r = await api("POST", "/api/agent-events", {
+      event: "job.discovered", agent_id: scout.id,
+      job: { title: "Antes do aceite", company: "Smoke Teste LTDA", source: scout.name, source_url: `https://${domain}/smoke/antes-do-aceite` },
+    });
+    expect("discover sem termos", r, 422);
+    assert.equal(r.data?.error, "ROUND_SOURCES_NOT_READY");
+  });
+  await t("termos aceitos e teste de acesso registrado nas 16 fontes", async () => {
+    for (const source of seededSources) {
+      expect(`termos ${source.id}`, await api("POST", `/api/sources/${source.id}/terms`, {}), 200);
+      const ready = expect(`prontidão ${source.id}`, await api("POST", `/api/sources/${source.id}/readiness`, { status: "ready", reason: "smoke" }), 200);
+      assert.equal(ready.effectiveReadiness.status, "ready", `${source.id} não ficou pronta`);
+    }
+  });
   const jobsByScout = {};
   for (const [index, scout] of scoutAgents.entries()) {
     const domain = scout.allowed_domains[0];
@@ -239,6 +259,7 @@ try {
       assert.ok(job.id, "vaga criada sem id");
       assert.equal(job.decision, "pending");
       assert.equal(job.status, "found");
+      assert.ok(scout.source_ids.includes(job.source), `vaga gravada com a fonte ${job.source}, não com o id da fonte do coletor (QAF-10)`);
       jobsByScout[scout.id] = job.id;
       const prov = expect(`${scout.name} provenance`, await api("GET", `/api/jobs/${job.id}/provenance`), 200);
       assert.ok(prov.evidence.length > 0, "sem registros de evidência");
@@ -267,6 +288,14 @@ try {
   const anyOtherJob = jobsByScout[scoutAgents.find((a) => a.id !== gupyScout.id).id];
 
   // ---------- 3. enriquecimento ----------
+  // A seção 9 começa sem fonte pronta: o teste de acesso volta a "configurada" (os termos ficam).
+  await t("teste de acesso das fontes volta a pendente para a rodada da seção 9", async () => {
+    for (const source of seededSources) {
+      const reset = expect(`prontidão ${source.id}`, await api("POST", `/api/sources/${source.id}/readiness`, { status: "configured", reason: "" }), 200);
+      assert.notEqual(reset.effectiveReadiness.status, "ready");
+    }
+  });
+
   section("3. enriquecimento de vaga (job_enrichment): evidência, conflito e bloqueios");
   await t("salary_min/max na lista de campos editáveis do agente", () => {
     assert.ok(salaryAgent.editable_fields.includes("salary_min"));
@@ -369,16 +398,20 @@ try {
   });
   let profileId = "";
   let snapshotId = "";
+  // O servidor gera o id de cada fato; o redator cita o id do fato de habilidades.
+  let skillFactId = "";
   await t("perfil criado com fatos do usuário (estado confirmed)", async () => {
     const r = await api("POST", "/api/profiles", {
       base_resume_id: baseResumeId,
       facts: [
-        { id: "fact-skill", type: "skills", value: ["Analista de Dados", "SQL", "Power BI"], origin: "user", state: "confirmed" },
-        { id: "fact-exp", type: "experience", value: ["5 anos em análise de dados industriais"], origin: "user", state: "confirmed" },
+        { type: "skills", value: ["Analista de Dados", "SQL", "Power BI"], origin: "user", state: "confirmed" },
+        { type: "experience", value: ["5 anos em análise de dados industriais"], origin: "user", state: "confirmed" },
       ],
     });
     const profile = expect("criar perfil", r, 201);
     profileId = profile.id;
+    skillFactId = profile.facts.find((f) => f.type === "skills")?.id ?? "";
+    assert.ok(skillFactId, "fato de habilidades sem id");
     assert.equal(profile.status, "draft");
     assert.ok(profile.facts.some((f) => f.state === "confirmed"));
   });
@@ -427,31 +460,12 @@ try {
   // ---------- 7. redator + revisor ATS ----------
   section("7. redator de currículo (ATS) e revisor independente");
   let resumeA = "";
-  await t("interesse registrado e currículo ATS gerado a partir de fatos confirmados", async () => {
-    expect("interesse", await api("POST", `/api/jobs/${job0}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" }), 200);
-    const r = await api("POST", "/api/resumes/generate", {
-      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId,
-      facts_used: ["fact-skill"], keywords: ["SQL"], gaps: ["Power BI avançado fica como lacuna"],
-    });
-    const resume = expect("gerar ATS", r, 201);
-    resumeA = resume.id;
-    assert.equal(resume.generation_source, "writer");
-    assert.match(resume.content, /SQL/);
-  });
-  await t("gerar currículo sem interesse na vaga é bloqueado", async () => {
-    const r = await api("POST", "/api/resumes/generate", {
-      job_id: anyOtherJob, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: ["fact-skill"],
-    });
-    assert.ok(r.status >= 400 && r.status < 500, `esperava 4xx, veio ${r.status}`);
-  });
-  await t("revisão independente aprova conteúdo factual (pass)", async () => {
-    const r = await api("POST", `/api/resumes/${resumeA}/review`, { verdict: "pass" });
-    const resume = expect("review pass", r, 200);
-    assert.equal(resume.review_status, "pass");
-  });
+  // Roda antes do currículo factual: gerar de novo para a mesma vaga substitui o rascunho
+  // anterior (superseded), e o currículo que segue para APROVO precisa ser o mais recente.
   await t("revisor detecta conteúdo inventado e bloqueia aprovação", async () => {
+    expect("interesse", await api("POST", `/api/jobs/${job0}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" }), 200);
     const gen = expect("gerar 2", await api("POST", "/api/resumes/generate", {
-      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: ["fact-skill"], keywords: ["SQL"],
+      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: [skillFactId], keywords: ["SQL"],
     }), 201);
     expect("editar", await api("PATCH", `/api/resumes/${gen.id}`, { status: "review", content: "skills: Analista de Dados\ncertificacao: INVENTADA" }), 200);
     const review = expect("review fail", await api("POST", `/api/resumes/${gen.id}/review`, { verdict: "pass" }), 200);
@@ -463,6 +477,27 @@ try {
     assert.equal(approve.data?.error, "resume.unverified_facts");
   });
 
+  await t("interesse registrado e currículo ATS gerado a partir de fatos confirmados", async () => {
+    const r = await api("POST", "/api/resumes/generate", {
+      job_id: job0, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId,
+      facts_used: [skillFactId], keywords: ["SQL"], gaps: ["Power BI avançado fica como lacuna"],
+    });
+    const resume = expect("gerar ATS", r, 201);
+    resumeA = resume.id;
+    assert.equal(resume.generation_source, "writer");
+    assert.match(resume.content, /SQL/);
+  });
+  await t("gerar currículo sem interesse na vaga é bloqueado", async () => {
+    const r = await api("POST", "/api/resumes/generate", {
+      job_id: anyOtherJob, profile_snapshot_id: snapshotId, base_resume_id: baseResumeId, facts_used: [skillFactId],
+    });
+    assert.ok(r.status >= 400 && r.status < 500, `esperava 4xx, veio ${r.status}`);
+  });
+  await t("revisão independente aprova conteúdo factual (pass)", async () => {
+    const r = await api("POST", `/api/resumes/${resumeA}/review`, { verdict: "pass" });
+    const resume = expect("review pass", r, 200);
+    assert.equal(resume.review_status, "pass");
+  });
   // ---------- 8. candidatura ----------
   section("8. assistente de candidatura: autorização explícita, fila, pergunta humana, envio");
   let applicationId = "";
@@ -720,10 +755,16 @@ try {
 
   // ---------- 11. MCP ----------
   section("11. servidor MCP oficial (stdio): handshake, tools/list, tools/call");
-  await t("MCP lista exatamente as ferramentas registradas e lê os 24 agentes do banco", async () => {
+  // #10: o MCP não abre o SQLite; fala com a instância isolada pela API, com o token de serviço.
+  const mcpEnv = (role) => {
+    const env = { ...process.env, RADAR_API_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_FORWARDED_PROTO: "https", RADAR_MCP_ROLE: role };
+    delete env.RADAR_DB_PATH;
+    return env;
+  };
+  await t("MCP lista exatamente as ferramentas registradas e lê os 24 agentes pela API", async () => {
     const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
       cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, RADAR_DB_PATH: dbPath, RADAR_MCP_ROLE: "leitura" },
+      env: mcpEnv("leitura"),
     });
     try {
       const responses = await mcpCall(child, [
@@ -752,7 +793,7 @@ try {
     for (const [role, spec] of Object.entries(RADAR_MCP_ROLES)) {
       const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
         cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, RADAR_DB_PATH: dbPath, RADAR_MCP_ROLE: role },
+        env: mcpEnv(role),
       });
       try {
         const responses = await mcpCall(child, [

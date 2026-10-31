@@ -81,7 +81,7 @@ const SKILL_DICTIONARY: ReadonlyArray<readonly string[]> = [
 ];
 
 /** Normaliza preservando + e # (C++, C#) e o ponto interno (node.js). */
-export function coverageNormalize(value: string): string {
+function coverageNormalize(value: string): string {
   return ` ${String(value ?? "")} `
     .replace(/(^|[^\p{L}\p{N}])\.net(?![\p{L}\p{N}])/giu, "$1 dotnet ")
     .normalize("NFKD")

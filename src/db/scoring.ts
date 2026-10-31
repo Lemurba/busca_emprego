@@ -8,9 +8,9 @@ import { parseCheckHash, type ResumeParseCheck } from "../resume-parse-check.js"
 
 export type CriterionBasis = "explicit" | "estimated";
 
-export const BASIS_LABELS: Readonly<Record<CriterionBasis, string>> = Object.freeze({ explicit: "explícito na vaga", estimated: "estimado" });
+const BASIS_LABELS: Readonly<Record<CriterionBasis, string>> = Object.freeze({ explicit: "explícito na vaga", estimated: "estimado" });
 
-export const MATCH_CRITERION_LABELS: Readonly<Record<MatchCriterionKey, string>> = Object.freeze({
+const MATCH_CRITERION_LABELS: Readonly<Record<MatchCriterionKey, string>> = Object.freeze({
   role_family: "Família do cargo",
   skills: "Habilidades",
   seniority: "Senioridade",
@@ -19,7 +19,7 @@ export const MATCH_CRITERION_LABELS: Readonly<Record<MatchCriterionKey, string>>
   explicit_preferences: "Preferências declaradas",
 });
 
-export const MATCH_SCORE_EXPLANATION = "Estimativa de quanto a vaga combina com seu perfil. Não é a nota de nenhum ATS.";
+const MATCH_SCORE_EXPLANATION = "Estimativa de quanto a vaga combina com seu perfil. Não é a nota de nenhum ATS.";
 
 export interface CriterionBasisEntry {
   basis: CriterionBasis;
@@ -89,23 +89,26 @@ export function matchScoreComponents(criteriaJson: unknown, basisJson: unknown):
   });
 }
 
-/** Linha de match_scores pronta para a API: JSON decodificado + componentes explicados. */
+/**
+ * Linha de match_scores pronta para a API: JSON decodificado + componentes explicados. As colunas
+ * `*_json` cruas saem da resposta (F15): só a forma decodificada vai ao painel, como em MatchScore.
+ */
 export function mapMatchScoreRow(row: Record<string, unknown>) {
-  const { criteria_basis_json: basisJson, ...rest } = row;
+  const { criteria_basis_json: basisJson, criteria_json: criteriaJson, evidence_json: evidenceJson, strengths_json: strengthsJson, gaps_json: gapsJson, ...rest } = row;
   return {
     ...rest,
-    criteria: parse(row.criteria_json, []),
-    evidence: parse(row.evidence_json, []),
-    strengths: parse(row.strengths_json, []),
-    gaps: parse(row.gaps_json, []),
-    components: matchScoreComponents(row.criteria_json, basisJson),
+    criteria: parse(criteriaJson, []),
+    evidence: parse(evidenceJson, []),
+    strengths: parse(strengthsJson, []),
+    gaps: parse(gapsJson, []),
+    components: matchScoreComponents(criteriaJson, basisJson),
     preference_adjustment: Number(row.preference_adjustment ?? 0),
     explanation: MATCH_SCORE_EXPLANATION,
   };
 }
 
 /** Resumo do teste de leitura para listas (sem o texto extraído, que vai pela rota própria). */
-export function parseCheckSummary(row: Record<string, unknown>) {
+function parseCheckSummary(row: Record<string, unknown>) {
   const check = parse<ResumeParseCheck | null>(row.parse_check_json, null);
   if (!check) return null;
   const { extracted_text: _text, ...summary } = check;

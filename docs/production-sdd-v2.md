@@ -1,5 +1,7 @@
 # SDD v2 — Busca Emprego
 
+> **Documento histórico (18/09/2026).** Especificação v2 mantida como registro de requisitos. As 209 caixas `[ ]` não são mais atualizadas: muitas já foram entregues (por exemplo, migrações versionadas em `src/db/migrations/`, bootstrap enxuto, perfil e rodadas no painel, agendamentos sem LLM do Hermes) e outras ficaram fora do escopo (retenção/LGPD numa instalação pessoal auto-hospedada). Não use este arquivo para saber o que está pronto: consulte o [README](../README.md), [`docs/agent-api.md`](agent-api.md), [`docs/security.md`](security.md), [`docs/operations-runbook.md`](operations-runbook.md) e a seção “Status da aplicação” de [`docs/auditoria-2026-10-30.md`](auditoria-2026-10-30.md#status-da-aplicação).
+
 **Status:** implementação parcial em 18/09/2026; itens marcados foram implementados no backend e/ou cobertos pelos testes existentes
 **Leitura:** `[x]` indica implementação local; integração real, E2E e produção continuam desmarcados quando ausentes.
 **Versão:** 2.0-draft

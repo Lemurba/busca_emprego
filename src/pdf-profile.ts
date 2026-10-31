@@ -1,26 +1,25 @@
-import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import { isMainThread, MessageChannel, receiveMessageOnPort, Worker, workerData, type MessagePort } from "node:worker_threads";
 
 export const MAX_PDF_BYTES = 5 * 1024 * 1024;
 /** Tempo máximo da extração via pdfjs antes de marcar o PDF para revisão. */
-export const PDF_EXTRACTION_TIMEOUT_MS = 20_000;
+const PDF_EXTRACTION_TIMEOUT_MS = 20_000;
 /** Tamanho máximo de um stream descomprimido pelo extrator legado (proteção contra bomba de compressão). */
 export const MAX_INFLATED_STREAM_BYTES = 20_000_000;
 /** Soma máxima de bytes descomprimidos por arquivo no extrator legado. */
-export const MAX_INFLATED_TOTAL_BYTES = 50_000_000;
+const MAX_INFLATED_TOTAL_BYTES = 50_000_000;
 /** Limites de memória do worker de extração: um PDF hostil derruba só o worker, não o servidor. */
-export const PDF_WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, codeRangeSizeMb: 64, stackSizeMb: 4 } as const;
+const PDF_WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, codeRangeSizeMb: 64, stackSizeMb: 4 } as const;
 /** Proporção mínima de letras/dígitos entre os caracteres visíveis para aceitar o texto extraído. */
-export const MIN_TEXT_LETTER_RATIO = 0.6;
+const MIN_TEXT_LETTER_RATIO = 0.6;
 /** Proporção máxima de caracteres de controle/privados/substituição tolerada no texto extraído. */
-export const MAX_TEXT_GARBAGE_RATIO = 0.02;
+const MAX_TEXT_GARBAGE_RATIO = 0.02;
 /**
  * Proporção mínima de caracteres do repertório esperado (ASCII, Latin-1/WinAnsi,
  * pontuação geral). Fontes CID sem ToUnicode costumam virar códigos
  * aleatórios fora desse repertório; currículos em outra escrita vão para revisão.
  */
-export const MIN_TEXT_COMMON_RATIO = 0.7;
+const MIN_TEXT_COMMON_RATIO = 0.7;
 
 export type PdfExtractionStatus = "extracted" | "needs_review";
 
@@ -45,11 +44,8 @@ export interface ProposedFact {
   excerpt: string;
   origin: "pdf";
   confidence: number;
-  state: "proposed";
-}
-
-export function sha256(value: Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
+  /** `needs_review` para palpites de baixa confiança (nome, cargo-alvo). */
+  state: "proposed" | "needs_review";
 }
 
 export function validatePdf(bytes: Uint8Array, mimeType = "application/pdf"): void {
@@ -471,31 +467,216 @@ export function findPhones(text: string): string[] {
   return found;
 }
 
-/** Conservative parser: only facts literally present in extracted text become proposed facts. */
+// ---------------------------------------------------------------------------
+// Fatos propostos (I49-10): cada seção vai do seu título até o próximo título
+// (inclusive atravessando páginas), cada item listado vira um fato próprio e
+// cada fato leva a página real da linha onde começa. Nome e cargo-alvo saem do
+// cabeçalho com confiança baixa e estado `needs_review`.
+// ---------------------------------------------------------------------------
+
+type SectionKind = "summary" | "skills" | "experience" | "education" | "certifications" | "languages" | "projects";
+
+/**
+ * Títulos reconhecidos (sem acento, minúsculos). `null` = seção sem fatos (só encerra a anterior).
+ * Map, e não objeto literal: "constructor" ou "toString" num currículo não são títulos.
+ */
+const SECTION_HEADINGS = new Map<string, SectionKind | null>();
+const sectionHeadingAliases: Array<[SectionKind | null, string[]]> = [
+  ["summary", ["resumo", "resumo profissional", "sobre", "sobre mim", "perfil", "perfil profissional", "objetivo", "objetivo profissional", "summary", "professional summary", "about", "about me", "profile", "objective"]],
+  ["skills", ["competencias", "competencias tecnicas", "habilidades", "habilidades tecnicas", "conhecimentos", "conhecimentos tecnicos", "tecnologias", "ferramentas", "stack", "skills", "technical skills", "hard skills", "soft skills"]],
+  ["experience", ["experiencia", "experiencias", "experiencia profissional", "experiencias profissionais", "historico profissional", "trajetoria profissional", "experience", "work experience", "professional experience", "employment history", "work history"]],
+  ["education", ["formacao", "formacao academica", "educacao", "escolaridade", "education", "academic background"]],
+  ["certifications", ["certificacao", "certificacoes", "certificados", "cursos e certificacoes", "certificacoes e cursos", "cursos", "cursos complementares", "cursos livres", "licencas e certificados", "certification", "certifications", "licenses and certifications"]],
+  ["languages", ["idioma", "idiomas", "linguas", "language", "languages"]],
+  ["projects", ["projeto", "projetos", "projetos relevantes", "project", "projects"]],
+  [null, ["contato", "contatos", "contact", "dados pessoais", "informacoes pessoais", "informacoes adicionais", "additional information", "interesses", "interests", "referencias", "references", "voluntariado", "volunteering", "premios", "awards", "publicacoes", "publications", "outros"]],
+];
+for (const [kind, names] of sectionHeadingAliases) for (const name of names) SECTION_HEADINGS.set(name, kind);
+
+const BULLET = /^\s*(?:[•·▪▫◦‣⁃●○■□►▶✓✔*–—-]|\d{1,2}[.)])\s+/u;
+const LIST_SEPARATOR = /\s*[,;|•·▪●]\s*/u;
+const YEAR_OR_CURRENT = /\b(?:19|20)\d{2}\b|\b(?:atual|atualmente|presente|present|current)\b/iu;
+const CONTACT_LIKE = /@|https?:\/\/|www\.|\d{4}|linkedin|github/iu;
+
+function headingKey(value: string): string {
+  return value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("pt-BR")
+    .replace(/^[\s#*_=>•·-]+|[\s*_:=•·-]+$/gu, "").replace(/\s+/gu, " ").trim();
+}
+
+/** Seções de entradas com detalhes: "Tecnologias: ..." ou "Projeto: ..." dentro delas é detalhe da entrada. */
+const ENTRY_SECTIONS = new Set<SectionKind | null | undefined>(["experience", "education", "projects"]);
+
+/**
+ * Linha de título: a linha inteira é um nome de seção, ou "Título: conteúdo" na mesma linha.
+ * Linha com marcador nunca é título ("• Stack: Node.js" é detalhe). A forma "Título: conteúdo"
+ * só vale fora de seções de entradas e, dentro de uma seção, só se mudar de tipo de seção
+ * ("Objetivo: ..." no meio do resumo continua o resumo).
+ */
+function matchHeading(line: string, current: SectionKind | null | undefined): { kind: SectionKind | null; rest: string } | null {
+  if (BULLET.test(line)) return null;
+  const whole = headingKey(line);
+  if (whole.length <= 50 && SECTION_HEADINGS.has(whole)) return { kind: SECTION_HEADINGS.get(whole)!, rest: "" };
+  if (ENTRY_SECTIONS.has(current)) return null;
+  const colon = line.indexOf(":");
+  if (colon > 0 && colon <= 40) {
+    const key = headingKey(line.slice(0, colon));
+    const kind = SECTION_HEADINGS.get(key);
+    if (kind !== undefined && (current === undefined || kind !== current)) return { kind, rest: line.slice(colon + 1).trim() };
+  }
+  return null;
+}
+
+interface SourceLine { text: string; page: number; pageText: string }
+
+const stripBullet = (line: string) => line.replace(BULLET, "").trim();
+
+/**
+ * Itens de lista curtos (competências, idiomas, certificações): um por linha, e linhas com
+ * separadores são divididas. Com `keepYears`, um pedaço só de números ("AWS SAA, 2023") fica
+ * junto do item anterior em vez de virar um fato próprio.
+ */
+function listItems(lines: SourceLine[], keepYears = false): SourceLine[] {
+  const items: SourceLine[] = [];
+  for (const line of lines) {
+    // Vírgulas dentro de parênteses ("Inglês (avançado, C1)") não separam itens.
+    const lineStart = items.length;
+    const protectedText = stripBullet(line.text).replace(/\([^)]*\)/gu, (group) => group.replace(/[,;|]/gu, "\u0000"));
+    for (const part of protectedText.split(LIST_SEPARATOR)) {
+      const value = part.replaceAll("\u0000", ",").replace(/[.;,]+$/u, "").trim();
+      if (!value || !/[\p{L}\p{N}]/u.test(value)) continue;
+      const previous = items.length > lineStart ? items.at(-1) : undefined;
+      if (keepYears && !/\p{L}/u.test(value) && previous) previous.text = `${previous.text}, ${value}`;
+      else items.push({ ...line, text: value });
+    }
+  }
+  return items;
+}
+
+/**
+ * Entradas de várias linhas (experiência, formação, projetos): uma linha de cabeçalho (sem marcador)
+ * abre a entrada e os marcadores seguintes são detalhes dela. Uma nova linha sem marcador depois de
+ * detalhes, ou uma segunda linha com ano/período, abre a próxima entrada. No formato
+ * "Cargo / Empresa | período", uma linha sem ano seguida de uma linha com ano (ambas sem marcador)
+ * abre a próxima entrada quando a atual já tem o seu período.
+ */
+const DETAIL_LABEL = /^[\p{L} ]{2,30}:\s+\S/u;
+
+/**
+ * QAF-13: título completo numa linha só ("Cargo - Empresa (2018-2021)"): antes do período há
+ * cargo e empresa separados por " - ", " — ", " @ " ou " | ". Uma linha assim abre a própria
+ * entrada, então a linha anterior a ela é detalhe da entrada atual, não o cargo da próxima
+ * (diferente de "Empresa X | 2020 - atual", que só traz a empresa antes do período).
+ */
+function completeTitle(text: string): boolean {
+  const period = YEAR_OR_CURRENT.exec(text);
+  if (!period) return false;
+  const prefix = text.slice(0, period.index).replace(/[\s(|,–—-]+$/u, "");
+  return /\S\s[-–—@|]\s\S/u.test(prefix);
+}
+
+function entryItems(lines: SourceLine[]): Array<{ first: SourceLine; parts: string[] }> {
+  const entries: Array<{ first: SourceLine; parts: string[]; hasBullets: boolean; hasYear: boolean }> = [];
+  const allBullets = lines.length > 1 && lines.every((line) => BULLET.test(line.text));
+  for (const [index, line] of lines.entries()) {
+    const bullet = BULLET.test(line.text);
+    const text = stripBullet(line.text);
+    if (!text) continue;
+    const year = YEAR_OR_CURRENT.test(text);
+    const current = entries.at(-1);
+    const next = lines[index + 1];
+    const titleBeforePeriod = !year && !!next && !BULLET.test(next.text) && YEAR_OR_CURRENT.test(stripBullet(next.text)) && !completeTitle(stripBullet(next.text));
+    // "Projeto: ...", "Tecnologias: ..." sem marcador também são detalhes da entrada atual.
+    const labeled = DETAIL_LABEL.test(text);
+    const startsNew = !current || (allBullets ? bullet : !bullet && !labeled && (current.hasBullets || (year && current.hasYear) || (titleBeforePeriod && current.hasYear)));
+    if (startsNew) entries.push({ first: line, parts: [text], hasBullets: false, hasYear: year });
+    else {
+      current.parts.push(text);
+      current.hasBullets ||= bullet;
+      current.hasYear ||= year;
+    }
+  }
+  return entries;
+}
+
+/** Nome provável: 2 a 6 palavras com inicial maiúscula (partículas "de/da/dos/e" permitidas), sem dígitos. */
+const NOT_NAME = /(?<!\p{L})(?:curr[ií]culo|curriculum|resum[eé]|vitae|cv)(?!\p{L})/iu;
+
+function looksLikeName(line: string): boolean {
+  if (line.length > 70 || /[\d@:/|•]/u.test(line) || NOT_NAME.test(line)) return false;
+  const words = line.split(/\s+/u);
+  if (words.length < 2 || words.length > 6) return false;
+  return words.every((word) => /^(?:d[aeo]s?|e|van|von|del|di)$/u.test(word) || /^\p{Lu}[\p{L}'’.-]*$/u.test(word));
+}
+
+/** Localização (não cargo): "São Paulo, SP", "Brasil", "Remoto"; qualquer vírgula já descarta. */
+const LOCATION_LIKE = /,|(?<!\p{L})(?:brasil|brazil|remoto|remote|h[ií]brido|hybrid)(?!\p{L})/iu;
+const STATE_SUFFIX = /\s[-–/]\s?\p{Lu}{2}$/u;
+
+/** Cargo provável: linha curta de texto, sem contato nem localização, logo depois do nome. */
+function looksLikeRole(line: string): string | null {
+  const value = line.split(/\s+[|•·]\s+/u)[0]!.trim();
+  if (!value || value.length > 80 || CONTACT_LIKE.test(value) || LOCATION_LIKE.test(value) || STATE_SUFFIX.test(value) || !/\p{L}{3}/u.test(value)) return null;
+  if (value.split(/\s+/u).length > 10) return null;
+  return value;
+}
+
+/** Conservador: só vira fato proposto o que está literalmente no texto extraído. */
 export function proposeFacts(extraction: PdfExtraction): ProposedFact[] {
   if (extraction.status !== "extracted") return [];
   const facts: ProposedFact[] = [];
+  const seen = new Set<string>();
+  const add = (type: string, value: string, source: { page: number; pageText: string; anchor: string }, confidence: number, state: ProposedFact["state"] = "proposed") => {
+    const key = `${type}\u0000${value.toLocaleLowerCase("pt-BR")}`;
+    if (!value || seen.has(key)) return;
+    seen.add(key);
+    facts.push({ type, value, page: source.page, excerpt: excerpt(source.pageText, source.anchor), origin: "pdf", confidence, state });
+  };
   const pages = extraction.pages.length ? extraction.pages : [{ page: 1, text: extraction.text, startOffset: 0 }];
+  const lines: SourceLine[] = [];
   for (const page of pages) {
-    const add = (type: string, value: string, confidence = 0.95) => facts.push({ type, value, page: page.page, excerpt: excerpt(page.text, value), origin: "pdf", confidence, state: "proposed" });
-    for (const email of page.text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) ?? []) add("contact_email", email);
-    for (const phone of findPhones(page.text)) add("contact_phone", phone, 0.85);
-    for (const link of page.text.match(/https?:\/\/[^\s)]+/gu) ?? []) add("professional_link", link, 0.9);
-    const lines = page.text.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
-    const headings: Array<[RegExp, string]> = [
-      [/^(?:resumo|summary|perfil|profile)\s*:?[\s-]*$/iu, "summary"],
-      [/^(?:compet[eê]ncias|skills|tecnologias)\s*:?[\s-]*$/iu, "skills"],
-      [/^(?:experi[eê]ncia|experience|hist[oó]rico profissional)\s*:?[\s-]*$/iu, "experience"],
-      [/^(?:forma[cç][aã]o|education|educa[cç][aã]o)\s*:?[\s-]*$/iu, "education"],
-      [/^(?:certifica[cç][oõ]es?|certifications?)\s*:?[\s-]*$/iu, "certifications"],
-      [/^(?:idiomas?|languages?)\s*:?[\s-]*$/iu, "languages"],
-      [/^(?:projetos?|projects?)\s*:?[\s-]*$/iu, "projects"],
-    ];
-    for (let index = 0; index < lines.length; index += 1) {
-      const heading = headings.find(([pattern]) => pattern.test(lines[index]));
-      if (!heading) continue;
-      const section = lines.slice(index + 1, index + 4).join("; ");
-      if (section) add(heading[1], section, 0.75);
+    const source = (anchor: string) => ({ page: page.page, pageText: page.text, anchor });
+    for (const email of page.text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) ?? []) add("contact_email", email, source(email), 0.95);
+    for (const phone of findPhones(page.text)) add("contact_phone", phone, source(phone), 0.85);
+    for (const link of page.text.match(/https?:\/\/[^\s)]+/gu) ?? []) add("professional_link", link, source(link), 0.9);
+    for (const text of page.text.split(/\r?\n/gu)) if (text.trim()) lines.push({ text: text.trim(), page: page.page, pageText: page.text });
+  }
+
+  // Corta o texto em seções: cada uma termina no próximo título reconhecido (mesmo em outra página).
+  const header: SourceLine[] = [];
+  const sections: Array<{ kind: SectionKind | null; lines: SourceLine[] }> = [];
+  for (const line of lines) {
+    const heading = matchHeading(line.text, sections.at(-1)?.kind);
+    if (heading) {
+      sections.push({ kind: heading.kind, lines: heading.rest ? [{ ...line, text: heading.rest }] : [] });
+      continue;
+    }
+    if (sections.length) sections.at(-1)!.lines.push(line);
+    else header.push(line);
+  }
+
+  // Cabeçalho: nome e cargo são palpites (o PDF não diz o que cada linha é) e pedem revisão.
+  // Só as primeiras linhas do cabeçalho: o nome abre o currículo.
+  const nameLine = header.slice(0, 3).find((line) => looksLikeName(line.text));
+  if (nameLine) {
+    add("full_name", nameLine.text, { page: nameLine.page, pageText: nameLine.pageText, anchor: nameLine.text }, 0.4, "needs_review");
+    const next = header[header.indexOf(nameLine) + 1];
+    const role = next ? looksLikeRole(next.text) : null;
+    if (next && role) add("target_role", role, { page: next.page, pageText: next.pageText, anchor: next.text }, 0.35, "needs_review");
+  }
+
+  for (const section of sections) {
+    if (!section.kind || !section.lines.length) continue;
+    const kind = section.kind;
+    const at = (line: SourceLine) => ({ page: line.page, pageText: line.pageText, anchor: line.text });
+    if (kind === "summary") {
+      const first = section.lines[0]!;
+      add(kind, section.lines.map((line) => stripBullet(line.text)).join(" ").replace(/\s+/gu, " ").trim(), at(first), 0.75);
+    } else if (kind === "skills" || kind === "languages") {
+      for (const item of listItems(section.lines)) add(kind, item.text, { page: item.page, pageText: item.pageText, anchor: item.text }, 0.75);
+    } else if (kind === "certifications") {
+      for (const item of listItems(section.lines, true)) add(kind, item.text, { page: item.page, pageText: item.pageText, anchor: item.text }, 0.75);
+    } else {
+      for (const entry of entryItems(section.lines)) add(kind, entry.parts.join("; "), at(entry.first), 0.75);
     }
   }
   return facts;
@@ -506,12 +687,12 @@ export function utf8Size(value: string): number {
 }
 
 /** Ordem de prioridade das chaves de topo ao truncar o contexto; demais chaves seguem na ordem original. */
-export const PROFILE_CONTEXT_PRIORITY = [
+const PROFILE_CONTEXT_PRIORITY = [
   "name", "nome", "headline", "titulo", "title", "summary", "resumo", "target_roles", "cargos_alvo",
   "location", "localizacao", "skills", "competencias", "confirmed_facts", "experience", "experiencia",
   "education", "formacao", "certifications", "certificacoes", "languages", "idiomas", "projects", "projetos",
 ] as const;
-export const PROFILE_CONTEXT_TRUNCATION_KEY = "_truncated";
+const PROFILE_CONTEXT_TRUNCATION_KEY = "_truncated";
 const TRUNCATED_STRING_SUFFIX = "…[truncado]";
 
 interface TruncationStats { omitted: number; truncated: number; stringCap: number }

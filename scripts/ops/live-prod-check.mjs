@@ -12,28 +12,15 @@
 //
 // Variáveis: RADAR_APP_DIR (diretório do app com .env.local; padrão: raiz do repo),
 // RADAR_BASE_URL, PORT, RADAR_INTERNAL_SERVICE_TOKEN (ambiente tem precedência).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readEnvLocal } from "./lib/env-local.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : repoRoot;
 
-function readLocalEnv(path) {
-  const vars = {};
-  try {
-    for (const raw of readFileSync(path, "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#")) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch {}
-  return vars;
-}
-
-const env = readLocalEnv(join(appDir, ".env.local"));
+const env = readEnvLocal(appDir);
 const token = process.env.RADAR_INTERNAL_SERVICE_TOKEN ?? env.RADAR_INTERNAL_SERVICE_TOKEN ?? "";
 const port = process.env.PORT ?? env.PORT ?? "8787";
 const base = (process.env.RADAR_BASE_URL ?? `http://127.0.0.1:${port}`).replace(/\/+$/u, "");
@@ -113,6 +100,10 @@ try {
     });
     check("agent.status com token → 201", run.status === 201, `status ${run.status}`);
     check("execução presa à versão publicada", run.data?.config_version_id === scout.published_version_id, `version ${run.data?.config_version_id}`);
+
+    // Vaga de agente só entra de fonte pronta: termos aceitos no painel e teste de acesso (QAF-03).
+    const gupy = asArray((await call("GET", "/api/sources")).data).find((source) => source?.id === "gupy");
+    check("fonte Gupy pronta (termos aceitos e teste de acesso)", gupy?.effectiveReadiness?.status === "ready", `${gupy?.effectiveReadiness?.status ?? "não encontrada"} ${gupy?.effectiveReadiness?.reason ?? ""}`.trim());
 
     const stamp = Date.now();
     const jobUrl = `https://${asArray(scout.allowed_domains)[0]}/teste-onboarding/${stamp}`;

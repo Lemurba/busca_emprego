@@ -101,6 +101,10 @@ try {
     await refusedToService("POST", `/api/applications/${applicationId}/revoke-auto`, {});
     await refusedToService("POST", `/api/applications/${applicationId}/select-manual`, {});
     await refusedToService("PATCH", `/api/applications/${applicationId}`, { status: "submitted" });
+    // N2: devolver o currículo aprovado para revisão desfaz o APROVO e revoga o AUTORIZO.
+    await refusedToService("PATCH", `/api/resumes/${resumeId}`, { status: "review" });
+    assert.equal((await svc("GET", `/api/resumes/${resumeId}`)).data.status, "approved", "a recusa não desfaz o APROVO");
+    assert.equal((await svc("GET", "/api/authorized-applications")).data.length, 1, "a recusa não revoga o AUTORIZO");
   });
 
   await test("#10: demais portões humanos também recusam o token de serviço", async () => {
@@ -113,9 +117,137 @@ try {
     await refusedToService("POST", "/api/agents", { name: "Agente do serviço", role_type: "custom" });
     await refusedToService("POST", "/api/agents/qualquer/publish", { version_id: "v" });
     await refusedToService("POST", "/api/agents/qualquer/rollback", { version_id: "v" });
+    await refusedToService("POST", "/api/agents/qualquer/discard-draft", { version_id: "v" });
+    // Responder pergunta pelo painel e desfazer decisão de duplicata também são decisões humanas.
+    await refusedToService("POST", "/api/human-questions/qualquer/respond", { action: "answer", answer: "Sim" });
+    await refusedToService("POST", "/api/possible-duplicates/qualquer/undo", {});
+    // QA-04/TD-07: revisão de fato do perfil, mescla de duplicata, conflito de enriquecimento e exclusão do PDF-base.
+    await refusedToService("POST", "/api/profiles/qualquer/facts/fato/review", { state: "confirmed" });
+    await refusedToService("POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" });
+    await refusedToService("POST", "/api/field-conflicts/qualquer/resolve", { choice: "candidate" });
+    await refusedToService("DELETE", "/api/base-resumes/qualquer", {});
+    // N1: excluir agente ou fonte é irreversível, como excluir o currículo-base.
+    await refusedToService("DELETE", "/api/agents/qualquer", {});
+    await refusedToService("DELETE", "/api/sources/qualquer", {});
+    // Fato declarado (origin=user) ou já confirmado vindo do serviço é decisão humana.
+    await refusedToService("POST", "/api/profiles", { facts: [{ type: "skills", value: "SQL", origin: "user" }] });
+    await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "user" });
+    await refusedToService("POST", "/api/profiles/qualquer/facts", { type: "skills", value: "SQL", origin: "pdf", state: "confirmed", evidence_page: 1, evidence_excerpt: "SQL" });
+    await refusedToService("PATCH", "/api/profiles/qualquer", { facts: [{ type: "skills", value: "SQL", origin: "user", state: "confirmed" }] });
+    // O contexto do rascunho vai inteiro para o snapshot ao confirmar: só a sessão o escreve.
+    await refusedToService("POST", "/api/profiles", { context: { name: "Fake", skills: ["COBOL"] } });
+    await refusedToService("PATCH", "/api/profiles/qualquer", { context: { name: "Fake" } });
+    await refusedToService("PATCH", "/api/profiles/qualquer", { context_json: "{\"name\":\"Fake\"}" });
     // Sem credencial nenhuma continua 401; com a sessão a rota é alcançada (404 do recurso).
     assert.equal((await call(json, "POST", "/api/profiles/qualquer/confirm", {})).status, 401);
     assert.notEqual((await human("POST", "/api/sources/qualquer/terms", {})).status, 403);
+    for (const [method, path, body] of [
+      ["POST", "/api/profiles/qualquer/facts/fato/review", { state: "confirmed" }],
+      ["POST", "/api/possible-duplicates/qualquer/resolve", { status: "merged" }],
+      ["POST", "/api/field-conflicts/qualquer/resolve", { choice: "candidate" }],
+      ["DELETE", "/api/base-resumes/qualquer", {}],
+      ["POST", "/api/human-questions/qualquer/respond", { action: "answer", answer: "Sim" }],
+      ["POST", "/api/possible-duplicates/qualquer/undo", {}],
+    ]) assert.equal((await human(method, path, body)).status, 404, `${method} ${path} com a sessão chega ao recurso`);
+  });
+
+  await test("QA-04: o serviço propõe fatos do perfil; revisar e confirmar ficam com a sessão", async () => {
+    const before = (await svc("GET", "/api/profiles")).data.length;
+    await refusedToService("POST", "/api/profiles", { facts: [{ type: "skills", value: "SQL", state: "confirmed", origin: "pdf", evidence_page: 1, evidence_excerpt: "SQL" }] });
+    assert.equal((await svc("GET", "/api/profiles")).data.length, before, "a recusa não cria rascunho");
+
+    const draft = await svc("POST", "/api/profiles", { facts: [{ type: "skills", value: ["SQL", "Python"], origin: "pdf", evidence_page: 1, evidence_excerpt: "SQL, Python" }] });
+    assert.equal(draft.status, 201, JSON.stringify(draft.data));
+    const profileId = draft.data.id;
+    const [pdfFact] = draft.data.facts;
+    assert.equal(pdfFact.state, "proposed");
+    // Sem origin, o fato do serviço é derivado e proposto (nunca declaração humana).
+    const implicit = await svc("POST", `/api/profiles/${profileId}/facts`, { type: "languages", value: "Inglês" });
+    assert.equal(implicit.status, 201, JSON.stringify(implicit.data));
+    assert.deepEqual([implicit.data.origin, implicit.data.state], ["derived", "proposed"]);
+    // Entrevista repassada pelo Hermes também fica proposta para revisão.
+    const interview = await svc("POST", `/api/profiles/${profileId}/interview`, { question_key: "target_role", answer: "Analista" });
+    assert.equal(interview.status, 200, JSON.stringify(interview.data));
+    const relayed = interview.data.facts.find((fact) => fact.type === "target_role");
+    assert.deepEqual([relayed.origin, relayed.state], ["derived", "proposed"]);
+
+    // Reenviar a mesma resposta não empilha outro fato para revisar.
+    const again = await svc("POST", `/api/profiles/${profileId}/interview`, { question_key: "target_role", answer: "Analista" });
+    assert.equal(again.data.facts.filter((fact) => fact.type === "target_role").length, 1);
+    // O id do fato é do servidor: id do cliente é campo desconhecido (antes colidia → 500).
+    const withId = await svc("POST", `/api/profiles/${profileId}/facts`, { id: pdfFact.id, type: "skills", value: ["X"] });
+    assert.equal(withId.status, 400, JSON.stringify(withId.data));
+    assert.equal(withId.data.error, "invalid_body");
+    // "Do PDF" sem página não é aceito do serviço.
+    const pdfWithoutPage = await svc("POST", `/api/profiles/${profileId}/facts`, { type: "summary", value: "Oi", origin: "pdf", state: "rejected" });
+    assert.equal(pdfWithoutPage.status, 422, JSON.stringify(pdfWithoutPage.data));
+
+    await refusedToService("POST", `/api/profiles/${profileId}/facts/${pdfFact.id}/review`, { state: "confirmed" });
+    await refusedToService("POST", `/api/profiles/${profileId}/confirm`, {});
+    for (const fact of [pdfFact, relayed]) {
+      const reviewed = await human("POST", `/api/profiles/${profileId}/facts/${fact.id}/review`, { state: "confirmed" });
+      assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    }
+    // Fato do serviço sem evidência própria não é confirmado como está; a pessoa o rejeita (ou declara de novo).
+    const unsupported = await human("POST", `/api/profiles/${profileId}/facts/${implicit.data.id}/review`, { state: "confirmed" });
+    assert.equal(unsupported.status, 422, JSON.stringify(unsupported.data));
+    assert.equal(unsupported.data.error, "profile.fact.evidence.required");
+    assert.equal((await human("POST", `/api/profiles/${profileId}/facts/${implicit.data.id}/review`, { state: "rejected" })).status, 200);
+    const confirmed = await human("POST", `/api/profiles/${profileId}/confirm`, {});
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.data));
+    assert.ok(confirmed.data.snapshot?.id);
+  });
+
+  // F14: corpos estritos nas rotas de automação (perfil já confirmado no teste anterior).
+  await test("F14: agent.status, lote da rodada, perfil, nota e rotas sem corpo recusam campo desconhecido", async () => {
+    const run = { agent_name: "Coletor", status: "running" };
+    for (const extra of [{ config_snapshot: { prompt: "injetado" } }, { config_version_id: "v-falsa" }]) {
+      const refused = await svc("POST", "/api/agent-events", { event: "agent.status", run: { ...run, ...extra } });
+      assert.equal(refused.status, 400, JSON.stringify(refused.data));
+      assert.equal(refused.data.error, "invalid_body");
+    }
+    assert.equal((await svc("POST", "/api/agent-events", { event: "agent.status", run })).status, 201);
+
+    assert.equal((await svc("POST", "/api/sources", { id: "f14-source", name: "F14", source_type: "custom", domain: "jobs.example.test", enabled: true, auth_strategy: "none" })).status, 201);
+    assert.equal((await human("POST", "/api/sources/f14-source/terms", {})).status, 200);
+    assert.equal((await svc("POST", "/api/sources/f14-source/readiness", { status: "ready", reason: "smoke-ok" })).status, 200);
+    const round = await svc("POST", "/api/rounds", { run_id: "round-f14", source_ids: ["f14-source"] });
+    assert.equal(round.status, 201, JSON.stringify(round.data));
+    const item = (id) => ({ source_id: "f14-source", source_job_id: id, title: `Analista ${id}`, company: "Acme F14", description: `Vaga ${id} de dados.`, source_url: `https://jobs.example.test/f14/${id}`, job_url: `https://jobs.example.test/f14/${id}` });
+    const bare = await svc("POST", "/api/rounds/round-f14/batch", { source_id: "f14-source", next_cursor: "p2", items: [item("a")] });
+    assert.equal(bare.status, 200, JSON.stringify(bare.data));
+    const wrapped = await svc("POST", "/api/rounds/round-f14/batch", { source_id: "f14-source", batch: { next_cursor: "p3", items: [item("b")] } });
+    assert.equal(wrapped.status, 200, JSON.stringify(wrapped.data));
+    const list = (await svc("GET", "/api/bootstrap")).data.jobs;
+    for (const id of ["a", "b"]) assert.ok(list.some((job) => job.source_url === `https://jobs.example.test/f14/${id}`), `item ${id} ingerido`);
+    for (const body of [
+      { source_id: "f14-source", batch: { items: [item("c")], extra: true } },
+      { source_id: "f14-source", batch: null, items: [item("c")] },
+      { source_id: "f14-source", batch: [item("c")] },
+      { source_id: "f14-source", items: [item("c")], foo: 1 },
+    ]) {
+      const refused = await svc("POST", "/api/rounds/round-f14/batch", body);
+      assert.equal(refused.status, 400, `${JSON.stringify(body)} → ${JSON.stringify(refused.data)}`);
+      assert.equal(refused.data.error, "invalid_body");
+    }
+
+    for (const body of [{ id: "x" }, { source: "pdf" }]) {
+      const refused = await human("POST", "/api/profiles", body);
+      assert.equal(refused.status, 400, JSON.stringify(refused.data));
+      assert.equal(refused.data.error, "invalid_body");
+    }
+    const job = list.find((entry) => entry.source_url === "https://jobs.example.test/f14/a");
+    const scores = { role_family: 80, skills: 70, seniority: 60, location_work_model: 50, compensation: null, explicit_preferences: null };
+    const unknownField = await svc("POST", `/api/jobs/${job.id}/score`, { scores, foo: 1 });
+    assert.equal(unknownField.status, 400, JSON.stringify(unknownField.data));
+    const unknownRound = await svc("POST", `/api/jobs/${job.id}/score`, { scores, round_id: "rodada-inexistente" });
+    assert.equal(unknownRound.status, 404, JSON.stringify(unknownRound.data));
+    const inRound = await svc("POST", `/api/jobs/${job.id}/score`, { scores, round_id: "round-f14" });
+    assert.equal(inRound.status, 200, JSON.stringify(inRound.data));
+    assert.equal(inRound.data.profile_snapshot_id, round.data.profile_snapshot_id);
+    const withBody = await human("POST", `/api/jobs/${job.id}/restore`, { foo: 1 });
+    assert.equal(withBody.status, 400, JSON.stringify(withBody.data));
+    assert.equal(withBody.data.error, "invalid_body");
   });
 
   await test("#19: histórico grava human:dashboard para a sessão e service:<nome> para o token", async () => {
@@ -138,6 +270,161 @@ try {
     const otherHistory = (await human("GET", `/api/jobs/${other.data.id}/history`)).data;
     assert.equal(otherHistory.find((item) => item.event === "job.updated")?.actor, "service:internal");
     assert.equal(otherHistory.find((item) => item.event === "job.decision")?.actor, "human:dashboard");
+  });
+
+  // #10: o MCP não abre o SQLite; fala com esta API pelo token de serviço e grava agent:<agent_id> (#19).
+  await test("#10/#19: radar_create_resume passa pela API e registra o agente redator como ator", async () => {
+    Object.assign(process.env, { RADAR_API_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: serviceToken, RADAR_FORWARDED_PROTO: "https" });
+    const { createRadarMcpServer } = await import("../../dist/src/mcp-server.js");
+    const mcp = createRadarMcpServer({ role: "curriculo" });
+    const client = new Client({ name: "radar-auth-gates-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([client.connect(clientTransport), mcp.connect(serverTransport)]);
+    try {
+      const writer = (await svc("GET", "/api/agents/published")).data.find((agent) => agent.role_type === "resume_writer" && agent.enabled);
+      assert.ok(writer);
+      const job = await svc("POST", "/api/jobs", { title: "Vaga MCP", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/mcp" });
+      assert.equal(job.status, 201, JSON.stringify(job.data));
+      assert.equal((await human("POST", `/api/jobs/${job.data.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" })).status, 200);
+      const response = await client.callTool({ name: "radar_create_resume", arguments: { agent_id: writer.id, job_id: job.data.id, title: "CV MCP", content: "Experiência confirmada" } });
+      assert.notEqual(response.isError, true, response.content?.[0]?.text);
+      assert.equal(response.structuredContent.resume.generation_source, "writer");
+      const history = (await svc("GET", `/api/jobs/${job.data.id}/history`)).data;
+      assert.equal(history.find((item) => item.kind === "transition" && item.to_status === "resume")?.actor, `agent:${writer.id}`);
+      assert.equal(history.find((item) => item.event === "resume.created")?.actor, `agent:${writer.id}`);
+
+      // Ator agent:* continua sendo serviço: portões humanos e "só propõe" valem igual.
+      const asAgent = (method, path, body) => call({ ...svcHeaders, "x-radar-agent-id": writer.id }, method, path, body);
+      const decision = await asAgent("POST", `/api/jobs/${job.data.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
+      assert.equal(decision.status, 403);
+      assert.equal(decision.data.error, "human_session_required");
+      const profile = await asAgent("POST", "/api/profiles", {});
+      assert.equal(profile.status, 201, JSON.stringify(profile.data));
+      const declared = await asAgent("POST", `/api/profiles/${profile.data.id}/facts`, { type: "skill", value: "SQL", origin: "user" });
+      assert.equal(declared.status, 403, "agente não declara fato em nome do usuário");
+      const unknown = await call({ ...svcHeaders, "x-radar-agent-id": "agente-inexistente" }, "POST", "/api/resumes", { job_id: job.data.id, title: "CV" });
+      assert.equal(unknown.status, 404);
+      assert.equal(unknown.data.error, "agent.not_found");
+
+      // Rotas de agente do MCP: só o token de serviço (a sessão recebe 401).
+      for (const [method, path, body] of [
+        ["POST", `/api/agents/${writer.id}/runs`, { status: "running" }],
+        ["POST", `/api/agents/${writer.id}/jobs`, { title: "X", company: "Y", source: "fixture", source_url: "https://jobs.example.test/x" }],
+        ["POST", `/api/agents/${writer.id}/batches`, { source_id: "gupy", items: [] }],
+        ["POST", `/api/agents/${writer.id}/jobs/${job.data.id}/enrichment`, { patch: {}, evidence_source_url: "https://jobs.example.test/x" }],
+        ["GET", "/api/applications/inexistente/authorization"],
+      ]) {
+        const refused = await human(method, path, body);
+        assert.equal(refused.status, 401, `${method} ${path} com sessão: ${JSON.stringify(refused.data)}`);
+        assert.equal(refused.data.error, "internal_token_required");
+      }
+      const run = await svc("POST", `/api/agents/${writer.id}/runs`, { id: "run-auth-gates", status: "running" });
+      assert.equal(run.status, 201, JSON.stringify(run.data));
+      assert.equal(run.data.agent_name, writer.name);
+
+      // Agente do cabeçalho (ator da auditoria) diferente do agente da rota: recusado.
+      const scout = (await svc("GET", "/api/agents/published")).data.find((agent) => agent.role_type === "source_scout" && agent.enabled);
+      assert.ok(scout);
+      const asScout = (method, path, body) => call({ ...svcHeaders, "x-radar-agent-id": scout.id }, method, path, body);
+      for (const [method, path, body] of [
+        ["POST", `/api/agents/${writer.id}/runs`, { status: "running" }],
+        ["POST", `/api/agents/${writer.id}/jobs`, { title: "X", company: "Y", source: "fixture", source_url: "https://jobs.example.test/x" }],
+        ["POST", `/api/agents/${writer.id}/batches`, { source_id: "gupy", items: [] }],
+        ["POST", `/api/agents/${writer.id}/jobs/${job.data.id}/enrichment`, { patch: {}, evidence_source_url: "https://jobs.example.test/x" }],
+      ]) {
+        const mismatch = await asScout(method, path, body);
+        assert.equal(mismatch.status, 409, `${method} ${path} com outro agente no cabeçalho: ${JSON.stringify(mismatch.data)}`);
+        assert.equal(mismatch.data.error, "agent.binding.mismatch");
+      }
+      assert.equal((await asScout("POST", `/api/agents/${scout.id}/runs`, { status: "running" })).status, 201, "mesmo agente no cabeçalho e na rota");
+      // Execução só de agente publicado e ativo, como o lote: pausar vale na hora.
+      const paused = await human("POST", "/api/agents", { name: "Agente pausado", role_type: "custom" });
+      assert.equal(paused.status, 201, JSON.stringify(paused.data));
+      assert.equal((await human("PATCH", `/api/agents/${paused.data.id}`, { enabled: false })).status, 200);
+      const pausedRun = await svc("POST", `/api/agents/${paused.data.id}/runs`, { status: "running" });
+      assert.equal(pausedRun.status, 403, JSON.stringify(pausedRun.data));
+      assert.ok(["agent.disabled", "agent.not_published"].includes(pausedRun.data.error), JSON.stringify(pausedRun.data));
+      // Lote do agente: domínios permitidos conferidos na API, não só no MCP.
+      const outside = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: scout.source_ids[0] ?? "gupy", items: [{ job_url: "https://evil.example.com/vaga/1", title: "X", company: "Y" }] });
+      assert.equal(outside.data?.error, "agent.domain.forbidden", JSON.stringify(outside.data));
+      // 25 itens com descrição longa (> 1 MB no total) cabem no limite do lote do agente.
+      const domain = scout.allowed_domains[0];
+      const longItems = Array.from({ length: 25 }, (_, index) => ({ job_url: `https://${domain}/vaga/${index}`, title: `Vaga ${index}`, company: "Empresa", description: "d".repeat(45_000) }));
+      const large = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: scout.source_ids[0] ?? "gupy", items: longItems });
+      assert.notEqual(large.status, 413, JSON.stringify(large.data));
+      assert.notEqual(large.data?.error, "payload_too_large");
+
+      // Atrás do proxy TLS, o MCP sem RADAR_FORWARDED_PROTO=https recebe 426 em toda ferramenta
+      // (por isso o env de cada servidor MCP repassa a variável); referência não resolvida é ignorada.
+      for (const proto of [undefined, `$\{env:RADAR_FORWARDED_PROTO}`]) {
+        if (proto === undefined) delete process.env.RADAR_FORWARDED_PROTO;
+        else process.env.RADAR_FORWARDED_PROTO = proto;
+        const plain = createRadarMcpServer({ role: "leitura" });
+        const plainClient = new Client({ name: "radar-auth-gates-tls", version: "1.0.0" });
+        const [left, right] = InMemoryTransport.createLinkedPair();
+        await Promise.all([plainClient.connect(left), plain.connect(right)]);
+        try {
+          const response = await plainClient.callTool({ name: "radar_list_sources", arguments: {} });
+          assert.equal(response.isError, true);
+          assert.equal(JSON.parse(response.content[0].text).error.code, "TLS_REQUIRED");
+        } finally {
+          await plainClient.close();
+        }
+      }
+    } finally {
+      await client.close();
+      for (const name of ["RADAR_API_URL", "RADAR_INTERNAL_SERVICE_TOKEN", "RADAR_FORWARDED_PROTO"]) delete process.env[name];
+    }
+  });
+
+  await test("N1: o serviço não religa uma fonte que a pessoa desligou", async () => {
+    const source = (await svc("GET", "/api/sources")).data.find((item) => item.id === "workable");
+    const body = (enabled) => ({ name: source.name, source_type: source.source_type, domain: source.domain, auth_strategy: source.auth_strategy, enabled });
+    assert.equal((await human("PUT", `/api/sources/${source.id}`, body(false))).status, 200);
+    await refusedToService("PUT", `/api/sources/${source.id}`, body(true));
+    // Sem `enabled`, o upsert religaria a fonte: também é recusado.
+    await refusedToService("PUT", `/api/sources/${source.id}`, { ...body(true), enabled: undefined });
+    await refusedToService("POST", "/api/sources", { ...body(true), id: source.id });
+    assert.equal((await svc("GET", "/api/sources")).data.find((item) => item.id === source.id).enabled, false);
+    // Manter desligada continua permitido ao serviço; religar, só pela sessão.
+    assert.equal((await svc("PUT", `/api/sources/${source.id}`, body(false))).status, 200);
+    assert.equal((await human("PUT", `/api/sources/${source.id}`, body(true))).status, 200);
+  });
+
+  await test("QAF-03/QAF-10/QAF-01/QAF-11: job.discovered só de fonte pronta, gravada pelo id, com prazo e coordenadas", async () => {
+    const agents = (await svc("GET", "/api/agents")).data;
+    const scout = agents.find((agent) => agent.role_type === "source_scout" && agent.source_ids.includes("ashby"));
+    assert.ok(scout, "coletor do Ashby semeado");
+    const discover = (slug, extra = {}) => svc("POST", "/api/agent-events", { event: "job.discovered", agent_id: scout.id, job: {
+      title: `Engenheira ${slug}`, company: "Ashby QA", source: "Ashby", source_url: `https://jobs.ashbyhq.com/xqa/${slug}`, ...extra,
+    } });
+    // Termos não aceitos: a mesma recusa do lote (ROUND_SOURCES_NOT_READY), sem gravar a vaga.
+    const refused = await discover("1");
+    assert.equal(refused.status, 422, JSON.stringify(refused.data));
+    assert.equal(refused.data.error, "ROUND_SOURCES_NOT_READY");
+    const batch = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: "ashby", items: [{ job_url: "https://jobs.ashbyhq.com/xqa/2", title: "X", company: "Y" }] });
+    assert.equal(batch.data.error, "ROUND_SOURCES_NOT_READY", "o lote recusa do mesmo jeito");
+    // Termos aceitos sem teste de acesso ainda não basta.
+    assert.equal((await human("POST", "/api/sources/ashby/terms", {})).status, 200);
+    assert.equal((await discover("1")).data.error, "ROUND_SOURCES_NOT_READY");
+    assert.equal((await svc("POST", "/api/sources/ashby/readiness", { status: "ready", reason: "teste manual" })).status, 200);
+    const created = await discover("1", { deadline_at: "2026-11-15", latitude: -25.43, longitude: -49.27 });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.source, "ashby", "o nome de exibição vira o id da fonte, como nos lotes");
+    assert.equal(created.data.deadline_at, "2026-11-15");
+    assert.equal(created.data.latitude, -25.43);
+    assert.equal(created.data.longitude, -49.27);
+    // Sem nome reconhecido, a fonte vem do domínio da URL entre as fontes do agente.
+    const byDomain = await discover("3", { source: "Coletor Ashby (Hermes)" });
+    assert.equal(byDomain.status, 201, JSON.stringify(byDomain.data));
+    assert.equal(byDomain.data.source, "ashby");
+    // Prazo e coordenadas inválidos são recusados no esquema do item.
+    assert.equal((await discover("4", { deadline_at: "15/11/2026" })).status, 422);
+    assert.equal((await discover("5", { latitude: 200, longitude: 0 })).status, 422);
+    // O lote também guarda o prazo.
+    const ready = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: "ashby", items: [{ job_url: "https://jobs.ashbyhq.com/xqa/6", title: "Dados", company: "Banco QA", deadline_at: "2026-11-20T23:59:00-03:00" }] });
+    assert.equal(ready.status, 200, JSON.stringify(ready.data));
+    assert.equal((await svc("GET", `/api/jobs/${ready.data.items[0].job_id}`)).data.deadline_at, "2026-11-20T23:59:00-03:00");
   });
 
   await test("#20: 20 falhas de um IP não trancam outro IP nem o token válido", async () => {
@@ -173,28 +460,4 @@ try {
   await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); });
 }
 
-// #19: escrita pelo MCP grava agent:<agent_id> (processo separado do servidor HTTP acima).
-process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
-const [{ createRadarMcpServer }, store] = await Promise.all([import("../../dist/src/mcp-server.js"), import("../../dist/src/db.js")]);
-const mcp = createRadarMcpServer({ role: "curriculo" });
-const client = new Client({ name: "radar-auth-gates-test", version: "1.0.0" });
-const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-await Promise.all([client.connect(clientTransport), mcp.connect(serverTransport)]);
-try {
-  await test("#19: radar_create_resume registra o agente redator como ator", async () => {
-    const writer = store.listAgentConfigs().find((agent) => agent.role_type === "resume_writer" && agent.enabled);
-    assert.ok(writer);
-    const job = store.upsertJob({ id: "job-mcp-actor", title: "Vaga MCP", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/mcp" });
-    store.recordJobDecision(job.id, "interested", "TENHO INTERESSE", "human:dashboard");
-    const response = await client.callTool({ name: "radar_create_resume", arguments: { agent_id: writer.id, job_id: job.id, title: "CV MCP", content: "Experiência confirmada" } });
-    assert.notEqual(response.isError, true, response.content?.[0]?.text);
-    assert.equal(response.structuredContent.resume.generation_source, "writer");
-    const history = store.listJobHistory(job.id);
-    assert.equal(history.find((item) => item.kind === "transition" && item.to_status === "resume")?.actor, `agent:${writer.id}`);
-    assert.equal(history.find((item) => item.event === "resume.created")?.actor, `agent:${writer.id}`);
-  });
-} finally {
-  await client.close();
-  rmSync(directory, { recursive: true, force: true });
-}
-
+rmSync(directory, { recursive: true, force: true });

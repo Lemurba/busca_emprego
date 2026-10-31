@@ -11,7 +11,7 @@ import { openDb } from "../src/db/connection.ts";
 import { migrate } from "../src/db/migrate.ts";
 import { MIGRATIONS } from "../src/db/migrations/index.ts";
 import { mapContentToWork } from "../src/db/profile-import.ts";
-import { isIsoPartialDate, jsonResumeToFacts, validateJsonResume } from "../src/json-resume.ts";
+import { factsToJsonResume, isIsoPartialDate, jsonResumeToFacts, validateJsonResume } from "../src/json-resume.ts";
 import { openTempStore, useTempDb } from "./helpers/temp-db.mjs";
 
 const sample = JSON.parse(readFileSync(new URL("./fixtures/json-resume-sample.json", import.meta.url), "utf8"));
@@ -64,6 +64,18 @@ describe("schema e mapeamento", () => {
     assert.deepEqual(work.map((item) => item.highlights), [["Successfully won Techcrunch Disrupt", "Led the compression team"], ["Prototyped middle-out"], ["fato Raviga"]]);
     assert.deepEqual(unmapped, ["University of Oklahoma"]);
   });
+
+  test("nome e cargo-alvo vindos do PDF ou da entrevista vão para basics na exportação", () => {
+    const doc = factsToJsonResume([
+      { type: "full_name", value: "Maria Souza", state: "confirmed" },
+      { type: "target_role", value: "Engenheira de Software", state: "confirmed" },
+      { type: "contact_email", value: "m@example.com", state: "confirmed" },
+    ]);
+    assert.equal(doc.basics.name, "Maria Souza");
+    assert.equal(doc.basics.label, "Engenheira de Software");
+    assert.equal(doc.basics.email, "m@example.com");
+    assert.equal(factsToJsonResume([{ type: "target_role", value: ["Analista", "Engenheiro"] }]).basics.label, "Analista, Engenheiro");
+  });
 });
 
 describe("import, confirmação e exportação", async () => {
@@ -83,7 +95,7 @@ describe("import, confirmação e exportação", async () => {
 
   test("documento inválido ou vazio não cria perfil", () => {
     const before = store.listProfiles().length;
-    assert.throws(() => store.importJsonResumeProfile({ basics: { name: 7 } }), /^Error: profile\.import\.invalid:\/basics\/name$/u);
+    assert.throws(() => store.importJsonResumeProfile({ basics: { name: 7 } }), /^DomainError: profile\.import\.invalid:\/basics\/name$/u);
     assert.throws(() => store.importJsonResumeProfile({ basics: {} }), /profile\.import\.empty/u);
     assert.equal(store.listProfiles().length, before);
   });
@@ -98,6 +110,8 @@ describe("import, confirmação e exportação", async () => {
   });
 
   test("confirmar → snapshot com experiência estruturada; currículo ATS sem PDF-base; export fiel", () => {
+    // Um rascunho por vez (#49): os rascunhos dos testes anteriores saem antes do novo import.
+    for (const draft of store.listProfiles().filter((item) => item.status === "draft")) store.deleteDraftProfile(draft.id, "tester");
     const profile = store.importJsonResumeProfile(sample, "tester");
     for (const fact of profile.facts) store.reviewProfileFact(fact.id, "confirmed", "tester");
     const confirmed = store.confirmProfessionalProfile(profile.id, "tester");

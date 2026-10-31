@@ -13,10 +13,12 @@ const companyFields = {
   enabled: z.boolean().optional()
 };
 
-export const connectorSchemas = {
-  companyCreate: z.looseObject(companyFields),
-  companyPatch: z.looseObject({ name: companyFields.name, query: companyFields.query, enabled: companyFields.enabled }),
-  enrichmentResolve: z.looseObject({ status: z.enum(["done", "dismissed"]) })
+// Corpos estritos (F14), como em src/http-schemas.ts: campo desconhecido → 400 invalid_body.
+const connectorSchemas = {
+  companyCreate: z.strictObject(companyFields),
+  companyPatch: z.strictObject({ name: companyFields.name, query: companyFields.query, enabled: companyFields.enabled }),
+  enrichmentResolve: z.strictObject({ status: z.enum(["done", "dismissed"]) }),
+  empty: z.strictObject({}),
 } as const;
 
 type Params = { actor: string; params: string[]; body: Record<string, unknown> };
@@ -27,8 +29,8 @@ export function connectorRoutes(projectId: string): ConnectorRoute[] {
     { method: "GET", path: "/api/connectors", status: 200, handler: () => ({ connectors: listConnectorDefinitions(), companies: listConnectorCompanies(projectId) }) },
     { method: "POST", path: "/api/connectors/companies", status: 201, handler: ({ actor, body }) => upsertConnectorCompany(validateBody(connectorSchemas.companyCreate, body), actor, projectId) },
     { method: "PATCH", path: "/api/connectors/companies/{id}", status: 200, handler: ({ actor, params, body }) => updateConnectorCompany(params[0]!, validateBody(connectorSchemas.companyPatch, body), actor, projectId) },
-    { method: "DELETE", path: "/api/connectors/companies/{id}", status: 200, handler: ({ actor, params }) => deleteConnectorCompany(params[0]!, actor, projectId) },
+    { method: "DELETE", path: "/api/connectors/companies/{id}", status: 200, handler: ({ actor, params, body }) => { validateBody(connectorSchemas.empty, body); return deleteConnectorCompany(params[0]!, actor, projectId); } },
     { method: "GET", path: "/api/connectors/enrichment-queue", status: 200, handler: () => listLlmEnrichmentQueue(projectId) },
-    { method: "POST", path: "/api/connectors/enrichment-queue/{id}", status: 200, handler: ({ params, body }) => resolveLlmEnrichment(params[0]!, validateBody(connectorSchemas.enrichmentResolve, body).status, projectId) }
+    { method: "POST", path: "/api/connectors/enrichment-queue/{id}", status: 200, handler: ({ actor, params, body }) => resolveLlmEnrichment(params[0]!, validateBody(connectorSchemas.enrichmentResolve, body).status, projectId, actor) }
   ];
 }

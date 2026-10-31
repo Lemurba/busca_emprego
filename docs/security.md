@@ -26,11 +26,19 @@ Interesse, `APROVO` e `AUTORIZO` são decisões humanas, e o servidor garante is
 | `POST /api/resumes/{id}/approve` | `APROVO` |
 | `POST /api/applications`; `PATCH /api/applications/{id}` | criar candidatura; registrar envio manual/resultado |
 | `POST /api/applications/{id}/authorize-auto`, `/revoke-auto`, `/select-manual` | `AUTORIZO`, revogação, modo manual |
-| `POST /api/profiles/{id}/confirm` | confirmar perfil (fatos usados nos currículos) |
+| `POST /api/profiles/{id}/confirm`, `/facts/{factId}/review` | confirmar perfil e revisar cada fato (usados nos currículos e na nota) |
+| `POST /api/profiles`, `POST /api/profiles/{id}/facts`, `PATCH /api/profiles/{id}` com fato `origin: "user"` ou `state: "confirmed"` | declarar fato em nome do usuário ou gravá-lo já confirmado |
+| `POST /api/possible-duplicates/{id}/resolve`, `/undo` | mesclar/separar duplicatas e desfazer a decisão (24 h; mesclar só registra a decisão, nenhuma vaga é apagada) |
+| `POST /api/human-questions/{id}/respond` | responder pelo painel a pergunta do executor (inclusive a que não chegou ao Telegram) |
+| `POST /api/field-conflicts/{id}/resolve` | escolher entre o valor atual e o do enriquecimento |
+| `DELETE /api/base-resumes/{id}` | excluir o currículo-base (PDF) |
+| `DELETE /api/agents/{id}`, `DELETE /api/sources/{id}` | excluir agente ou fonte (irreversível; o serviço pode pausar) |
+| `PUT /api/sources/{id}` ou `POST /api/sources` que religa uma fonte desligada | voltar a buscar numa fonte que a pessoa desligou (o serviço pode atualizá-la e desligá-la) |
+| `PATCH /api/resumes/{id}` de um currículo aprovado | devolver para revisão, o que desfaz o `APROVO` e revoga o `AUTORIZO` |
 | `POST /api/sources/{id}/terms` | aceitar termos de uso de uma fonte |
-| `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback` | criar agente (nasce publicado) e publicar permissões e prompt |
+| `POST /api/agents`; `POST /api/agents/{id}/publish`, `/rollback`, `/discard-draft` | criar agente (nasce publicado), publicar permissões e prompt (rascunho que não é humano só com o checksum do diff revisado) e descartar rascunho |
 
-O token de serviço continua servindo às rotas de automação (descoberta, enriquecimento, rascunho de currículo, revisão ATS, nota, fila autorizada, claim/submit/fail, perguntas humanas).
+O token de serviço continua servindo às rotas de automação (descoberta, enriquecimento, rascunho de currículo, revisão ATS, nota, fila autorizada, claim/submit/fail, perguntas humanas). No perfil ele só **propõe**: fato sem `origin` vindo do serviço (ou de um agente MCP) é gravado como `derived`/`proposed` com o trecho "Informado por service:<nome>", e a resposta de entrevista repassada pelo Hermes (`POST /api/profiles/{id}/interview`) vira fato proposto, sem sobrescrever a declaração humana. O núcleo também recusa revisão e confirmação de perfil a atores `service:*`/`agent:*` (`profile.fact.review.forbidden`, `profile.confirm.forbidden`).
 
 ### Isolamento por usuário Unix
 
@@ -41,7 +49,7 @@ O portão só vale se o Hermes não conseguir virar "humano". Por isso:
 - o código do release pertence a `radar` (ou root) e não é gravável pelo `hermes`;
 - o link de sessão (`scripts/ops/dashboard-link.mjs`) é gerado pelo operador como `radar`, nunca pelo agente.
 
-**Pendente:** o servidor MCP (`src/mcp-server.ts`) ainda abre o SQLite diretamente. Enquanto ele não falar com o dashboard por HTTP com uma credencial de escopo restrito, o processo MCP precisa rodar como `radar` (comando fixo, sem shell) para ler o banco — e quem consegue abrir o banco consegue gravar nele. O MCP não expõe nenhuma ferramenta de portão humano, mas a garantia completa depende dessa migração.
+**MCP pela API (#10):** o servidor MCP (`src/mcp-server.ts`) não abre o SQLite. Cada ferramenta chama a API do dashboard (`RADAR_API_URL`) com o token de serviço, então o processo roda como `hermes`, sem acesso ao banco nem ao `.env.local`, e passa pelos mesmos portões de qualquer cliente do token: nenhuma ferramenta chama rota humana e, se chamasse, receberia 403. Rotas de agente usadas só pelo MCP (`POST /api/agents/{id}/jobs|batches|runs|jobs/{id}/enrichment`, `GET /api/applications/{id}/authorization`) aceitam somente o token de serviço, exigem o agente da rota publicado e ativo (lote e execução também na API) e conferem `allowed_domains` dos itens no servidor; `x-radar-agent-id` diferente do agente da rota é recusado (409 `agent.binding.mismatch`). O cabeçalho `x-radar-agent-id` (agente existente no projeto) rotula o ator como `agent:<agent_id>`, que o núcleo trata como serviço: só propõe.
 
 ## Origem nas auditorias (#19)
 

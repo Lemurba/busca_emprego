@@ -18,7 +18,7 @@ export interface EnrichmentOutcome {
 }
 
 /** Descrição com menos que isto é tratada como ausente. */
-export const MIN_DESCRIPTION_LENGTH = 120;
+const MIN_DESCRIPTION_LENGTH = 120;
 
 export function needsEnrichment(item: ConnectorItem): boolean {
   return String(item.description ?? "").trim().length < MIN_DESCRIPTION_LENGTH;
@@ -43,7 +43,7 @@ function isJobPosting(value: unknown): value is Raw {
 }
 
 /** Encontra o primeiro JobPosting, inclusive dentro de @graph e de listas. */
-export function findJobPosting(html: string): Raw | null {
+function findJobPosting(html: string): Raw | null {
   const queue = [...jsonLdBlocks(html)];
   for (let guard = 0; queue.length && guard < 200; guard += 1) {
     const value = queue.shift();
@@ -70,7 +70,7 @@ function postingLocation(posting: Raw): string | null {
 }
 
 /** Converte um JobPosting em campos do item, sem sobrescrever o que a API já trouxe. */
-export function applyJobPosting(item: ConnectorItem, posting: Raw): ConnectorItem {
+function applyJobPosting(item: ConnectorItem, posting: Raw): ConnectorItem {
   const salary = (posting.baseSalary ?? {}) as Raw;
   const value = (salary.value ?? {}) as Raw;
   const min = Number(value.minValue ?? (typeof salary.value === "number" ? salary.value : NaN));
@@ -117,7 +117,7 @@ function extractContainer(html: string, opener: RegExp): string | null {
   return html.slice(start, start + 50_000);
 }
 
-export function extractBySelectors(html: string): string | null {
+function extractBySelectors(html: string): string | null {
   for (const selector of SELECTORS) {
     const content = extractContainer(html, selector);
     const value = content ? htmlToText(content) : "";

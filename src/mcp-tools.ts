@@ -1,4 +1,4 @@
-// Sem dependências: scripts podem importar a lista sem abrir o banco (db.ts abre o SQLite ao carregar).
+// Sem dependências: scripts podem importar a lista sem abrir o banco (o MCP nunca abre o SQLite: fala com a API).
 /** Todos os nomes que o servidor sabe registrar; cada processo registra só os do seu papel. */
 export const RADAR_MCP_TOOLS = [
   "radar_list_agents", "radar_list_sources", "radar_get_job", "radar_discover_job", "radar_ingest_batch", "radar_enrich_job",
@@ -6,7 +6,7 @@ export const RADAR_MCP_TOOLS = [
   "radar_list_authorized_applications", "radar_claim_application", "radar_heartbeat_application", "radar_verify_application",
   "radar_request_final_confirmation", "radar_get_final_confirmation",
   "radar_submit_application", "radar_fail_application", "radar_ask_human",
-  "radar_list_open_questions",
+  "radar_list_open_questions", "radar_list_enrichment_queue", "radar_resolve_enrichment", "radar_answer_profile_interview",
 ] as const;
 
 export type RadarMcpTool = typeof RADAR_MCP_TOOLS[number];
@@ -32,12 +32,20 @@ export const RADAR_MCP_ROLES = {
   coleta: {
     agent_roles: ["source_scout", "job_enrichment"],
     binding_required: false,
-    tools: ["radar_list_sources", "radar_get_job", "radar_discover_job", "radar_ingest_batch", "radar_enrich_job", "radar_record_agent_run"],
+    // Fila de enriquecimento: só agentes com jobs.enrich (job_enrichment) leem e fecham itens.
+    tools: ["radar_list_sources", "radar_get_job", "radar_discover_job", "radar_ingest_batch", "radar_enrich_job", "radar_record_agent_run", "radar_list_enrichment_queue", "radar_resolve_enrichment"],
   },
   curriculo: {
     agent_roles: ["resume_writer", "match_evaluator"],
     binding_required: false,
     tools: ["radar_get_job", "radar_create_resume", "radar_record_score"],
+  },
+  // #49: entrevistador de preferências grava respostas dos eliminatórios como fatos PROPOSTOS
+  // no rascunho do perfil; só valem depois que a pessoa os confirma no dashboard.
+  preferencias: {
+    agent_roles: ["preference_learner"],
+    binding_required: false,
+    tools: ["radar_answer_profile_interview"],
   },
   executor: {
     agent_roles: ["application_assistant"],

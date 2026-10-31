@@ -6,9 +6,9 @@ import { findClosingMarker, jobPostingsFromHtml, validThroughMs } from "./html.j
 import { LivenessFetchError, safeGet, type SafeResponse } from "./http.js";
 import type { LivenessAdapter, LivenessDeps, LivenessResult } from "./types.js";
 
-export const API_CONFIDENCE = 0.95;
-export const HEURISTIC_CLOSED_CONFIDENCE = 0.8;
-export const HEURISTIC_OPEN_CONFIDENCE = 0.6;
+const API_CONFIDENCE = 0.95;
+const HEURISTIC_CLOSED_CONFIDENCE = 0.8;
+const HEURISTIC_OPEN_CONFIDENCE = 0.6;
 
 type ResolvedDeps = Parameters<LivenessAdapter["check"]>[2];
 
@@ -27,7 +27,7 @@ function unknown(method: string, evidence: Record<string, unknown>): LivenessRes
 }
 
 /** Falhas de transporte nunca fecham a vaga. */
-export function fetchFailure(method: string, url: string, error: unknown): LivenessResult {
+function fetchFailure(method: string, url: string, error: unknown): LivenessResult {
   if (error instanceof LivenessFetchError) {
     return unknown(error.kind === "refused" ? "refused" : "network_error", { url, attempted: method, reason: error.kind, message: error.message });
   }
@@ -51,7 +51,7 @@ async function checkByStatus(method: string, endpoint: string, deps: ResolvedDep
   return unknown(method, evidence);
 }
 
-export const greenhouseAdapter: LivenessAdapter = {
+const greenhouseAdapter: LivenessAdapter = {
   name: "greenhouse",
   match(url) {
     // Só os quadros dos EUA: o quadro europeu tem outra API e um 404 dela fecharia a vaga errado.
@@ -78,7 +78,7 @@ export const greenhouseAdapter: LivenessAdapter = {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
-export const leverAdapter: LivenessAdapter = {
+const leverAdapter: LivenessAdapter = {
   name: "lever",
   match(url) {
     if (url.hostname !== "jobs.lever.co" && url.hostname !== "jobs.eu.lever.co") return null;
@@ -91,7 +91,7 @@ export const leverAdapter: LivenessAdapter = {
   }
 };
 
-export const ashbyAdapter: LivenessAdapter = {
+const ashbyAdapter: LivenessAdapter = {
   name: "ashby",
   match(url) {
     if (url.hostname !== "jobs.ashbyhq.com") return null;
@@ -160,7 +160,7 @@ export async function checkPage(target: string, deps: ResolvedDeps, methodPrefix
  * Gupy (`{empresa}.gupy.io/jobs/{id}`): não há API pública documentada de status; usa a
  * leitura genérica da página (JSON-LD/marcadores), identificada como `gupy_*`.
  */
-export const gupyAdapter: LivenessAdapter = {
+const gupyAdapter: LivenessAdapter = {
   name: "gupy",
   match(url) {
     if (!url.hostname.endsWith(".gupy.io")) return null;

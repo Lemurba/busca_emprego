@@ -30,6 +30,8 @@ process.env.HERMES_LINKED_RECIPIENT_ID = "telegram-user";
 process.env.RADAR_AUTHORIZATION_SECRET = "segredo-de-teste-do-dashboard";
 const dbModuleUrl = pathToFileURL(join(repoRoot, "dist/src/db.js")).href;
 const store = await import(`${dbModuleUrl}?lease=${Date.now()}`);
+// Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
+store.openStore();
 const { errorResponse } = await import(pathToFileURL(join(repoRoot, "dist/src/http-security.js")).href);
 
 let sequence = 0;
@@ -198,6 +200,7 @@ try {
   await test("dois processos: claim × revoke nunca deixam a vaga presa em applying", async () => {
     const childScript = `
       const store = await import(${JSON.stringify(dbModuleUrl)});
+      store.openStore();
       const [action, applicationId, nonce, startAt] = process.argv.slice(1);
       while (Date.now() < Number(startAt)) await new Promise((r) => setTimeout(r, 1));
       try {
@@ -205,7 +208,7 @@ try {
         else store.revokeAutoApplication(applicationId);
         console.log(JSON.stringify({ ok: true }));
       } catch (error) { console.log(JSON.stringify({ ok: false, error: String(error.message) })); }
-      store.db.close();`;
+      store.closeStore();`;
     const run = (args) => new Promise((resolveRun, reject) => {
       const child = spawn(process.execPath, ["--no-warnings", "--input-type=module", "-e", childScript, ...args], { env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = ""; let stderr = "";
@@ -240,7 +243,7 @@ try {
     assert.equal(claimWins + revokeWins, 6);
   });
 } finally {
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 }
 

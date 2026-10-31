@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, describe, test } from "node:test";
 import { checkJobLiveness, HostRateLimiter, LIVENESS_USER_AGENT } from "../src/liveness/index.ts";
-import { assertPublicResolution, guardedLookup, safeGet } from "../src/liveness/http.ts";
+import { assertPublicResolution, pinnedLookup, safeGet } from "../src/liveness/http.ts";
 
 const requests = [];
 const routes = new Map();
@@ -207,10 +207,10 @@ describe("travas contra SSRF e tamanho", () => {
   test("lookup protegido do transporte padrão só entrega IP público", async () => {
     await assert.rejects(assertPublicResolution("x.test", async () => [{ address: "8.8.8.8", family: 4 }, { address: "10.0.0.1", family: 4 }]), /privado/);
     await assert.rejects(assertPublicResolution("x.test", async () => []), /privado/);
-    const guarded = guardedLookup(async () => [{ address: "127.0.0.1", family: 4 }]);
+    const guarded = pinnedLookup([{ address: "127.0.0.1", family: 4 }]);
     const refused = await new Promise((resolve) => guarded("x.test", {}, (error) => resolve(error)));
     assert.match(String(refused?.message), /privado/);
-    const allowed = guardedLookup(async () => [{ address: "93.184.216.34", family: 4 }]);
+    const allowed = pinnedLookup([{ address: "93.184.216.34", family: 4 }]);
     const address = await new Promise((resolve) => allowed("x.test", {}, (_error, value) => resolve(value)));
     assert.equal(address, "93.184.216.34");
   });

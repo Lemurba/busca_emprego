@@ -1,5 +1,7 @@
 # Auditoria de implementação e previsão de entrega
 
+> **Documento histórico (17/09/2026).** Auditoria e previsão de entrega daquela data, mantidas só como registro. O “acesso doméstico sem login” descrito aqui foi substituído pelo contrato C3 (token interno ou sessão do dashboard; portões humanos só com a sessão, `docs/security.md`). O estado atual está no [README](../README.md), em [`docs/agent-api.md`](agent-api.md), [`docs/security.md`](security.md), [`docs/operations-runbook.md`](operations-runbook.md) e na seção “Status da aplicação” de [`docs/auditoria-2026-10-30.md`](auditoria-2026-10-30.md#status-da-aplicação).
+
 **Data-base:** 17/09/2026
 **Documento normativo:** `docs/production-sdd-bdd-tdd.md`
 **Estado:** fundação de produção em desenvolvimento; ainda não aprovado para produção.

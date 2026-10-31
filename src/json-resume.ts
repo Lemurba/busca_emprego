@@ -3,7 +3,7 @@
 // Chaves desconhecidas passam (looseObject) e são ignoradas no import.
 import { z } from "zod";
 
-export const JSON_RESUME_SCHEMA_URL = "https://raw.githubusercontent.com/jsonresume/resume-schema/v1.0.0/schema.json";
+const JSON_RESUME_SCHEMA_URL = "https://raw.githubusercontent.com/jsonresume/resume-schema/v1.0.0/schema.json";
 
 /** Datas ISO 8601 parciais aceitas pelo JSON Resume: YYYY, YYYY-MM ou YYYY-MM-DD. */
 const ISO_PARTIAL_DATE = /^(\d{4})(?:-(0[1-9]|1[0-2])(?:-(0[1-9]|[12]\d|3[01]))?)?$/u;
@@ -33,7 +33,7 @@ const email = z.string().max(320).refine((value) => value === "" || /^[^\s@]+@[^
 const list = <T extends z.ZodType>(item: T, max = 200) => z.array(item).max(max).optional();
 const textList = list(z.string().max(2_000), 100);
 
-export const jsonResumeSchema = z.looseObject({
+const jsonResumeSchema = z.looseObject({
   $schema: str(),
   basics: z.looseObject({
     name: str(300),
@@ -65,7 +65,7 @@ export type JsonResume = z.infer<typeof jsonResumeSchema>;
 export type JsonResumeIssue = { path: string; code: string; message: string };
 
 /** Caminho de um issue do zod como JSON Pointer (RFC 6901): ["work", 0, "startDate"] → "/work/0/startDate". */
-export function jsonPointer(path: readonly PropertyKey[]) {
+function jsonPointer(path: readonly PropertyKey[]) {
   return path.length ? `/${path.map((part) => String(part).replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}` : "/";
 }
 
@@ -227,8 +227,9 @@ export function factsToJsonResume(facts: readonly FactLike[], options: { work?: 
     const value = fact.value;
     const record = asRecord(value);
     switch (type) {
-      case "name": basics.name ??= asText(value) || undefined; break;
-      case "role": basics.label ??= asText(value) || undefined; break;
+      // "full_name"/"target_role" vêm do extrator de PDF e da entrevista; "name"/"role" do JSON Resume.
+      case "name": case "full_name": basics.name ??= asText(value) || undefined; break;
+      case "role": case "target_role": basics.label ??= asText(value) || undefined; break;
       case "contact_email": basics.email ??= asText(value) || undefined; break;
       case "contact_phone": basics.phone ??= asText(value) || undefined; break;
       case "summary": if (asText(value)) summaries.push(asText(value)); break;

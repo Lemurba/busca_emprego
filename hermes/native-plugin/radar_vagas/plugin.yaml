@@ -1,5 +1,5 @@
 name: radar_vagas
-version: 1.0.0
+version: 0.2.0
 description: >-
   Radar de Vagas — consome no gateway (hook pre_gateway_dispatch) as respostas do Telegram
   às perguntas humanas do Radar (/radar responder <código> <texto> ou reply à mensagem da

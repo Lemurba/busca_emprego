@@ -1,5 +1,7 @@
 # Review de implementação — SDD v2
 
+> **Documento histórico (18/09/2026).** Revisão da implementação do SDD v2 naquela data, mantida só como registro; os gates e pendências citados não são mais atualizados aqui. O estado atual está no [README](../README.md), em [`docs/agent-api.md`](agent-api.md), [`docs/security.md`](security.md), [`docs/operations-runbook.md`](operations-runbook.md) e na seção “Status da aplicação” de [`docs/auditoria-2026-10-30.md`](auditoria-2026-10-30.md#status-da-aplicação).
+
 **Data:** 18/09/2026
 **Resultado:** implementação local fortalecida; nenhum gate de release está integralmente aprovado.
 

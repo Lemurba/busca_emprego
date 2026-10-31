@@ -48,30 +48,12 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { envSetting, readEnvLocal } from "./lib/env-local.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const unquote = (raw) => {
-  const value = raw.trim();
-  return /^(["']).*\1$/su.test(value) ? value.slice(1, -1) : value;
-};
-
-function fileEnv() {
-  try {
-    return Object.fromEntries(
-      readFileSync(join(repoRoot, ".env.local"), "utf8")
-        .split("\n").filter((line) => line.includes("=") && !line.trimStart().startsWith("#"))
-        .map((line) => [line.slice(0, line.indexOf("=")).replace(/^\s*export\s+/u, "").trim(), unquote(line.slice(line.indexOf("=") + 1))]),
-    );
-  } catch { return {}; }
-}
-
-const fileVars = fileEnv();
-const env = (name) => {
-  const fromProcess = process.env[name];
-  if (fromProcess != null && fromProcess !== "") return fromProcess;
-  return fileVars[name] ?? "";
-};
+const fileVars = readEnvLocal(repoRoot);
+const env = (name) => envSetting(fileVars, name);
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
 const value = (name, fallback) => {

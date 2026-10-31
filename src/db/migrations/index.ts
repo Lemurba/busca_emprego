@@ -4,6 +4,7 @@ import { migration0003 } from "./0003_executor_ats_dry_run.js";
 import { migration0004 } from "./0004_vaga_viva_repost.js";
 import { migration0005 } from "./0005_score_cobertura_eliminatorios.js";
 import { migration0006 } from "./0006_json_resume.js";
+import { migration0007 } from "./0007_project_scope.js";
 import type { Migration } from "./types.js";
 
 /**
@@ -15,7 +16,8 @@ import type { Migration } from "./types.js";
  *   0004 → #33 vaga viva / repost
  *   0005 → #34 score / blockers
  *   0006 → #35 JSON Resume
- * Próximo id livre para outras mudanças: 0007.
+ *   0007 → TD-06 projeto em currículos-base e execuções de agente
+ * Próximo id livre para outras mudanças: 0008.
  */
 export const MIGRATIONS: readonly Migration[] = [
   baseline,
@@ -23,7 +25,8 @@ export const MIGRATIONS: readonly Migration[] = [
   migration0003,
   migration0004,
   migration0005,
-  migration0006
+  migration0006,
+  migration0007
 ];
 
 export type { Migration } from "./types.js";

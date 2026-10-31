@@ -5,15 +5,18 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements } from "../src/blockers.ts";
+import { DomainError } from "../src/errors.ts";
 import { COVERAGE_WEIGHTS, computeCoverage, extractJobKeywords } from "../src/coverage.ts";
 import { DEFAULT_AGENT_PRESETS } from "../src/agent-defaults.ts";
 import { openDb } from "../src/db/connection.ts";
 import { migrate } from "../src/db/migrate.ts";
+import { seedProject } from "../src/db/seeds.ts";
 import { PROMPT_UPGRADES_V1 } from "../src/db/migrations/0005_score_cobertura_eliminatorios.ts";
 import { matchScoreComponents, normalizeCriterionInputs } from "../src/db/scoring.ts";
 import { calculateMatchScore, DomainValidationError } from "../src/domain.ts";
 import { errorResponse } from "../src/http-security.ts";
 import { analyzeExtractedText } from "../src/resume-parse-check.ts";
+import { confirmedProfile } from "./helpers/profile.mjs";
 import { openTempStore } from "./helpers/temp-db.mjs";
 
 const { store, cleanup, directory } = await openTempStore("radar-score-honesto");
@@ -53,6 +56,7 @@ describe("aderência explicável", () => {
 
   test("score com base e evidência persiste e aparece no bootstrap", () => {
     const job = store.upsertJob({ id: "score-basis", title: "Backend", company: "Exemplo", source: "fixture", source_url: "https://jobs.example.test/score-basis" });
+    confirmedProfile(store);
     const legacy = store.recordMatchScore({ job_id: job.id, scores: SIX });
     const score = store.recordMatchScore({ job_id: job.id, scores: { ...SIX, skills: { value: 70, basis: "explicit", evidence: "Requisitos: TypeScript" } } });
     assert.equal(score.score_final, legacy.score_final, "mesma nota com ou sem base");
@@ -150,7 +154,7 @@ describe("teste de leitura do PDF", () => {
     assert.equal(reviewed.review_findings[0], "pdf.parse_failed");
     assert.equal(reviewed.parse_check.ok, false);
     assert.throws(() => store.approveResume(noContact.id, "APROVO", { override_reason: "Aprovo mesmo assim, revisei manualmente." }), /resume\.pdf_parse_failed/u);
-    assert.equal(errorResponse(new Error("resume.pdf_parse_failed")).status, 409);
+    assert.equal(errorResponse(new DomainError("resume.pdf_parse_failed")).status, 409);
 
     // Corrigir o conteúdo invalida o teste anterior (stale) e o novo teste libera.
     store.updateResume(noContact.id, { content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js e PostgreSQL" });
@@ -268,6 +272,8 @@ describe("migração 0005", () => {
     const db = openDb(`${directory}/migration-0005.sqlite`);
     try {
       migrate(db);
+      // Agentes padrão vêm da semente do projeto (TD-24), não mais do baseline.
+      seedProject(db, "busca-emprego");
       const [matcherName, matcherOriginal] = PROMPT_UPGRADES_V1.find(([name]) => name === "Avaliador de compatibilidade");
       const [normalizerName] = PROMPT_UPGRADES_V1.find(([name]) => name === "Normalizador e deduplicador");
       // Simula banco anterior a #34: prompt original publicado (matcher) e um prompt editado (normalizador).

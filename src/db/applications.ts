@@ -1,10 +1,13 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { sha256Hex, urlHash } from "../hash.js";
 import type { DatabaseSync } from "node:sqlite";
 import { atsFamilyFor, isAtsUrl } from "../ats-domains.js";
 import { canonicalizeJobUrl } from "../domain.js";
 import type { Application } from "../types.js";
 import { type AutomationSettings, automationUsage, envAutomationEnabled, readAutomationSettings, validateAutomationPatch, writeAutomationSettings } from "./settings.js";
 import { idFor, now } from "./util.js";
+import { DomainError } from "../errors.js";
+import type { AuthorizationView, AutomationOverview, FieldSummary, FinalConfirmationView } from "../bootstrap-payload.js";
 
 /**
  * Executor autorizado (#32): envio só em ATS de empresa, dry-run com segunda confirmação
@@ -35,72 +38,64 @@ import { idFor, now } from "./util.js";
  * Pedir a confirmação, confirmar (ENVIAR), consultar (poll) e religar reiniciam o lease, para que
  * o worker não perca a reserva logo depois de uma espera longa do usuário.
  *
- * Este módulo não importa src/db.ts (import circular): db.ts monta o executor com
+ * Este módulo não importa os módulos com estado (import circular): src/db/authorizations.ts monta o executor com
  * `createExecutor(deps)` passando a conexão e as funções internas que ele reaproveita.
  */
 
-export const FINAL_CONFIRMATION_TEXT = "ENVIAR";
+const FINAL_CONFIRMATION_TEXT = "ENVIAR";
 export const SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
-export const FIELDS_SUMMARY_MAX_ITEMS = 100;
-export const FIELD_LABEL_MAX = 200;
-export const FIELD_VALUE_MAX = 500;
+const FIELDS_SUMMARY_MAX_ITEMS = 100;
+const FIELD_LABEL_MAX = 200;
+const FIELD_VALUE_MAX = 500;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PAUSED_STEP = "Automação pausada (kill-switch)";
 
-export type FieldSummary = { label: string; value: string };
+export type { FieldSummary };
 
 // --- Verificações sem estado (recebem a conexão) ------------------------------------------
 
 /** Kill-switch do banco. O teto `RADAR_AUTO_APPLICATION_ENABLED` é checado nas bordas (HTTP/MCP). */
 export function assertAutomationActive(db: DatabaseSync, settings: AutomationSettings = readAutomationSettings(db)) {
-  if (!settings.enabled) throw new Error("AUTOMATION_DISABLED");
+  if (!settings.enabled) throw new DomainError("AUTOMATION_DISABLED");
   return settings;
 }
 
 /** A URL precisa ser https e de um ATS da allowlist; senão o envio é manual. */
 export function assertAtsUrl(db: DatabaseSync, url: unknown, settings: AutomationSettings = readAutomationSettings(db)) {
-  if (!isAtsUrl(url, settings.ats_allowlist)) throw new Error("application.domain.not_ats");
-}
-
-export function urlHash(url: string) {
-  return createHash("sha256").update(canonicalizeJobUrl(url)).digest("hex");
-}
-
-function sha256Hex(value: string | Uint8Array) {
-  return createHash("sha256").update(value).digest("hex");
+  if (!isAtsUrl(url, settings.ats_allowlist)) throw new DomainError("application.domain.not_ats");
 }
 
 /** Decodifica o PNG da captura (base64 estrito, até 2 MB, assinatura PNG). */
-export function decodePngScreenshot(value: unknown): Buffer {
+function decodePngScreenshot(value: unknown): Buffer {
   const raw = String(value ?? "").replace(/^data:image\/png;base64,/u, "").replace(/\s+/gu, "");
-  if (!raw || raw.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(raw)) throw new Error("application.evidence.screenshot_invalid");
-  if (Math.floor((raw.length * 3) / 4) > SCREENSHOT_MAX_BYTES + 2) throw new Error("application.evidence.screenshot_too_large");
+  if (!raw || raw.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(raw)) throw new DomainError("application.evidence.screenshot_invalid");
+  if (Math.floor((raw.length * 3) / 4) > SCREENSHOT_MAX_BYTES + 2) throw new DomainError("application.evidence.screenshot_too_large");
   const data = Buffer.from(raw, "base64");
-  if (data.length > SCREENSHOT_MAX_BYTES) throw new Error("application.evidence.screenshot_too_large");
-  if (data.length < 33 || !data.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error("application.evidence.screenshot_invalid");
+  if (data.length > SCREENSHOT_MAX_BYTES) throw new DomainError("application.evidence.screenshot_too_large");
+  if (data.length < 33 || !data.subarray(0, 8).equals(PNG_SIGNATURE)) throw new DomainError("application.evidence.screenshot_invalid");
   return data;
 }
 
 /** Resumo dos campos preenchidos: até 100 itens {label, value}, textos curtos e sem controle. */
-export function validateFieldsSummary(value: unknown): FieldSummary[] {
-  if (!Array.isArray(value) || value.length > FIELDS_SUMMARY_MAX_ITEMS) throw new Error("application.evidence.fields_invalid");
+function validateFieldsSummary(value: unknown): FieldSummary[] {
+  if (!Array.isArray(value) || value.length > FIELDS_SUMMARY_MAX_ITEMS) throw new DomainError("application.evidence.fields_invalid");
   const clean = (text: unknown, max: number) => {
-    if (typeof text !== "string" && typeof text !== "number" && typeof text !== "boolean") throw new Error("application.evidence.fields_invalid");
+    if (typeof text !== "string" && typeof text !== "number" && typeof text !== "boolean") throw new DomainError("application.evidence.fields_invalid");
     const normalized = String(text).normalize("NFC").replace(/\p{Cc}+/gu, " ").trim();
-    if (normalized.length > max) throw new Error("application.evidence.fields_invalid");
+    if (normalized.length > max) throw new DomainError("application.evidence.fields_invalid");
     return normalized;
   };
   return value.map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("application.evidence.fields_invalid");
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new DomainError("application.evidence.fields_invalid");
     const entry = item as Record<string, unknown>;
     const label = clean(entry.label, FIELD_LABEL_MAX);
-    if (!label) throw new Error("application.evidence.fields_invalid");
+    if (!label) throw new DomainError("application.evidence.fields_invalid");
     return { label, value: clean(entry.value ?? "", FIELD_VALUE_MAX) };
   });
 }
 
 /** Limite diário (global e, se configurado, por ATS) já atingido para esta URL? */
-export function dailyLimitFor(db: DatabaseSync, applicationUrl: string, settings: AutomationSettings = readAutomationSettings(db), nowMs = Date.now()) {
+function dailyLimitFor(db: DatabaseSync, applicationUrl: string, settings: AutomationSettings = readAutomationSettings(db), nowMs = Date.now()) {
   const usage = automationUsage(db, settings, nowMs);
   if (usage.total >= settings.daily_limit) return { scope: "global" as const, limit: settings.daily_limit, used: usage.total, date: usage.date, ats: null };
   if (settings.per_ats_limit != null) {
@@ -127,34 +122,36 @@ export type ExecutorDeps = {
   expireAuthorizations: () => void;
   revokeAuthorizationRows: (applicationId: string, reason: string) => void;
   abortApplyingJob: (jobId: string, reason: string, actor: string) => void;
-  listApplications: () => Application[];
+  getApplication: (id: string) => Application | null;
   /** #18 — fim de um lease novo do claim (o mesmo do heartbeat). */
   leaseExpiresAt: () => string;
+  /** Projeto da instalação (RADAR_PROJECT_ID) para o painel de automação. */
+  projectId: () => string;
 };
 
 export function createExecutor(deps: ExecutorDeps) {
   const { db, tx, audit } = deps;
-  const applicationById = (id: string) => deps.listApplications().find((item) => item.id === id) ?? null;
+  const applicationById = (id: string) => deps.getApplication(id);
 
   /** URL observada obrigatória, https, num ATS da allowlist e com o mesmo hash canônico da autorizada. */
   function assertObservedUrl(authorization: AuthorizationRow, observedUrl: unknown, settings: AutomationSettings) {
     const observed = String(observedUrl ?? "").trim();
-    if (!observed) throw new Error("application.observed_url.required");
+    if (!observed) throw new DomainError("application.observed_url.required");
     assertAtsUrl(db, authorization.application_url, settings);
     assertAtsUrl(db, observed, settings);
     let observedHash = "";
-    try { observedHash = urlHash(observed); } catch { throw new Error("application.url_mismatch"); }
-    if (observedHash !== authorization.application_url_hash) throw new Error("application.url_mismatch");
+    try { observedHash = urlHash(observed); } catch { throw new DomainError("application.url_mismatch"); }
+    if (observedHash !== authorization.application_url_hash) throw new DomainError("application.url_mismatch");
   }
 
   /** O token entregue ao worker precisa casar com o hash e a confirmação humana precisa existir. */
   function assertSubmitToken(authorization: AuthorizationRow, token: unknown) {
     const supplied = String(token ?? "").trim();
     const expected = String(authorization.submit_token_hash ?? "");
-    if (!authorization.final_confirmation_at || !authorization.submit_token_issued_at || !expected || !supplied) throw new Error("application.final_confirmation_required");
+    if (!authorization.final_confirmation_at || !authorization.submit_token_issued_at || !expected || !supplied) throw new DomainError("application.final_confirmation_required");
     const a = Buffer.from(sha256Hex(supplied), "hex");
     const b = Buffer.from(expected, "hex");
-    if (a.length !== b.length || !timingSafeEqual(a, b)) throw new Error("application.final_confirmation_required");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) throw new DomainError("application.final_confirmation_required");
   }
 
   /** Limite atingido: revoga a autorização e devolve a candidatura para revisão humana. */
@@ -182,7 +179,7 @@ export function createExecutor(deps: ExecutorDeps) {
     const outcome = tx(() => {
       const settings = assertAutomationActive(db);
       const { authorization, worker } = deps.claimedAuthorizationFor(applicationId, String(input?.worker_id ?? ""));
-      if (!["in_progress", "awaiting_final_confirmation"].includes(String(authorization.application_status)) || authorization.paused_at) throw new Error("application.authorization.unavailable");
+      if (!["in_progress", "awaiting_final_confirmation"].includes(String(authorization.application_status)) || authorization.paused_at) throw new DomainError("application.authorization.unavailable");
       assertObservedUrl(authorization, input?.observed_url, settings);
       const hit = dailyLimitFor(db, String(authorization.application_url), settings);
       if (hit) { stopForDailyLimit(applicationId, authorization, `worker:${worker}`, hit, timestamp); return { hit }; }
@@ -193,31 +190,31 @@ export function createExecutor(deps: ExecutorDeps) {
         VALUES (?,?,?,'final_confirmation','image/png',?,?,?,?,?,?)`).run(evidenceId, applicationId, String(authorization.id), sha256Hex(screenshot), screenshot, JSON.stringify(fields), canonicalizeJobUrl(String(input.observed_url)), `worker:${worker}`, timestamp);
       const updated = db.prepare(`UPDATE application_authorizations SET final_confirmation_requested_at=?,final_evidence_id=?,final_confirmation_at=NULL,final_confirmation_by=NULL,
         submit_token_hash=NULL,submit_token_issued_at=NULL,lease_expires_at=?,heartbeat_at=? WHERE id=? AND state='claimed' AND claimed_by=?`).run(timestamp, evidenceId, deps.leaseExpiresAt(), timestamp, String(authorization.id), worker);
-      if (!updated.changes) throw new Error("application.authorization.unavailable");
+      if (!updated.changes) throw new DomainError("application.authorization.unavailable");
       db.prepare("UPDATE applications SET status='awaiting_final_confirmation',current_step='Aguardando sua confirmação final no painel',updated_at=? WHERE id=?").run(timestamp, applicationId);
       audit("application", applicationId, "final_confirmation_requested", { worker_id: worker, authorization_id: authorization.id, evidence_id: evidenceId, fields: fields.length, screenshot_bytes: screenshot.length });
       return { evidenceId };
     });
-    if ("hit" in outcome) throw new Error("application.daily_limit_reached");
+    if ("hit" in outcome) throw new DomainError("application.daily_limit_reached");
     return { application: applicationById(applicationId), evidence_id: outcome.evidenceId };
   }
 
   /** Segunda confirmação humana (painel, digitando ENVIAR) para esta execução específica. */
   function confirmFinalSubmission(applicationId: string, confirmation: unknown, actor: string) {
-    if (confirmation !== FINAL_CONFIRMATION_TEXT) throw new Error("application.final_confirmation.text_required");
+    if (confirmation !== FINAL_CONFIRMATION_TEXT) throw new DomainError("application.final_confirmation.text_required");
     deps.expireAuthorizations();
     const timestamp = now();
     tx(() => {
       const settings = assertAutomationActive(db);
       const authorization = deps.assertCurrentAuthorization(deps.currentAuthorization(applicationId), "claimed", timestamp);
       if (authorization.application_status !== "awaiting_final_confirmation" || !authorization.final_confirmation_requested_at || authorization.final_confirmation_at || authorization.paused_at) {
-        throw new Error("application.final_confirmation.not_pending");
+        throw new DomainError("application.final_confirmation.not_pending");
       }
       assertAtsUrl(db, authorization.application_url, settings);
       // O worker volta a trabalhar: lease novo (a espera do usuário não conta contra ele).
       const updated = db.prepare("UPDATE application_authorizations SET final_confirmation_at=?,final_confirmation_by=?,lease_expires_at=? WHERE id=? AND state='claimed' AND final_confirmation_at IS NULL")
         .run(timestamp, actor.slice(0, 120), deps.leaseExpiresAt(), String(authorization.id));
-      if (!updated.changes) throw new Error("application.final_confirmation.not_pending");
+      if (!updated.changes) throw new DomainError("application.final_confirmation.not_pending");
       db.prepare("UPDATE applications SET status='in_progress',current_step='Envio confirmado por você; aguardando o executor concluir',updated_at=? WHERE id=? AND status='awaiting_final_confirmation'").run(timestamp, applicationId);
       audit("application", applicationId, "final_confirmation_given", { actor, authorization_id: authorization.id, evidence_id: authorization.final_evidence_id });
     });
@@ -231,7 +228,7 @@ export function createExecutor(deps: ExecutorDeps) {
       const row = deps.currentAuthorization(applicationId);
       if (row?.state !== "claimed" || !row.final_confirmation_requested_at
         || !["awaiting_final_confirmation", "in_progress", "needs_review"].includes(String(row.application_status))) {
-        throw new Error("application.final_confirmation.not_pending");
+        throw new DomainError("application.final_confirmation.not_pending");
       }
       deps.revokeAuthorizationRows(applicationId, "final_confirmation_cancelled");
       db.prepare(`UPDATE applications SET status='needs_review',automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,
@@ -274,7 +271,7 @@ export function createExecutor(deps: ExecutorDeps) {
   /** Validações do envio final dentro da transação do submit (ver submitAuthorizedApplication). */
   function checkFinalSubmit(applicationId: string, authorization: AuthorizationRow, input: { observed_url?: unknown; submit_token?: unknown }, worker: string, timestamp: string) {
     const settings = assertAutomationActive(db);
-    if (authorization.paused_at) throw new Error("AUTOMATION_DISABLED");
+    if (authorization.paused_at) throw new DomainError("AUTOMATION_DISABLED");
     assertObservedUrl(authorization, input.observed_url, settings);
     assertSubmitToken(authorization, input.submit_token);
     const hit = dailyLimitFor(db, String(authorization.application_url), settings);
@@ -288,27 +285,33 @@ export function createExecutor(deps: ExecutorDeps) {
     return { id: row.id, mime: row.mime, sha256: row.sha256, data: Buffer.from(row.data) };
   }
 
-  /** Estado da automação para o painel e o CLI (sem nonce, token ou hash de token). */
-  function automationOverview(nowMs = Date.now()) {
+  /**
+   * Estado da automação para o painel e o CLI (sem nonce, token ou hash de token). Autorizações e
+   * confirmações finais são do projeto (TD-06, pela vaga); o kill-switch, os limites e o uso do dia
+   * são da instalação: o limite diário protege a mesma pessoa em todos os projetos.
+   */
+  function automationOverview(projectId = deps.projectId(), nowMs = Date.now()): AutomationOverview {
     const settings = readAutomationSettings(db);
     const envEnabled = envAutomationEnabled();
     const usage = automationUsage(db, settings, nowMs);
     const authorizations = (db.prepare(`SELECT applications.id AS application_id, auth.id AS authorization_id, auth.state, auth.expires_at, auth.claimed_by, auth.claimed_at,
         auth.final_confirmation_requested_at, auth.final_confirmation_at, auth.final_confirmation_by, auth.final_evidence_id, auth.paused_at, auth.application_url,
         CASE WHEN auth.submit_token_issued_at IS NULL THEN 0 ELSE 1 END AS token_issued
-      FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id`).all() as Record<string, unknown>[])
-      .map((row) => ({ ...row, state: String(row.state), token_issued: Number(row.token_issued) === 1, ats: atsFamilyFor(row.application_url, settings.ats_allowlist) }));
+      FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id
+      JOIN jobs ON jobs.id = applications.job_id WHERE jobs.project_id = ?`).all(projectId) as Record<string, unknown>[])
+      .map((row) => ({ ...row, state: String(row.state), token_issued: Number(row.token_issued) === 1, ats: atsFamilyFor(row.application_url, settings.ats_allowlist) }) as unknown as AuthorizationView & { token_issued: boolean });
     const finalConfirmations = (db.prepare(`SELECT applications.id AS application_id, applications.job_id, auth.final_confirmation_requested_at AS requested_at, auth.expires_at, auth.claimed_by,
         evidence.id AS evidence_id, evidence.observed_url, evidence.summary_json, evidence.created_at
       FROM applications
       JOIN application_authorizations auth ON auth.id = applications.authorization_id
+      JOIN jobs ON jobs.id = applications.job_id
       LEFT JOIN application_evidence evidence ON evidence.id = auth.final_evidence_id
-      WHERE applications.status = 'awaiting_final_confirmation' AND auth.state = 'claimed'
-      ORDER BY auth.final_confirmation_requested_at ASC`).all() as Record<string, unknown>[])
+      WHERE applications.status = 'awaiting_final_confirmation' AND auth.state = 'claimed' AND jobs.project_id = ?
+      ORDER BY auth.final_confirmation_requested_at ASC`).all(projectId) as Record<string, unknown>[])
       .map(({ summary_json, ...row }) => {
         let fields: FieldSummary[] = [];
         try { fields = validateFieldsSummary(JSON.parse(String(summary_json ?? "[]"))); } catch { fields = []; }
-        return { ...row, fields_summary: fields };
+        return { ...row, fields_summary: fields } as unknown as FinalConfirmationView;
       });
     const activeRuns = authorizations.filter((item) => item.state === "claimed").length;
     const issued = authorizations.filter((item) => item.state === "issued").length;
@@ -360,7 +363,7 @@ export function createExecutor(deps: ExecutorDeps) {
   /** PUT /api/settings/automation e scripts/ops/automation.mjs. */
   function updateAutomationSettings(input: Record<string, unknown>, actor: string) {
     const patch = validateAutomationPatch(input ?? {});
-    if (!Object.keys(patch).length) throw new Error("settings.automation.empty");
+    if (!Object.keys(patch).length) throw new DomainError("settings.automation.empty");
     const timestamp = now();
     const changes = tx(() => {
       const before = readAutomationSettings(db);

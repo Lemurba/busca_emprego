@@ -1,9 +1,10 @@
 /**
  * Banco SQLite temporário por arquivo/caso de teste.
  *
- * src/db.ts lê RADAR_DB_PATH no import e roda as migrações; importar com uma query string
- * nova (`?x=...`) reavalia só o db.ts e abre uma conexão nova sobre o arquivo indicado. Os
- * módulos sem estado (src/db/*, domain, workflow) continuam em cache, o que é seguro.
+ * Importar src/db.ts não abre o banco (TD-24): `importStore` chama `openStore()` sobre o
+ * RADAR_DB_PATH atual, que fecha a conexão anterior e abre (migrando) o arquivo indicado. O
+ * núcleo tem uma conexão por processo; trocar de banco no meio do teste troca para todos os
+ * módulos (o objeto devolvido é sempre o mesmo módulo).
  *
  * Uso típico (node --import tsx --test):
  *
@@ -17,7 +18,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const DB_MODULE = new URL("../../src/db.ts", import.meta.url).href;
-let sequence = 0;
 
 /** Cria um diretório temporário e aponta RADAR_DB_PATH para `<dir>/<file>`. */
 export function useTempDb(prefix = "radar-test", file = "test.sqlite") {
@@ -27,10 +27,11 @@ export function useTempDb(prefix = "radar-test", file = "test.sqlite") {
   return { directory, path, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
 }
 
-/** Importa uma instância nova de src/db.ts ligada ao RADAR_DB_PATH atual. */
-export function importStore(tag = "store") {
-  sequence += 1;
-  return import(`${DB_MODULE}?${encodeURIComponent(tag)}=${Date.now()}-${sequence}`);
+/** src/db.ts com o banco do RADAR_DB_PATH atual aberto (e migrado). `_tag` só documenta o chamador. */
+export async function importStore(_tag = "store") {
+  const store = await import(DB_MODULE);
+  store.openStore({ path: process.env.RADAR_DB_PATH });
+  return store;
 }
 
 /** Banco temporário + instância de src/db.ts; `cleanup` fecha a conexão e apaga o diretório. */
@@ -41,11 +42,7 @@ export async function openTempStore(prefix = "radar-test", file = "test.sqlite")
     ...temp,
     store,
     cleanup() {
-      try {
-        store.db.close();
-      } catch {
-        /* já fechada pelo teste */
-      }
+      store.closeStore();
       temp.cleanup();
     }
   };

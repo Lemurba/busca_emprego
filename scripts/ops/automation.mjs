@@ -18,9 +18,10 @@
  *
  * Requer `npm run build` (dist/ presente).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readEnvLocal } from "./lib/env-local.mjs";
 
 const USAGE = `Uso: node scripts/ops/automation.mjs <status|on|off|limit <n>|ats-limit <n|none>> [--db CAMINHO] [--json]
 
@@ -53,20 +54,6 @@ const option = (name) => {
 const positional = argv.filter((item, index) => !item.startsWith("--") && argv[index - 1] !== "--db");
 const [command = "status", argument] = positional;
 
-function readLocalEnv() {
-  const vars = {};
-  try {
-    for (const raw of readFileSync(resolve(repoRoot, ".env.local"), "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#")) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch { /* sem .env.local */ }
-  return vars;
-}
-
 const patchFor = () => {
   switch (command) {
     case "status": return null;
@@ -89,7 +76,7 @@ const patchFor = () => {
 const patch = patchFor();
 
 if (!existsSync(resolve(repoRoot, "dist/src/db.js"))) fail("dist/ ausente — rode `npm run build` antes.", 2);
-const localEnv = readLocalEnv();
+const localEnv = readEnvLocal(repoRoot);
 process.env.RADAR_DB_PATH = resolve(option("--db") ?? process.env.RADAR_DB_PATH ?? localEnv.RADAR_DB_PATH ?? "./data/radar.sqlite");
 // O status mostra o teto da instalação (o mesmo .env.local que o serviço lê).
 process.env.RADAR_AUTO_APPLICATION_ENABLED ??= localEnv.RADAR_AUTO_APPLICATION_ENABLED ?? "";
@@ -97,12 +84,13 @@ process.env.RADAR_AUTO_APPLICATION_ENABLED ??= localEnv.RADAR_AUTO_APPLICATION_E
 const store = await import("../../dist/src/db.js");
 let result;
 try {
+  store.openStore();
   const actor = `cli:${process.env.USER || "operador"}`;
   result = patch ? store.updateAutomationSettings(patch, actor) : store.automationOverview();
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 } finally {
-  try { store.db.close(); } catch { /* já fechada */ }
+  store.closeStore();
 }
 
 const summary = {

@@ -1,5 +1,7 @@
 # Análise crítica feature por feature — 2026-10-11
 
+> **Documento histórico (11/10/2026).** Análise do `main` em `6dab07b`, mantida só como registro; os `arquivo:linha` referem-se àquele commit. A maior parte dos achados virou as issues #9–#30 e foi tratada depois (veja [`docs/backlog-triagem-2026-10-30.md`](backlog-triagem-2026-10-30.md)). Caminhos que mudaram: os testes HTTP ficam em `test/e2e/` (`test/e2e/e2e-load-security.test.mjs`, `test/e2e/inbound-answers.test.mjs`) e `src/adapters.ts` foi removido. O estado atual está no [README](../README.md), em [`docs/agent-api.md`](agent-api.md), [`docs/security.md`](security.md), [`docs/operations-runbook.md`](operations-runbook.md) e na seção “Status da aplicação” de [`docs/auditoria-2026-10-30.md`](auditoria-2026-10-30.md#status-da-aplicação).
+
 Escopo: `main` em `6dab07b`. Cada feature é avaliada em quatro eixos — **contradições** (o repositório diz duas coisas incompatíveis), **fragilidades** (funciona hoje, quebra fácil), **não pode dar certo** (o desenho impede o resultado prometido) e **correção proposta**. Os achados marcados **[R]** foram reproduzidos executando o código contra bancos temporários; os demais foram verificados por leitura com `arquivo:linha`.
 
 A integração com o Hermes foi conferida contra a documentação oficial do Hermes Agent (Nous Research): <https://hermes-agent.nousresearch.com/docs> (texto integral em `llms-full.txt`) e o código em <https://github.com/NousResearch/hermes-agent> (commit `1fd18277`, 2026-10-11).
@@ -60,7 +62,7 @@ Conclusão: a parte que o Radar **realmente usa** (skill, MCP, `hermes send`, ho
 - Caminhos: `ONBOARDING.md` fala em `/opt/hermes/plugins/busca-emprego` e `/var/lib/hermes/...`, mas também em `/opt/data/dashboard/busca_emprego` e `data/radar.sqlite`. Na imagem oficial `/opt/hermes` é do root e somente leitura — não dá para instalar lá.
 - “Nunca pedir bot token ou chat ID” (`ONBOARDING.md` §1.7) × `HERMES_TELEGRAM_CHAT_ID` lido pelos scripts e `telegram-diagnose.mjs` usando `TELEGRAM_BOT_TOKEN` direto.
 - “O dashboard e a API ficarão abertos sem login ou token” × `SKILL.md`: “rotas internas exigem `x-radar-service-token`… 401 sem ele”.
-- IP de LAN fixo (`192.168.1.183`) e caminho `/opt/data/chrome-app` em documentação versionada.
+- IP de LAN fixo (endereço privado da instalação, omitido aqui) e caminho `/opt/data/chrome-app` em documentação versionada.
 
 **Correção proposta**: um único `.env.example` com `PORT` canônica; todos os scripts lendo `PORT` sem default divergente; instalar o app em `/opt/data/...` (volume gravável); substituir `HERMES_TELEGRAM_CHAT_ID` por `TELEGRAM_HOME_CHANNEL`/`TELEGRAM_ALLOWED_USERS` (fonte oficial, já em `/opt/data/.env`); mover IPs/hosts da máquina para `.env.local`.
 
@@ -176,8 +178,8 @@ Sem XSS explorável (todas as interpolações passam por `escapeHtml`, CSP `scri
 
 - `engines: node >=24`, mas tudo passa em Node 22.22 (`node:sqlite` existe desde 22.5). Alinhar com a imagem do Hermes ou documentar o motivo.
 - `test/ops.test.mjs` roda duas vezes na CI; actions fixadas por tag, não SHA; sem `npm audit`/CodeQL; varredura de secrets só cobre dois nomes.
-- `test/e2e-load-security.test.mjs` afirma que a API “must not require login” — cristaliza a falha da seção 4. Faltam testes de CSRF, `Host`, `x-forwarded-proto`, UTF-8 e limite de corpo.
-- `test/inbound-answers.test.mjs` aceita como correto responder a pergunta errada após reentrega.
+- `test/e2e-load-security.test.mjs` (hoje `test/e2e/e2e-load-security.test.mjs`) afirma que a API “must not require login” — cristaliza a falha da seção 4. Faltam testes de CSRF, `Host`, `x-forwarded-proto`, UTF-8 e limite de corpo.
+- `test/inbound-answers.test.mjs` (hoje `test/e2e/inbound-answers.test.mjs`) aceita como correto responder a pergunta errada após reentrega.
 
 ## 14. Ordem recomendada
 

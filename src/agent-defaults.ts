@@ -18,7 +18,6 @@ export const DEFAULT_JOB_PORTALS = [
 ] as const;
 
 export const DEFAULT_AGENT_SOURCE_IDS = DEFAULT_JOB_PORTALS.map((portal) => portal.id);
-export const DEFAULT_AGENT_ALLOWED_DOMAINS = DEFAULT_JOB_PORTALS.map((portal) => portal.domain);
 
 export const AGENT_ROLE_SCOPES: Record<string, string[]> = {
   coordinator: ["agent.invoke", "agents.propose", "jobs.read"],

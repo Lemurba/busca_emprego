@@ -1,7 +1,7 @@
 /** Deterministic domain rules from the production SDD. No persistence or I/O. */
 
 import { isIP } from "node:net";
-import { lookup } from "node:dns/promises";
+import { hostMatchesDomain } from "./ats-domains.js";
 import { DomainError } from "./errors.js";
 
 /** Campo inválido: sempre 422, com `field` nos detalhes e mensagem pt-BR segura. */
@@ -10,7 +10,7 @@ export class DomainValidationError extends DomainError {
     message: string,
     readonly field: string,
   ) {
-    super(`validation.${field}`, 422, { field }, message);
+    super(`validation.${field}`, 422, message, { field });
     this.name = "DomainValidationError";
   }
 }
@@ -61,22 +61,49 @@ export function companyKey(company: string, legalSuffixes: readonly string[] = D
 // Parâmetros de rastreamento removidos de qualquer domínio (além de utm_*).
 const TRACKING_PARAMETERS = new Set(["gclid", "fbclid", "msclkid", "dclid", "yclid", "igshid", "mc_cid", "mc_eid", "_hsenc", "_hsmi"]);
 
+function isPrivateIpv4(octets: readonly number[]): boolean {
+  const [a, b, c] = octets;
+  // 192.0.0.0/24 (atribuições IETF) e 198.18.0.0/15 (benchmark) também não são destinos públicos.
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31)
+    || (a === 192 && b === 168) || (a === 100 && b! >= 64 && b! <= 127) || a! >= 224
+    || (a === 192 && b === 0 && c === 0) || (a === 198 && (b === 18 || b === 19));
+}
+
+/** Os 8 grupos de 16 bits de um IPv6 já validado por isIP (aceita "::" e IPv4 embutido no fim). */
+function ipv6Groups(host: string): number[] {
+  let text = host.split("%")[0]!;
+  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/u.exec(text);
+  if (v4) {
+    const [, a, b, c, d] = v4.map(Number);
+    text = `${text.slice(0, v4.index)}${((a! << 8) | b!).toString(16)}:${((c! << 8) | d!).toString(16)}`;
+  }
+  const [head, tail] = text.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const fill = tail === undefined ? [] : Array.from({ length: 8 - left.length - right.length }, () => "0");
+  return [...left, ...fill, ...right].map((group) => parseInt(group, 16));
+}
+
 /** Blocks literal private/link-local destinations before any connector fetches them. */
 export function isPrivateDestination(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/gu, "").toLowerCase();
   if (["localhost", "localhost.localdomain", "broadcasthost"].includes(host) || host.endsWith(".localhost") || host.endsWith(".local")) return true;
   const version = isIP(host);
-  if (version === 4) {
-    const octets = host.split(".").map(Number);
-    const [a, b] = octets;
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-  }
+  if (version === 4) return isPrivateIpv4(host.split(".").map(Number));
   if (version === 6) {
-    const normalized = host.replace(/^0:0:0:0:0:ffff:/u, "::ffff:");
-    return normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd")
-      || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")
-      || normalized.startsWith("::ffff:");
+    const groups = ipv6Groups(host);
+    const embedded = (high: number, low: number) => isPrivateIpv4([high >> 8, high & 0xff, low >> 8, low & 0xff]);
+    const [g0, g1, g2, g3, g4, g5, g6, g7] = groups as [number, number, number, number, number, number, number, number];
+    const zeroPrefix = groups.slice(0, 5).every((group) => group === 0);
+    if (zeroPrefix && g5 === 0 && g6 === 0 && (g7 === 0 || g7 === 1)) return true; // :: e ::1
+    if (zeroPrefix && (g5 === 0xffff || g5 === 0)) return true; // IPv4 mapeado/compatível
+    if ((g0 & 0xfe00) === 0xfc00 || (g0 & 0xffc0) === 0xfe80 || (g0 & 0xff00) === 0xff00) return true; // ULA, link-local, multicast
+    // NAT64: 64:ff9b::/96 embute o IPv4 no fim; 64:ff9b:1::/48 é de uso local e nunca é público.
+    if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return embedded(g6, g7);
+    if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return true;
+    // 6to4: 2002::/16 embute o IPv4 nos bits 16-47.
+    if (g0 === 0x2002) return embedded(g1, g2);
+    return false;
   }
   return false;
 }
@@ -108,16 +135,6 @@ export function assertPublicHttpsUrl(input: string, allowedDomains?: readonly st
 /** true só para URL https: válida (o executor recusa qualquer outra). */
 export function isHttpsUrl(input: string | null | undefined): boolean {
   try { return new URL(String(input ?? "").trim()).protocol === "https:"; } catch { return false; }
-}
-
-/** Resolves every address to avoid accepting a public hostname that points at LAN. */
-export async function assertResolvablePublicHttpsUrl(input: string, allowedDomains?: readonly string[]): Promise<URL> {
-  const url = assertPublicHttpsUrl(input, allowedDomains);
-  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some(({ address }) => isPrivateDestination(address))) {
-    throw new DomainValidationError("Destino DNS privado não permitido", "url");
-  }
-  return url;
 }
 
 /**
@@ -201,7 +218,7 @@ export interface JobUrlIdentity {
  * portais conhecidos mantém só a allowlist de parâmetros de identidade. Nos demais domínios
  * só o rastreamento conhecido sai, porque a query pode identificar a vaga.
  */
-export function jobUrlIdentity(input: string): JobUrlIdentity {
+function jobUrlIdentity(input: string): JobUrlIdentity {
   const url = assertPublicHttpUrl(input);
 
   url.hash = "";
@@ -282,14 +299,14 @@ export function validateCoordinates(input: Coordinates): FieldValidationResult<C
   return errors.length ? { value: null, fieldErrors: errors } : { value: input, fieldErrors: [] };
 }
 
-export function jaccard<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): number {
+function jaccard<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): number {
   if (left.size === 0 && right.size === 0) return 1;
   let intersection = 0;
   for (const value of left) if (right.has(value)) intersection += 1;
   return intersection / (left.size + right.size - intersection);
 }
 
-export function titleTrigrams(title: string): Set<string> {
+function titleTrigrams(title: string): Set<string> {
   const normalized = normalizeComparableText(title);
   if (!normalized) return new Set();
   if (normalized.length <= 3) return new Set([normalized]);
@@ -350,7 +367,7 @@ function isRemote(value: string | null): boolean {
   return normalized === "remote" || normalized === "remoto" || normalized === "remota";
 }
 
-export function locationsCompatible(left: FuzzyJobCandidate, right: FuzzyJobCandidate): boolean {
+function locationsCompatible(left: FuzzyJobCandidate, right: FuzzyJobCandidate): boolean {
   if (isRemote(left.workModel) && isRemote(right.workModel)) return true;
   if (isRemote(left.workModel) !== isRemote(right.workModel)) return false;
   if (!left.location || !right.location) return false;
@@ -454,7 +471,7 @@ export function calculateMatchScore(scores: Readonly<Record<MatchCriterionKey, n
   const expected = Object.keys(MATCH_CRITERION_WEIGHTS) as MatchCriterionKey[];
   const actual = Object.keys(scores);
   const extras = actual.filter((key) => !(key in MATCH_CRITERION_WEIGHTS));
-  const missing = expected.filter((key) => !Object.prototype.hasOwnProperty.call(scores, key));
+  const missing = expected.filter((key) => !Object.hasOwn(scores, key));
   if (missing.length || extras.length) {
     throw new DomainValidationError(
       `São exigidos exatamente os seis critérios; ausentes: ${missing.join(", ") || "nenhum"}; extras: ${extras.join(", ") || "nenhum"}`,
@@ -566,4 +583,13 @@ export function compareTotalRejection(
     ? titleScore >= 0.9 && requirementScore! >= 0.6
     : titleScore >= 0.95;
   return { similar, titleSimilarity: titleScore, requirementsSimilarity: requirementScore, familyMatched: false, reason: similar ? (requirementsPresent ? "fallback_title_and_requirements" : "fallback_title_only") : "fallback_rule_not_met" };
+}
+
+/**
+ * Regra de domínio dos agentes (TD-11): o host da URL canônica precisa ser um dos domínios
+ * permitidos ou subdomínio dele. Usada pelo núcleo (`assertAgentUrlAllowed`) e pelo MCP.
+ */
+export function agentUrlAllowed(allowedDomains: readonly string[], url: string): boolean {
+  const hostname = new URL(canonicalizeJobUrl(url)).hostname.toLowerCase();
+  return allowedDomains.some((domain) => hostMatchesDomain(hostname, domain));
 }

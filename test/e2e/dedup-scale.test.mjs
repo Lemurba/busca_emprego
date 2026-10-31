@@ -27,7 +27,9 @@ const directory = mkdtempSync(join(tmpdir(), "radar-dedup-scale-"));
 const dbPath = join(directory, "scale.sqlite");
 process.env.RADAR_DB_PATH = dbPath;
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
-const store = await import(`../../dist/src/db.js?scale=${Date.now()}`);
+const store = await import("../../dist/src/db.js");
+// Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
+store.openStore();
 
 try {
   await test("dedup em escala com escritor concorrente", async () => {
@@ -125,6 +127,6 @@ try {
     assert.ok(slowest < 5000, `lote mais lento ${slowest} ms`);
   });
 } finally {
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 }

@@ -7,11 +7,12 @@
 // ignorados: contato já é coberto pelos fatos de contato do perfil.
 import { createHash } from "node:crypto";
 import { normalizeComparableText } from "./domain.js";
+import { DomainError } from "./errors.js";
 
 export type ClaimKind = "number" | "date" | "company" | "role" | "degree" | "certification" | "technology";
 
 /** Categorias que bloqueiam a aprovação enquanto não forem confirmadas, corrigidas ou removidas. */
-export const BLOCKING_CLAIM_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(["number", "date", "company", "role", "degree", "certification"]);
+const BLOCKING_CLAIM_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(["number", "date", "company", "role", "degree", "certification"]);
 
 export interface Claim {
   /** Hash estável de kind + normalized: a mesma afirmação tem o mesmo id em versões diferentes. */
@@ -435,7 +436,7 @@ export interface FactCorpus {
 }
 
 /** Junta recursivamente os valores (strings e números) de um valor de fato, inclusive objetos estruturados. */
-export function factValueText(value: unknown): string {
+function factValueText(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -492,7 +493,7 @@ function phraseCovered(normalized: string, corpus: FactCorpus, ignore: ReadonlyS
   return corpus.tokens.some((factTokens) => wanted.every((token) => tokenCovered(token, factTokens)));
 }
 
-export function isClaimCovered(claim: Pick<Claim, "kind" | "normalized">, corpus: FactCorpus): boolean {
+function isClaimCovered(claim: Pick<Claim, "kind" | "normalized">, corpus: FactCorpus): boolean {
   switch (claim.kind) {
     case "number": return corpus.numbers.has(claim.normalized);
     case "date": return corpus.dates.has(claim.normalized);
@@ -514,7 +515,7 @@ function assertSpans(content: string, spans: readonly Span[]) {
   const sorted = [...spans].sort((left, right) => right[0] - left[0]);
   let previousStart = Number.POSITIVE_INFINITY;
   for (const [start, end] of sorted) {
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > content.length || start >= end || end > previousStart) throw new Error("resume.facts.span_invalid");
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > content.length || start >= end || end > previousStart) throw new DomainError("resume.facts.span_invalid");
     previousStart = start;
   }
   return sorted;

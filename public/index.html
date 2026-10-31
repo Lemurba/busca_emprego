@@ -81,7 +81,7 @@
       <div class="auth-card">
         <span class="brand-mark" aria-hidden="true">◈</span>
         <h1 id="auth-title">Acesso ao Radar de Vagas</h1>
-        <p>Sua sessão expirou ou não foi encontrada. Abra neste navegador o <strong>link de acesso que o Hermes enviou no Telegram</strong>.</p>
+        <p><span id="auth-message">Sua sessão expirou ou não foi encontrada.</span> Abra neste navegador o <strong>link de acesso que o Hermes enviou no Telegram</strong>.</p>
         <details class="auth-hint"><summary>Não tem o link?</summary><p>Peça um novo link ao Hermes. Quem administra o Radar pode gerar um na máquina do servidor com <code>node scripts/ops/dashboard-link.mjs --send</code>.</p></details>
         <button class="primary-button" id="auth-retry" type="button">Tentar novamente</button>
       </div>

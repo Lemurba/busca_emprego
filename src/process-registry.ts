@@ -6,13 +6,13 @@ import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 
-export const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;
 /** Heartbeat mais velho que isto é tratado como processo morto (3 intervalos perdidos). */
 export const HEARTBEAT_STALE_MS = 60_000;
 
 export type ProcessRole = "dashboard" | "mcp";
 
-export function processRegistryDir(dbPath: string) {
+function processRegistryDir(dbPath: string) {
   return `${resolve(dbPath)}.processes`;
 }
 

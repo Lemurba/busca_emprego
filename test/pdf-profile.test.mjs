@@ -180,3 +180,196 @@ test("compactProfileContext respeita o orçamento", () => {
     assert.ok(utf8Size(compactProfileContext(large, 1500)) <= 1500);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Fatos por seção e por página (I49-10/QA-05): PDF de várias páginas com seções coladas
+// ---------------------------------------------------------------------------
+
+/** Desenha cada página como uma lista de linhas (uma linha por drawText). */
+async function resumePdf(pages) {
+  const document = await PDFDocument.create();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  for (const lines of pages) {
+    const page = document.addPage();
+    for (const [index, line] of lines.entries()) page.drawText(line, { x: 50, y: 780 - index * 18, size: 11, font });
+  }
+  return document.save();
+}
+
+test("seções cortadas no próximo título, um fato por item e página real", async () => {
+  const bytes = await resumePdf([
+    [
+      "Mariana Souza Lima",
+      "Engenheira de Dados Sênior",
+      "mariana.lima@example.com | +55 (11) 98765-4321",
+      "Resumo",
+      "Engenheira de dados com 8 anos em pipelines de alto volume.",
+      "Foco em qualidade e custo de nuvem.",
+      "Experiência",
+      "Engenheira de Dados Sênior — Banco Exemplo (2021 – atual)",
+      "• Migrou o data lake para Spark.",
+      "• Reduziu o custo de nuvem em 30%.",
+      "Engenheira de Dados — Varejo Exemplo (2017 – 2021)",
+      "• Criou o pipeline de vendas em Airflow.",
+    ],
+    [
+      "Analista de BI — Consultoria Exemplo (2015 – 2017)",
+      "Formação",
+      "Bacharelado em Ciência da Computação — USP (2011 – 2015)",
+      "Competências",
+      "Python, SQL, Spark",
+      "• Airflow",
+      "• dbt",
+      "Idiomas",
+      "Português (nativo); Inglês (avançado, C1)",
+      "Certificações",
+      "AWS Certified Data Engineer",
+      "Google Professional Data Engineer",
+    ],
+  ]);
+  const extraction = await extractPdfTextAsync(bytes);
+  assert.equal(extraction.status, "extracted");
+  assert.equal(extraction.pageCount, 2);
+  const facts = proposeFacts(extraction);
+  const of = (type) => facts.filter((fact) => fact.type === type);
+  const values = (type) => of(type).map((fact) => fact.value);
+
+  // Nome e cargo: palpites do cabeçalho, com confiança baixa e revisão obrigatória.
+  const [name] = of("full_name");
+  assert.deepEqual([name?.value, name?.state, name?.page], ["Mariana Souza Lima", "needs_review", 1]);
+  assert.ok(name.confidence <= 0.5);
+  const [role] = of("target_role");
+  assert.deepEqual([role?.value, role?.state], ["Engenheira de Dados Sênior", "needs_review"]);
+  assert.ok(role.confidence <= 0.5);
+
+  // Resumo para no título seguinte: não engole "Experiência" nem a primeira entrada.
+  assert.deepEqual(values("summary"), ["Engenheira de dados com 8 anos em pipelines de alto volume. Foco em qualidade e custo de nuvem."]);
+
+  // Experiência: uma entrada por cargo, com os marcadores como detalhes; atravessa a página e
+  // cada entrada leva a página onde começa. Para em "Formação".
+  const experience = of("experience");
+  assert.equal(experience.length, 3, JSON.stringify(experience));
+  assert.match(experience[0].value, /^Engenheira de Dados Sênior — Banco Exemplo/u);
+  assert.match(experience[0].value, /Reduziu o custo de nuvem em 30%/u);
+  assert.doesNotMatch(experience[0].value, /Varejo/u);
+  assert.match(experience[1].value, /^Engenheira de Dados — Varejo Exemplo.*Airflow/u);
+  assert.deepEqual(experience.map((fact) => fact.page), [1, 1, 2]);
+  assert.match(experience[2].value, /^Analista de BI/u);
+  assert.ok(experience.every((fact) => !/Forma[cç][aã]o|Bacharelado/u.test(fact.value)));
+
+  assert.deepEqual(values("education"), ["Bacharelado em Ciência da Computação — USP (2011 – 2015)"]);
+  assert.equal(of("education")[0].page, 2);
+  assert.deepEqual(values("skills"), ["Python", "SQL", "Spark", "Airflow", "dbt"], "um fato por competência, sem o título vizinho");
+  assert.deepEqual(values("languages"), ["Português (nativo)", "Inglês (avançado, C1)"]);
+  assert.deepEqual(values("certifications"), ["AWS Certified Data Engineer", "Google Professional Data Engineer"]);
+  assert.ok(of("certifications").every((fact) => fact.page === 2));
+
+  // Nenhum título vira conteúdo de outra seção.
+  for (const fact of facts) assert.doesNotMatch(fact.value, /^(?:Resumo|Experiência|Formação|Competências|Idiomas|Certificações)$|; (?:Idiomas|Competências|Formação)/u, fact.type);
+  // A evidência de cada fato vem da própria página.
+  for (const fact of facts) assert.ok(extraction.pages[fact.page - 1].text.includes(fact.excerpt.slice(0, 20)), `${fact.type}: ${fact.excerpt}`);
+  // Contato continua saindo uma vez só.
+  assert.deepEqual(values("contact_email"), ["mariana.lima@example.com"]);
+  assert.ok(facts.every((fact) => fact.origin === "pdf" && (fact.state === "proposed" || ["full_name", "target_role"].includes(fact.type))));
+});
+
+test("título com conteúdo na mesma linha e cabeçalho sem nome", async () => {
+  const bytes = await resumePdf([[
+    "Currículo de João",
+    "Competências: Java, Kotlin",
+    "Idiomas: Inglês",
+    "Contato: joao@example.com",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  assert.deepEqual(facts.filter((fact) => fact.type === "skills").map((fact) => fact.value), ["Java", "Kotlin"]);
+  assert.deepEqual(facts.filter((fact) => fact.type === "languages").map((fact) => fact.value), ["Inglês"]);
+  assert.equal(facts.some((fact) => fact.type === "full_name"), false, "\"Currículo de João\" não é nome");
+  assert.equal(facts.some((fact) => fact.type === "target_role"), false);
+});
+
+test("detalhe \"• Tecnologias: ...\" dentro da experiência não abre seção nova", async () => {
+  const bytes = await resumePdf([[
+    "Ana Lima",
+    "Experiência",
+    "Empresa A — Desenvolvedora (2020 - atual)",
+    "• Construiu APIs em Node.js",
+    "• Stack: Node.js, PostgreSQL, AWS",
+    "Empresa B — Estagiária (2018 - 2020)",
+    "• Tecnologias: Java, Spring",
+    "Projeto: Migração para nuvem",
+    "Empresa C — Analista (2016 - 2018)",
+    "Formação",
+    "USP (2012 - 2016)",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  const values = (type) => facts.filter((fact) => fact.type === type).map((fact) => fact.value);
+  const experience = values("experience");
+  assert.equal(experience.length, 3, JSON.stringify(experience));
+  assert.match(experience[0], /^Empresa A.*Stack: Node\.js, PostgreSQL, AWS$/u);
+  assert.match(experience[1], /^Empresa B.*Tecnologias: Java, Spring; Projeto: Migração para nuvem$/u);
+  assert.match(experience[2], /^Empresa C/u);
+  assert.deepEqual(values("skills"), [], "detalhe de entrada não vira competência");
+  assert.deepEqual(values("projects"), []);
+  assert.deepEqual(values("education"), ["USP (2012 - 2016)"]);
+});
+
+test("formato \"Cargo / Empresa | período\": o cargo seguinte abre a próxima entrada", async () => {
+  const bytes = await resumePdf([[
+    "Experiência",
+    "Desenvolvedor Backend",
+    "Empresa X | 2020 - atual",
+    "Analista de Sistemas",
+    "Empresa Y | 2017 - 2020",
+  ]]);
+  const experience = proposeFacts(extractPdfText(bytes)).filter((fact) => fact.type === "experience").map((fact) => fact.value);
+  assert.deepEqual(experience, ["Desenvolvedor Backend; Empresa X | 2020 - atual", "Analista de Sistemas; Empresa Y | 2017 - 2020"]);
+});
+
+test("QAF-13: detalhe sem marcador fica na entrada certa quando a próxima tem título completo", async () => {
+  const bytes = await resumePdf([[
+    "Mariana Souza Lima",
+    "Experiencia",
+    "Engenheira de Software Senior - Acme Pagamentos (2021-2026)",
+    "Liderou a migracao do monolito de pagamentos para microsservicos",
+    "Desenvolvedora Backend - Initech (2018-2021)",
+    "APIs REST em Node.js e PostgreSQL",
+  ]]);
+  const experience = proposeFacts(extractPdfText(bytes)).filter((fact) => fact.type === "experience").map((fact) => fact.value);
+  assert.deepEqual(experience, [
+    "Engenheira de Software Senior - Acme Pagamentos (2021-2026); Liderou a migracao do monolito de pagamentos para microsservicos",
+    "Desenvolvedora Backend - Initech (2018-2021); APIs REST em Node.js e PostgreSQL",
+  ]);
+});
+
+test("Cursos vira certificações, um fato por item; Objetivo no resumo não o divide", async () => {
+  const bytes = await resumePdf([[
+    "Ana Lima",
+    "Resumo",
+    "Desenvolvedora backend.",
+    "Objetivo: atuar com plataformas de dados.",
+    "Cursos",
+    "AWS Cloud Practitioner (2023)",
+    "AWS SAA, CKA; Scrum Foundations, 2022",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  const values = (type) => facts.filter((fact) => fact.type === type).map((fact) => fact.value);
+  assert.deepEqual(values("summary"), ["Desenvolvedora backend. Objetivo: atuar com plataformas de dados."]);
+  assert.deepEqual(values("certifications"), ["AWS Cloud Practitioner (2023)", "AWS SAA", "CKA", "Scrum Foundations, 2022"]);
+});
+
+test("chaves do Object.prototype não são títulos e localização não vira cargo", async () => {
+  const bytes = await resumePdf([[
+    "Maria Souza",
+    "São Paulo, SP",
+    "maria@example.com",
+    "Habilidades",
+    "Java",
+    "Constructor",
+    "toString: Kotlin",
+  ]]);
+  const facts = proposeFacts(extractPdfText(bytes));
+  assert.ok(facts.every((fact) => /^[a-z_]+$/u.test(fact.type)), JSON.stringify(facts.map((fact) => fact.type)));
+  assert.deepEqual(facts.filter((fact) => fact.type === "skills").map((fact) => fact.value), ["Java", "Constructor", "toString: Kotlin"]);
+  assert.equal(facts.find((fact) => fact.type === "full_name")?.value, "Maria Souza");
+  assert.equal(facts.some((fact) => fact.type === "target_role"), false, "\"São Paulo, SP\" é localização");
+});

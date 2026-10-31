@@ -3,6 +3,7 @@
  * (src/resume-files.ts), extrai o texto com o MESMO extrator da importação de currículos-base
  * (src/pdf-profile.ts) e confere se um parser enxerga o que o usuário escreveu:
  *
+ * - o nome confirmado do perfil na primeira linha do conteúdo e no texto lido (QAF-02);
  * - e-mail e telefone presentes no conteúdo ou nos fatos de contato confirmados do perfil;
  * - todos os títulos de seção do conteúdo;
  * - pelo menos 95% das palavras do conteúdo.
@@ -15,8 +16,8 @@ import { extractPdfTextAsync, findPhones, type PdfExtraction } from "./pdf-profi
 import { isHeading, renderResumeFile } from "./resume-files.js";
 import type { Resume } from "./types.js";
 
-export const PARSE_CHECK_MIN_TOKEN_RATIO = 0.95;
-export const PARSE_CHECK_TEXT_LIMIT = 20_000;
+const PARSE_CHECK_MIN_TOKEN_RATIO = 0.95;
+const PARSE_CHECK_TEXT_LIMIT = 20_000;
 
 export interface ParseCheckItem {
   key: string;
@@ -40,6 +41,8 @@ export interface ResumeParseCheck {
 export interface ParseCheckContacts {
   emails: readonly string[];
   phones: readonly string[];
+  /** Nome confirmado do perfil (`name` ou `full_name`), que precisa abrir o currículo. */
+  name?: string | null;
 }
 
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu;
@@ -69,15 +72,17 @@ function digits(text: string): string {
 export function expectedContacts(content: string, facts: ReadonlyArray<{ type?: unknown; value?: unknown; state?: unknown }> = []): ParseCheckContacts {
   const emails = new Set((content.match(EMAIL) ?? []).map((email) => email.toLowerCase()));
   const phones = new Set(findPhones(content));
+  let name: string | null = null;
   for (const fact of facts) {
     if (fact.state !== undefined && fact.state !== "confirmed") continue;
     const values = (Array.isArray(fact.value) ? fact.value : [fact.value]).map((value) => String(value ?? "").trim()).filter(Boolean);
     for (const value of values) {
       if (fact.type === "contact_email" || fact.type === "email") emails.add(value.toLowerCase());
       if (fact.type === "contact_phone" || fact.type === "phone") phones.add(value);
+      if ((fact.type === "name" || fact.type === "full_name") && !name) name = value;
     }
   }
-  return { emails: [...emails], phones: [...phones] };
+  return { emails: [...emails], phones: [...phones], name };
 }
 
 /** Comparação pura entre o conteúdo e o texto extraído do PDF (testável sem gerar PDF). */
@@ -89,6 +94,15 @@ export function analyzeExtractedText(resume: Pick<Resume, "title" | "content">, 
   const checks: ParseCheckItem[] = [];
   const missing: string[] = [];
 
+  if (contacts.name) {
+    // O nome abre o currículo: um parser de ATS lê a primeira linha como o nome do candidato.
+    const key = comparable(contacts.name).trim();
+    const firstLine = content.split(/\r?\n/u).map((line) => line.trim()).find(Boolean) ?? "";
+    const atTop = Boolean(key) && comparable(firstLine).includes(` ${key} `);
+    const read = Boolean(key) && extracted.includes(` ${key} `);
+    checks.push({ key: "name", label: "Nome no topo", ok: atTop && read, detail: !atTop ? `${contacts.name} precisa ser a primeira linha do currículo.` : read ? `${contacts.name} lido no PDF.` : `${contacts.name} não aparece no texto lido do PDF.` });
+    if (!atTop || !read) missing.push(`Nome ${contacts.name} no topo`);
+  }
   for (const email of contacts.emails) {
     const found = extractedLower.includes(email.toLowerCase());
     checks.push({ key: "contact.email", label: "E-mail", ok: found, detail: found ? `${email} lido no PDF.` : `${email} não aparece no texto lido do PDF.` });

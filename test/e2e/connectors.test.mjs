@@ -12,6 +12,8 @@ import * as payloads from "../fixtures/connector-payloads.mjs";
 const directory = mkdtempSync(join(tmpdir(), "radar-connectors-"));
 process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
 const store = await import("../../dist/src/db.js");
+// Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
+store.openStore();
 const { assertPublicHttpsUrl } = await import("../../dist/src/domain.js");
 const sources = await import("../../dist/src/connectors/sources.js");
 const { ConnectorHttpClient, ConnectorBudgetError, ConnectorHttpError, DEFAULT_USER_AGENT } = await import("../../dist/src/connectors/http.js");
@@ -23,12 +25,14 @@ const { connectorRoutes } = await import("../../dist/src/connectors/routes.js");
 const company = (slug, name = "Exemplo") => ({ slug, name });
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 const html = (body) => new Response(body, { status: 200, headers: { "content-type": "text/html" } });
-/** Cliente sem DNS nem espera real: guarda síncrona, relógio e sleep falsos. */
+/** Resolvedor falso: todo host "resolve" para um IP público (nenhuma consulta DNS real). */
+const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+/** Cliente sem DNS nem espera real: guarda síncrona, DNS falso, relógio e sleep falsos. */
 function testClient(fetchImpl, options = {}) {
   let clock = 0;
   const sleeps = [];
   const client = new ConnectorHttpClient({
-    fetchImpl, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 100, maxDelayMs: 10_000,
+    fetchImpl, lookup: publicLookup, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 100, maxDelayMs: 10_000,
     clock: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += ms; }, ...options
   });
   return { client, sleeps, advance: (ms) => { clock += ms; } };
@@ -169,7 +173,7 @@ try {
       let fetched = 0;
       const guarded = new ConnectorHttpClient({ fetchImpl: async () => { fetched += 1; return json({}); } });
       for (const url of ["https://127.0.0.1/x", "https://localhost/x", "http://example.com/x", "https://[::1]/x", "https://user:pw@example.com/"]) {
-        await assert.rejects(guarded.getJson(url), "o guarda padrão (assertResolvablePublicHttpsUrl) recusa destino privado/não HTTPS");
+        await assert.rejects(guarded.getJson(url), "o guarda padrão (assertPublicHttpsUrl) recusa destino privado/não HTTPS");
       }
       assert.equal(fetched, 0, "nada é buscado antes da validação");
       const { client } = testClient(async (url) => url.includes("publico") ? new Response(null, { status: 302, headers: { location: "https://10.0.0.5/interno" } }) : json({}));
@@ -240,6 +244,9 @@ try {
       assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "indeed", slug: "x" } }), /connector.unknown/u);
       assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "lever", slug: "../etc" } }), /slug_invalid/u);
       assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "lever", slug: 42 } }), /invalid_body|Dados inválidos/u);
+      // F14: corpo estrito; campo desconhecido também é recusado (antes passava em silêncio).
+      assert.throws(() => routes["POST /api/connectors/companies"]({ params: [], body: { connector: "lever", slug: "x", project_id: "outro" } }), /invalid_body|Dados inválidos/u);
+      assert.throws(() => routes["PATCH /api/connectors/companies/{id}"]({ params: [created.id], body: { slug: "trocado" } }), /invalid_body|Dados inválidos/u);
       const paused = routes["PATCH /api/connectors/companies/{id}"]({ params: [created.id], body: { enabled: false } });
       assert.equal(paused.enabled, false);
       assert.equal(paused.name, "Exemplo Tech 2");
@@ -281,7 +288,7 @@ try {
       if (url.startsWith("https://jobs.lever.co/")) return html(payloads.emptyPage);
       return new Response("", { status: 404 });
     };
-    const http = { fetchImpl: fakeFetch, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 0, sleep: async () => {} };
+    const http = { fetchImpl: fakeFetch, lookup: publicLookup, assertUrl: (url) => assertPublicHttpsUrl(url), baseDelayMs: 0, sleep: async () => {} };
 
     // Fontes ainda sem teste de acesso: a rodada não começa e nada é buscado.
     const notReady = await runConnectorCollection({ http });
@@ -313,6 +320,7 @@ try {
     const enriched = store.listJobs().find((job) => job.source === "smartrecruiters");
     assert.equal(enriched.salary_min, 10000, "campos do JSON-LD chegam à vaga pelo caminho de ingestão");
     assert.match(enriched.description, /Responsabilidades/u);
+    assert.equal(enriched.deadline_at, "2026-12-01T00:00:00.000Z", "QAF-01: o prazo lido pelo conector chega à vaga");
     assert.equal(run.enrichment.jsonld, 1);
     assert.equal(run.enrichment.needs_llm, 1, "o Designer (Lever) sem descrição nem dado estruturado vai para a fila de LLM");
     const queue = connectorStore.listLlmEnrichmentQueue();
@@ -382,6 +390,16 @@ try {
       assert.equal(limits.max_cost_per_run, 0.5);
       assert.equal(resolveConnectorLimits({ agentId: agent.id, concurrency: 7 }).concurrency, 7, "opção explícita vence o agente");
       assert.throws(() => resolveConnectorLimits({ agentId: "inexistente" }), /agent.published_version.required/u);
+
+      // A rodada com --agent-id aplica os próprios limites e só registra o resultado: um custo
+      // acima do max_cost_per_run do agente (liberado por --max-cost) não vira exceção depois
+      // da ingestão nem marca a execução do agente como abortada.
+      const round = await runConnectorCollection({ http, agentId: agent.id, maxCostPerRun: 50, costPerRequest: 1, maxEnrichments: 0 });
+      assert.ok(round.cost > 0.5, "a rodada gastou mais que o máximo do agente");
+      assert.equal(round.stop_reason, null);
+      const run = store.listAgentRuns().find((item) => item.agent_id === agent.id);
+      assert.equal(run.status, "completed");
+      assert.match(run.message, /^Rodada /u);
     }
 
     // Script de cron: sem empresas curadas e com --quiet, sai 0 em silêncio (tick silencioso do Hermes).

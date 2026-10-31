@@ -14,9 +14,10 @@
 //   RADAR_DASHBOARD_TOKEN    obrigatório
 //   RADAR_HERMES_BIN   binário do Hermes (padrão /opt/hermes/bin/hermes, senão "hermes")
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readEnvLocal } from "./lib/env-local.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : repoRoot;
@@ -28,22 +29,7 @@ if (args.includes("--help") || args.includes("-h")) {
   process.exit(0);
 }
 
-function readLocalEnv(path) {
-  const vars = {};
-  let text = "";
-  try { text = readFileSync(path, "utf8"); } catch { return vars; }
-  for (const raw of text.split(/\r?\n/u)) {
-    if (raw.trim().startsWith("#")) continue;
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-    if (!match) continue;
-    let value = match[2];
-    if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-    vars[match[1]] = value;
-  }
-  return vars;
-}
-
-const fileEnv = readLocalEnv(join(appDir, ".env.local"));
+const fileEnv = readEnvLocal(appDir);
 const setting = (name) => {
   const value = process.env[name] ?? fileEnv[name];
   return value == null ? "" : String(value).trim();

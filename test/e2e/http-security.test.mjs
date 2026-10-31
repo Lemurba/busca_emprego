@@ -9,6 +9,7 @@ import { createServer } from "node:net";
 import { request as httpRequest } from "node:http";
 
 const { errorResponse, isTlsRequest, parseAllowedHosts, isHostAllowed, safeEqual, SessionStore, sessionCookie } = await import("../../dist/src/http-security.js");
+const { DomainError } = await import("../../dist/src/errors.js");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-http-security-"));
 const serviceToken = "svc-" + "a".repeat(40);
@@ -249,7 +250,8 @@ try {
       assert.equal(response.status, 404, path);
       assert.equal((await response.json()).error, "not_found", path);
     }
-    const deleted = await fetch(`${base}/api/base-resumes/nao-existe`, { method: "DELETE", headers: { ...json, ...svc } });
+    // Excluir o PDF-base é decisão humana (QA-04): com a sessão, id ausente → 404.
+    const deleted = await fetch(`${base}/api/base-resumes/nao-existe`, { method: "DELETE", headers: { ...json, cookie } });
     assert.equal(deleted.status, 404);
   });
 
@@ -277,11 +279,18 @@ try {
       assert.doesNotMatch(response.body.message, /SQLITE|undefined|string solta/);
       assert.equal(response.internal, true);
     }
-    assert.deepEqual(errorResponse(new Error("job.not_found")).status, 404);
-    assert.deepEqual(errorResponse(new Error("agent.domain.forbidden")).status, 403);
-    assert.deepEqual(errorResponse(new Error("PDF_DUPLICATE")).status, 409);
-    const domain = errorResponse(new Error("Confirme digitando AUTORIZO para esta vaga."));
+    // #29: só DomainError decide status; Error puro (código ou frase pt-BR) é interno.
+    assert.deepEqual(errorResponse(new DomainError("job.not_found")).status, 404);
+    assert.deepEqual(errorResponse(new DomainError("agent.domain.forbidden")).status, 403);
+    assert.deepEqual(errorResponse(new DomainError("PDF_DUPLICATE")).status, 409);
+    for (const message of ["job.not_found", "Confirme digitando AUTORIZO para esta vaga."]) {
+      const legacy = errorResponse(new Error(message));
+      assert.equal(legacy.status, 500, message);
+      assert.equal(legacy.body.error, "internal_error");
+    }
+    const domain = errorResponse(new DomainError("application.authorization.confirmation_required", 400));
     assert.equal(domain.status, 400);
+    assert.equal(domain.body.error, "application.authorization.confirmation_required");
     assert.equal(domain.body.message, "Confirme digitando AUTORIZO para esta vaga.");
   });
 

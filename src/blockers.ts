@@ -1,3 +1,4 @@
+import { DomainError } from "./errors.js";
 /**
  * Eliminatórios ("hard blockers") — regras puras, sem banco nem I/O.
  *
@@ -35,7 +36,7 @@ export interface Blocker {
   basis: "explicit" | "unchecked";
 }
 
-export const BLOCKER_LABELS: Readonly<Record<BlockerKind, string>> = Object.freeze({
+const BLOCKER_LABELS: Readonly<Record<BlockerKind, string>> = Object.freeze({
   location: "Localização",
   work_model: "Modelo de trabalho",
   work_authorization: "Autorização de trabalho",
@@ -44,15 +45,6 @@ export const BLOCKER_LABELS: Readonly<Record<BlockerKind, string>> = Object.free
 
 /** Tipos de fato do perfil usados pelos eliminatórios (preenchidos/confirmados na entrevista). */
 export const BLOCKER_FACT_TYPES = ["accepted_locations", "work_models", "work_authorization", "years_experience"] as const;
-export type BlockerFactType = (typeof BLOCKER_FACT_TYPES)[number];
-
-/** Perguntas da entrevista de perfil que alimentam os eliminatórios (question_key = tipo do fato). */
-export const PROFILE_BLOCKER_QUESTIONS: ReadonlyArray<{ key: BlockerFactType; question: string; answer_format: string }> = Object.freeze([
-  { key: "accepted_locations", question: "Em quais cidades/regiões você aceita trabalhar presencialmente ou em modelo híbrido?", answer_format: "lista de locais, ex.: [\"São Paulo\", \"Campinas\"]; [\"qualquer\"] se não houver limite" },
-  { key: "work_models", question: "Quais modelos de trabalho você aceita?", answer_format: "lista com remote, hybrid e/ou onsite" },
-  { key: "work_authorization", question: "Em quais países você tem autorização de trabalho? Precisa de patrocínio de visto?", answer_format: "{\"countries\": [\"Brasil\"], \"needs_sponsorship\": false}" },
-  { key: "years_experience", question: "Quantos anos de experiência profissional relevante você tem?", answer_format: "número, ex.: 5" },
-]);
 
 function norm(value: unknown): string {
   return String(value ?? "")
@@ -70,7 +62,7 @@ const WORK_MODEL_ALIASES: ReadonlyArray<[WorkModel, RegExp]> = [
   ["onsite", /^(?:onsite|on site|presencial|in office|escritorio)$/u],
 ];
 
-export function normalizeWorkModel(value: unknown): WorkModel | null {
+function normalizeWorkModel(value: unknown): WorkModel | null {
   const text = norm(value);
   if (!text) return null;
   return WORK_MODEL_ALIASES.find(([, pattern]) => pattern.test(text))?.[0] ?? null;
@@ -82,7 +74,7 @@ function stringList(value: unknown): string[] {
 }
 
 function invalid(detail: string): never {
-  throw new Error(`job.requirements_json.invalid:${detail}`);
+  throw new DomainError(`job.requirements_json.invalid:${detail}`);
 }
 
 /**
@@ -150,26 +142,26 @@ export function normalizeBlockerFact(type: string, value: unknown): unknown {
   switch (type) {
     case "accepted_locations": {
       const list = stringList(value);
-      if (!list.length) throw new Error("profile.fact.invalid");
+      if (!list.length) throw new DomainError("profile.fact.invalid");
       return list;
     }
     case "work_models": {
       const models = [...new Set(stringList(value).map(normalizeWorkModel))];
-      if (!models.length || models.some((model) => model === null)) throw new Error("profile.fact.invalid");
+      if (!models.length || models.some((model) => model === null)) throw new DomainError("profile.fact.invalid");
       return models;
     }
     case "work_authorization": {
       let raw = value;
       if (typeof raw === "string") { try { raw = JSON.parse(raw); } catch { raw = { countries: raw }; } }
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("profile.fact.invalid");
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DomainError("profile.fact.invalid");
       const countries = stringList((raw as Record<string, unknown>).countries);
       const sponsorship = (raw as Record<string, unknown>).needs_sponsorship;
-      if (!countries.length || (sponsorship !== undefined && typeof sponsorship !== "boolean")) throw new Error("profile.fact.invalid");
+      if (!countries.length || (sponsorship !== undefined && typeof sponsorship !== "boolean")) throw new DomainError("profile.fact.invalid");
       return { countries, needs_sponsorship: sponsorship === true };
     }
     case "years_experience": {
       const years = Number(Array.isArray(value) ? value[0] : value);
-      if (!Number.isFinite(years) || years < 0 || years > 70) throw new Error("profile.fact.invalid");
+      if (!Number.isFinite(years) || years < 0 || years > 70) throw new DomainError("profile.fact.invalid");
       return years;
     }
     default:

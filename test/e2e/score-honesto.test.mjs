@@ -109,3 +109,38 @@ test("score explicável, eliminatórios e teste de leitura pelo HTTP", { timeout
   assert.equal(approved.status, 200, JSON.stringify(approved.data));
   assert.ok(approved.data.coverage, "cobertura exposta no currículo");
 });
+
+// F15: o bootstrap leva resumos; o conteúdo do currículo e o histórico de notas têm rotas próprias.
+test("bootstrap enxuto: GET /api/resumes/{id} e GET /api/jobs/{id}/scores paginado", { timeout: 60_000 }, async () => {
+  const job = (await api("POST", "/api/jobs", { title: "Dados", company: "Exemplo", source: "fixture", source_url: "https://jobs.example.test/e2e-payload" })).data;
+  const scores = { role_family: 70, skills: 60, seniority: 50, location_work_model: 40, compensation: null, explicit_preferences: 30 };
+  assert.equal((await api("POST", `/api/jobs/${job.id}/score`, { scores })).status, 200);
+  assert.equal((await api("POST", `/api/jobs/${job.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" })).status, 200);
+  const content = "Contato\nana@example.com\nExperiência\nDados em SQL";
+  const resume = (await api("POST", "/api/resumes", { job_id: job.id, title: "CV dados", content })).data;
+
+  const bootstrap = (await api("GET", "/api/bootstrap")).data;
+  const summary = bootstrap.resumes.find((item) => item.id === resume.id);
+  assert.equal(summary.content, undefined, "o conteúdo não vai no bootstrap");
+  assert.equal(summary.content_length, content.length);
+  assert.equal(bootstrap.matchScores.filter((item) => item.job_id === job.id).length, 1);
+
+  const detail = await api("GET", `/api/resumes/${resume.id}`);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.data.content, content);
+  assert.deepEqual(detail.data.fact_check, summary.fact_check);
+  const missing = await api("GET", "/api/resumes/nao-existe");
+  assert.equal(missing.status, 404);
+  assert.equal(missing.data.error, "resume.not_found");
+
+  const page = await api("GET", `/api/jobs/${job.id}/scores?limit=1&offset=0`);
+  assert.equal(page.status, 200, JSON.stringify(page.data));
+  assert.deepEqual({ total: page.data.total, limit: page.data.limit, offset: page.data.offset, items: page.data.items.length }, { total: 1, limit: 1, offset: 0, items: 1 });
+  assert.equal(page.data.items[0].score_final, bootstrap.matchScores.find((item) => item.job_id === job.id).score_final);
+  for (const query of ["limit=0", "limit=101", "offset=-1", "limit=abc"]) {
+    const refused = await api("GET", `/api/jobs/${job.id}/scores?${query}`);
+    assert.equal(refused.status, 400, query);
+    assert.equal(refused.data.error, "invalid_query", query);
+  }
+  assert.equal((await api("GET", "/api/jobs/nao-existe/scores")).data.error, "job.not_found");
+});

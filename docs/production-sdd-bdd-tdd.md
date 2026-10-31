@@ -1,5 +1,7 @@
 # Especificação de produção — Busca Emprego para Hermes
 
+> **Documento histórico (17/09/2026).** Especificação de partida, mantida só como registro. Não é atualizada e as caixas `[ ]`/`[~]`/`[x]` refletem o código daquela data. Pontos superados: o dashboard e a API **não** são mais abertos na LAN — toda rota `/api/*` exige token interno ou sessão do dashboard (contrato C3, `docs/security.md`) e os portões humanos aceitam só a sessão; o ator `lan-user` virou `human:dashboard` / `service:<nome>` / `agent:<id>`; o perfil nasce do PDF-base ou de um JSON Resume com revisão no painel, não de uma entrevista Grillme. O comportamento atual está no [README](../README.md), em [`docs/agent-api.md`](agent-api.md), [`docs/security.md`](security.md), [`docs/operations-runbook.md`](operations-runbook.md) e na seção “Status da aplicação” de [`docs/auditoria-2026-10-30.md`](auditoria-2026-10-30.md#status-da-aplicação).
+
 **Status:** proposta de implementação; requisitos descritos aqui não significam que já estejam entregues.  
 **Escopo:** desenho da solução (SDD), comportamento (BDD), testes (TDD), critérios de aceite e checklist.  
 **Inspeção do repositório:** 17/09/2026.
@@ -48,7 +50,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [~] **Deduplicação:** o ID deriva de fonte, URLs, título e empresa. Não há identidade canônica entre fontes nem histórico de ocorrências por rodada. Alterar a URL pode gerar outro cartão.
 - [~] **Kanban:** existe matriz central de transições, CAS por versão, eventos persistidos e bloqueio de `status` por PATCH. A UI ainda precisa migrar todos os controles/drag para comandos adjacentes e exibir conflitos/precondições.
 - [~] **Mapa:** é um mapa real, mas não geocodifica cidades automaticamente, não guarda precisão/provedor, não tem cache de geocodificação e só plota vagas com coordenadas já informadas.
-- [~] **Segurança doméstica:** dashboard/API são intencionalmente abertos na LAN, sem login ou chave. O bind é `0.0.0.0:8787`; a instalação depende de firewall/roteador bloqueando WAN. Capabilities dos agentes, allowlists, secrets de fontes e `AUTORIZO` permanecem separados.
+- [~] **Segurança doméstica:** *(superado: hoje toda rota `/api/*` exige token interno ou sessão do dashboard, veja `docs/security.md`)* dashboard/API são intencionalmente abertos na LAN, sem login ou chave. O bind é `0.0.0.0:8787`; a instalação depende de firewall/roteador bloqueando WAN. Capabilities dos agentes, allowlists, secrets de fontes e `AUTORIZO` permanecem separados.
 - [~] **Execução de candidatura:** o adapter separado do Browser Harness exige o envelope `AUTORIZO`, isola a sessão e só aceita envio com evidência; Telegram correlaciona dúvidas. Falta o E2E contra serviços reais.
 - [~] **Detalhe e proveniência da vaga:** cartões compactos e detalhe expandido mostram dados estruturados, links separados, evidência por campo e conflitos revisáveis; falta aceite visual/funcional na instalação real.
 - [~] **Feedback de rejeição:** o backend exige modo, categoria, detalhe e justificativa, preserva rejeição parcial, cria regra total e sinais persistidos. Faltam UI completa, filtro de supressão na ingestão, exceções/restauração e sugestões acionáveis.
@@ -67,7 +69,7 @@ Este documento separa o que foi encontrado no código do que precisa ser constru
 - [ ] Exigir modo total/parcial e motivo em todo descarte; gravar feedback, criar regras para supressão total e atualizar preferências com feedback parcial.
 - [ ] Exibir vagas filtradas e regras ativas, permitir restaurar uma vaga e editar/pausar/remover regras.
 - [ ] Completar geocodificação, cache, atribuição, filtros e limites do mapa.
-- [x] Remover autenticação HTTP para uso doméstico, fixar o projeto local, manter referências ao secret store das fontes e trilha de auditoria com ator `lan-user`.
+- [x] *(revertido pelo contrato C3: a autenticação voltou, `docs/security.md`)* Remover autenticação HTTP para uso doméstico, fixar o projeto local, manter referências ao secret store das fontes e trilha de auditoria com ator `lan-user`.
 - [~] Adicionar migrações seguras, backup/restauração e política de retenção/exclusão: backup/restore estão testados; migrações e retenção continuam pendentes.
 - [~] Criar testes unitários, integração e aceitação para todos os critérios obrigatórios abaixo: suítes locais E2E/carga/segurança/restore passam; falta repetição no ambiente real.
 - [ ] Fazer piloto com fontes permitidas, verificar termos e cotas do mapa, validar UX e aprovar monitoramento, backup e rollback.
@@ -676,7 +678,7 @@ Feature: mapa e validação
 | Unitário: regra e restauração | limites de similaridade, regra pausada, restaurar item/todos | item fora da regra não é suprimido; restaurar um não desativa a regra |
 | Unitário: escalonamento Telegram | capability vinculada ausente, resposta de identidade errada, texto ambíguo, timeout, falha após a tentativa inicial e 3 retentativas, resposta correta, PULAR opcional/obrigatório | sem Telegram funcional/resposta clara não há retomada; PULAR obrigatório é recusado; apenas pergunta/candidatura vinculadas são liberadas |
 | Integração: migração | banco novo e banco legado | migração repetida idempotente; relações antigas preservadas |
-| Integração: API LAN | acesso sem login, schema, concorrência e limites funcionais dos agentes | bootstrap sem token=200, payload inválido=422, conflito=409 e domínio/capability do agente negado=403 |
+| Integração: API LAN *(superado: sem credencial a API responde 401, `test/e2e/e2e-load-security.test.mjs`)* | acesso sem login, schema, concorrência e limites funcionais dos agentes | bootstrap sem token=200, payload inválido=422, conflito=409 e domínio/capability do agente negado=403 |
 | Integração: rodada | 3 fontes, uma falha, retry, lote repetido e duas rodadas | partial correto; contagens reconciliam; sem perda/duplicação |
 | Integração: mapa | cache hit/miss, timeout, quota, coordenada inválida | cache evita consulta repetida; falha não quebra Kanban; atribuição presente |
 | E2E: dashboard | primeira configuração Grillme, criar agente, testar prompt, publicar/rollback, ver ocorrências e regras | perfil só grava após confirmação; regras/filtros e versões persistem após reload |

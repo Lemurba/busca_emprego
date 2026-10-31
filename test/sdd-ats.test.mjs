@@ -26,7 +26,8 @@ endstream endobj
   assert.throws(() => store.generateAtsResume({ job_id: job.id, profile_snapshot_id: snapshotId, base_resume_id: base.id, facts_used: ["fact-skill"], content: "Experiência inventada" }), /ATS_CONTENT_NOT_FACTUAL/);
 
   const resume = store.generateAtsResume({ job_id: job.id, profile_snapshot_id: snapshotId, base_resume_id: base.id, facts_used: ["fact-skill"], keywords: ["TypeScript"] });
-  assert.equal(resume.content, "skills: TypeScript, Node.js");
+  // QA-06: texto legível, com título de seção em pt-BR e sem a chave interna do fato.
+  assert.equal(resume.content, "HABILIDADES\nTypeScript, Node.js");
   assert.equal(store.reviewResume(resume.id, { verdict: "pass" }, "independent-reviewer").review_status, "pass");
   assert.equal(store.approveResume(resume.id, "APROVO").status, "approved");
 

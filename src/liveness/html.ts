@@ -5,7 +5,7 @@ import { normalizeComparableText } from "../domain.js";
  * Frases que, no texto visível da página, indicam vaga encerrada (pt/en). Comparadas já
  * normalizadas (sem acento, minúsculas, pontuação vira espaço).
  */
-export const CLOSING_MARKERS = [
+const CLOSING_MARKERS = [
   "vaga encerrada",
   "vaga nao esta mais disponivel",
   "esta vaga nao esta mais disponivel",
@@ -29,7 +29,7 @@ function decodeEntities(text: string): string {
 }
 
 /** Texto visível aproximado: sem <script>/<style>/<noscript>/comentários (textos de bundle não contam). */
-export function visibleText(html: string): string {
+function visibleText(html: string): string {
   const stripped = html
     .replace(/<!--[\s\S]*?-->/gu, " ")
     .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, " ")

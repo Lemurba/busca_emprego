@@ -4,20 +4,27 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { addProfileFact, listJobHistory, answerHumanQuestion, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createAgentConfig, createApplication, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listSearchRounds, listSourceConfigs, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertJob, upsertSourceConfig } from "./db.js";
-import { expireAuthorizations, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
+import { addProfileFact, listJobHistory, answerHumanQuestion, answerHumanQuestionFromDashboard, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createProfileNewVersion, deleteDraftProfile, reviewAllProfileFacts, createAgentConfig, createApplication, discardAgentDraft, getAgentVersionDiff, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listDraftProfiles, listSearchRounds, listSourceConfigsWithReadiness, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, undoPossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertSourceConfig } from "./db.js";
+import { expireAuthorizations, expireTimedOutAgentRuns, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
-import { dbPath } from "./db.js";
+import { db, dbPath, openStore } from "./db.js";
+import { backupDirFor, collectOperationalMetrics } from "./db/metrics.js";
 import { registerProcess } from "./process-registry.js";
-import { projectId } from "./config.js";
 import { renderResumeFile, safeName, type ResumeFileFormat } from "./resume-files.js";
 import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
-import { getResumeFactChecks, resolveResumeFact } from "./db.js";
+import { getResumeDetail, getResumeFactChecks, listMatchScoreHistory, resolveResumeFact } from "./db.js";
+import { assertInProject, type ScopedResource } from "./db.js";
+import { assertAgentUrlAllowed, getApplication, getApplicationAuthorization, getPublishedAgentConfig, ingestJobFromAgent, listPublishedAgentConfigs, recordAgentRunForAgent, validateSourceBatch } from "./db.js";
 import { connectorRoutes } from "./connectors/routes.js";
+import { smokeTestSource } from "./connectors/runner.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
+
+// Bootstrap explícito (TD-24): abre o banco, aplica as migrações pendentes e as sementes do
+// projeto (RADAR_PROJECT_ID) antes de qualquer rota. Importar os módulos do núcleo não faz isso.
+const { projectId } = openStore();
 
 const port = Number(process.env.PORT ?? 8787);
 const bindHost = process.env.RADAR_BIND_HOST?.trim() || "127.0.0.1";
@@ -103,7 +110,10 @@ function isInternalRequest(method: string | undefined, pathname: string) {
       || /^\/api\/rounds\/[^/]+\/(?:batch|status)$/u.test(pathname)
       || /^\/api\/jobs\/[^/]+\/score$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
-    );
+      // #10: rotas de agente do servidor MCP (ingestão, lote, enriquecimento e execuções).
+      || /^\/api\/agents\/[^/]+\/(?:jobs|batches|runs|jobs\/[^/]+\/enrichment)$/u.test(pathname)
+    )
+    || method === "GET" && /^\/api\/applications\/[^/]+\/authorization$/u.test(pathname);
 }
 
 function isAutomationRequest(method: string | undefined, pathname: string) {
@@ -111,7 +121,8 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
     || method === "POST" && (
       /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|heartbeat|questions|submit|fail|final-confirmation|final-confirmation\/poll|confirm-final)$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
-    );
+    )
+    || method === "GET" && /^\/api\/applications\/[^/]+\/authorization$/u.test(pathname);
 }
 
 /**
@@ -120,6 +131,12 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
  * só valem com a sessão do dashboard. O token de serviço (Hermes, scripts) recebe 403.
  * #32: também a confirmação final do envio (ENVIAR) e o cancelamento, o kill-switch/limites
  * (`PUT /api/settings/automation`) e a captura da confirmação final.
+ * QA-04/TD-07: revisão de fato do perfil, mescla de duplicatas (e o desfazer dela), resolução de
+ * conflito de enriquecimento e exclusão do currículo-base. Também a resposta a uma pergunta
+ * humana pelo painel e o descarte de rascunho de agente. Fatos `origin=user` ou já
+ * confirmados vindos do serviço são recusados em `assertServiceOnlyProposes`.
+ * #49: "Confirmar todos os pendentes", descarte de rascunho e nova versão do perfil.
+ * N1: exclusão de agente e de fonte (irreversível; criar, publicar e aceitar termos já são humanos).
  */
 function isHumanOnlyRequest(method: string | undefined, pathname: string) {
   return method === "POST" && (
@@ -127,12 +144,15 @@ function isHumanOnlyRequest(method: string | undefined, pathname: string) {
     || /^\/api\/jobs\/[^/]+\/(?:decision|decision\/undo|feedback|restore|unsuppress)$/u.test(pathname)
     || /^\/api\/resumes\/[^/]+\/(?:approve|facts\/[^/]+)$/u.test(pathname)
     || /^\/api\/applications\/[^/]+\/(?:authorize-auto|revoke-auto|select-manual|confirm-final|cancel-final)$/u.test(pathname)
-    || /^\/api\/profiles\/[^/]+\/confirm$/u.test(pathname)
+    || /^\/api\/profiles\/[^/]+\/(?:confirm|new-version|facts\/review-all|facts\/[^/]+\/review)$/u.test(pathname)
+    || /^\/api\/possible-duplicates\/[^/]+\/(?:resolve|undo)$/u.test(pathname)
+    || /^\/api\/human-questions\/[^/]+\/respond$/u.test(pathname)
+    || /^\/api\/field-conflicts\/[^/]+\/resolve$/u.test(pathname)
     || /^\/api\/sources\/[^/]+\/terms$/u.test(pathname)
-    || /^\/api\/agents\/[^/]+\/(?:publish|rollback)$/u.test(pathname)
+    || /^\/api\/agents\/[^/]+\/(?:publish|rollback|discard-draft)$/u.test(pathname)
   )
     || method === "PATCH" && /^\/api\/applications\/[^/]+$/u.test(pathname)
-    || method === "DELETE" && /^\/api\/jobs\/[^/]+$/u.test(pathname)
+    || method === "DELETE" && /^\/api\/(?:jobs|base-resumes|profiles|agents|sources)\/[^/]+$/u.test(pathname)
     || method === "PUT" && pathname === "/api/settings/automation"
     || method === "GET" && /^\/api\/applications\/[^/]+\/evidence\/[^/]+$/u.test(pathname);
 }
@@ -145,6 +165,21 @@ function serviceName(req: IncomingMessage) {
 }
 
 /**
+ * Ator do token de serviço. O servidor MCP (#10) declara o agente em `x-radar-agent-id`:
+ * a auditoria grava `agent:<agent_id>` (#19). O agente precisa existir no projeto; o
+ * cabeçalho só rotula, não dá permissão além das do token de serviço.
+ */
+function serviceActor(req: IncomingMessage) {
+  const header = req.headers["x-radar-agent-id"];
+  const agentId = (typeof header === "string" ? header : "").trim();
+  if (!agentId) return `service:${serviceName(req)}`;
+  if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(agentId) || !listAgentConfigs(projectId).some((agent) => agent.id === agentId)) {
+    throw new HttpError(404, "agent.not_found", "Agente não encontrado.");
+  }
+  return `agent:${agentId}`;
+}
+
+/**
  * Autentica e devolve o ator derivado da credencial (#19): `human:dashboard` para a sessão,
  * `service:<nome>` para o token de serviço. Agentes MCP gravam `agent:<agent_id>`.
  */
@@ -152,14 +187,71 @@ function authenticate(req: IncomingMessage, pathname: string): string {
   if (isInternalRequest(req.method, pathname)) {
     if (!serviceToken()) throw new HttpError(503, "internal_token_not_configured", "O token de serviço interno não está configurado no servidor.");
     if (!hasServiceToken(req)) throw new HttpError(401, "internal_token_required", "Esta rota aceita somente o token de serviço interno.");
-    return `service:${serviceName(req)}`;
+    return serviceActor(req);
   }
   if (hasSession(req)) return "human:dashboard";
   if (hasServiceToken(req)) {
     if (isHumanOnlyRequest(req.method, pathname)) throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
-    return `service:${serviceName(req)}`;
+    return serviceActor(req);
   }
   throw new HttpError(401, "unauthorized", "Sessão ausente ou expirada. Abra o link de acesso enviado pelo Hermes.");
+}
+
+/** Ator do token de serviço (Hermes, scripts, agentes MCP): só propõe; quem declara ou confirma é o humano. */
+function isServiceActor(actor: string) {
+  return actor.startsWith("service:") || actor.startsWith("agent:");
+}
+
+/** Agente publicado e ativo com a capacidade (se pedida) nos escopos publicados (rotas de agente do MCP, #10). */
+function requirePublishedAgent(agentId: string, capability?: string) {
+  const { agent, published } = getPublishedAgentConfig(agentId, projectId);
+  if (!published) throw new HttpError(403, "agent.not_published", "O agente não tem versão publicada.");
+  if (!agent.enabled || !published.enabled) throw new HttpError(403, "agent.disabled", "O agente está desativado.");
+  if (capability && !published.tool_scopes.includes(capability)) throw new HttpError(403, "agent.capability.forbidden", `O agente não tem o escopo ${capability}.`);
+  return published;
+}
+
+/**
+ * Rotas /api/agents/{id}/*: o agente do caminho é quem escreve. Se o chamador declarou outro
+ * em `x-radar-agent-id`, a auditoria (`agent:<header>`) divergiria da escrita: recusa (409).
+ */
+function requirePathAgent(actor: string, agentId: string) {
+  if (actor.startsWith("agent:") && actor !== `agent:${agentId}`) {
+    throw new HttpError(409, "agent.binding.mismatch", "O agente do cabeçalho x-radar-agent-id difere do agente da rota.");
+  }
+  return agentId;
+}
+
+/**
+ * QA-04/TD-07: o token de serviço pode propor fatos de perfil, mas não declarar em nome do
+ * usuário (`origin=user`) nem gravar fato já confirmado; isso é decisão humana (403).
+ * Sem `origin`, o domínio grava o fato do serviço como `derived`/`proposed`.
+ */
+function assertServiceOnlyProposes(actor: string, facts: ReadonlyArray<{ origin?: string | null; state?: string | null }>) {
+  if (!isServiceActor(actor)) return;
+  if (facts.some((fact) => String(fact.origin ?? "").trim() === "user" || String(fact.state ?? "").trim() === "confirmed")) {
+    throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
+  }
+}
+
+/**
+ * O contexto do rascunho (nome, cargo, competências...) entra inteiro no snapshot ao confirmar,
+ * sem revisão item a item: só a sessão humana o escreve. O serviço propõe por fatos (403).
+ */
+function assertServiceLeavesContext(actor: string, input: { context?: unknown; context_json?: unknown }) {
+  if (isServiceActor(actor) && (input.context != null || input.context_json != null)) {
+    throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
+  }
+}
+
+/**
+ * N1: religar uma fonte que a pessoa desligou é decisão humana. O serviço pode atualizar a
+ * fonte (e desligá-la), mas não muda `enabled` de falso para verdadeiro (403).
+ */
+function assertServiceKeepsSourceOff(actor: string, sourceId: string, input: { enabled?: boolean | null }) {
+  if (!isServiceActor(actor) || input.enabled === false) return;
+  const current = listSourceConfigsWithReadiness(projectId).find((source) => source.id === sourceId);
+  if (current && !current.enabled) throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
 }
 
 function assertAutomationEnabled(req: IncomingMessage, pathname: string) {
@@ -197,6 +289,22 @@ type Route = { method: string; pattern: RegExp; handler: (ctx: Ctx) => unknown |
 const ok = (res: ServerResponse, status: number, body: unknown) => sendJson(res, status, body);
 const notFound = (what = "Recurso não encontrado.") => new HttpError(404, "not_found", what);
 
+/**
+ * Página de uma listagem (F15): `?limit=` (1–100, padrão 20) e `?offset=` (≥ 0, padrão 0).
+ * Valor que não é inteiro nessa faixa → 400 `invalid_query` (nunca uma página silenciosamente outra).
+ */
+function pageParams(req: IncomingMessage, defaultLimit = 20): { limit: number; offset: number } {
+  const query = new URL(req.url ?? "/", "http://radar.invalid").searchParams;
+  const read = (name: string, fallback: number, min: number, max: number) => {
+    const raw = query.get(name);
+    if (raw === null || raw === "") return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/u.test(raw) || value < min || value > max) throw new HttpError(400, "invalid_query", `Parâmetro ${name} inválido: use um inteiro entre ${min} e ${max}.`);
+    return value;
+  };
+  return { limit: read("limit", defaultLimit, 1, 100), offset: read("offset", 0, 0, 1_000_000) };
+}
+
 function attachment(res: ServerResponse, mimeType: string, fileName: string, data: Buffer | Uint8Array) {
   const filename = encodeURIComponent(fileName).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16).toUpperCase());
   res.writeHead(200, { "content-type": mimeType, "content-disposition": `attachment; filename*=UTF-8''${filename}`, "content-length": data.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -206,10 +314,14 @@ function attachment(res: ServerResponse, mimeType: string, fileName: string, dat
 const S = "([^/]+)";
 /** Captura PNG de até 2 MB em base64 (~2,8 MB) + resumo dos campos. */
 const FINAL_CONFIRMATION_BODY_LIMIT = 4 * 1024 * 1024;
+/** Lote de agente: até 25 itens completos (descrições longas); acima disso, 413 e o agente divide o lote. */
+const AGENT_BATCH_BODY_LIMIT = 8 * 1024 * 1024;
 const r = (path: string) => new RegExp(`^${path.replaceAll("{id}", S)}$`, "u");
 
 const routes: Route[] = [
   { method: "GET", pattern: r("/api/bootstrap"), handler: ({ res }) => ok(res, 200, getBootstrap(projectId)) },
+  // F17: métricas operacionais (só contagens e idades; sessão do dashboard ou token de serviço).
+  { method: "GET", pattern: r("/api/metrics"), handler: ({ res }) => ok(res, 200, collectOperationalMetrics(db, { dbPath, backupDir: backupDirFor(dbPath), projectId })) },
   { method: "POST", pattern: r("/api/logout"), handler: ({ req, res }) => {
     sessions.revoke(sessionId(req));
     res.setHeader("set-cookie", clearedSessionCookie(isTlsRequest(req, trustProxyTls), sessionCookiePath));
@@ -218,7 +330,12 @@ const routes: Route[] = [
 
   // Perfis
   { method: "GET", pattern: r("/api/profiles"), handler: ({ res }) => ok(res, 200, listProfiles(projectId)) },
-  { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => ok(res, 201, createProfessionalProfile(body, actor, projectId)) },
+  { method: "POST", pattern: r("/api/profiles"), handler: ({ actor, res, body }) => {
+    const input = validateBody(schemas.profileCreate, body);
+    assertServiceLeavesContext(actor, input);
+    assertServiceOnlyProposes(actor, input.facts ?? []);
+    ok(res, 201, createProfessionalProfile(input, actor, projectId));
+  } },
   // JSON Resume: o corpo é o próprio documento (limite padrão de 1 MB); vira um perfil novo em rascunho.
   { method: "POST", pattern: r("/api/profiles/import/json-resume"), handler: ({ actor, res, body }) => {
     const result = validateJsonResume(body);
@@ -232,13 +349,32 @@ const routes: Route[] = [
     const { profile, document } = exportProfileJsonResume(params[0]!, projectId);
     attachment(res, "application/json; charset=utf-8", `perfil-v${profile.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
   } },
+  // Rascunhos com pendências e eliminatórios em falta (#49): o entrevistador do MCP grava neles.
+  { method: "GET", pattern: r("/api/profiles/drafts"), handler: ({ res }) => ok(res, 200, listDraftProfiles(projectId)) },
   { method: "GET", pattern: r("/api/profile/active"), handler: ({ res }) => ok(res, 200, getProfile(listProfiles(projectId).find((profile) => profile.status === "confirmed")?.id ?? "", projectId)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(body.state ?? ""), actor, params[0]!)) },
+  // #49: confirma de uma vez os fatos pendentes com evidência; os sem evidência voltam em `skipped`.
+  { method: "POST", pattern: r("/api/profiles/{id}/facts/review-all"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewAllProfileFacts(params[0]!, String(validateBody(schemas.profileFactReview, body).state ?? "confirmed"), actor, projectId)) },
+  { method: "POST", pattern: r("/api/profiles/{id}/facts/{id}/review"), handler: ({ actor, res, params, body }) => ok(res, 200, reviewProfileFact(params[1]!, String(validateBody(schemas.profileFactReview, body).state ?? ""), actor, params[0]!)) },
   { method: "GET", pattern: r("/api/profiles/{id}/facts"), handler: ({ res, params }) => ok(res, 200, listProfileFacts(params[0]!)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ actor, res, params, body }) => ok(res, 201, addProfileFact(params[0]!, body, actor)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ actor, res, params }) => ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)) },
-  { method: "POST", pattern: r("/api/profiles/{id}/interview"), handler: ({ actor, res, params, body }) => ok(res, 200, answerProfileInterview(params[0]!, String(body.question_key ?? ""), body.answer, actor)) },
-  { method: "PATCH", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateProfessionalProfile(params[0]!, body, actor, projectId)) },
+  { method: "POST", pattern: r("/api/profiles/{id}/facts"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.profileFact, body);
+    assertServiceOnlyProposes(actor, [input]);
+    ok(res, 201, addProfileFact(params[0]!, input, actor, projectId));
+  } },
+  { method: "POST", pattern: r("/api/profiles/{id}/new-version"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 201, createProfileNewVersion(params[0]!, actor, projectId)); } },
+  { method: "DELETE", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteDraftProfile(params[0]!, actor, projectId)); } },
+  { method: "POST", pattern: r("/api/profiles/{id}/confirm"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, confirmProfessionalProfile(params[0]!, actor, projectId)); } },
+  // Resposta vinda do serviço (Hermes) vira fato proposto para revisão humana (ver answerProfileInterview).
+  { method: "POST", pattern: r("/api/profiles/{id}/interview"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.profileInterview, body);
+    ok(res, 200, answerProfileInterview(params[0]!, String(input.question_key ?? ""), input.answer, actor, projectId));
+  } },
+  { method: "PATCH", pattern: r("/api/profiles/{id}"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.profilePatch, body);
+    assertServiceLeavesContext(actor, input);
+    assertServiceOnlyProposes(actor, input.facts ?? []);
+    ok(res, 200, updateProfessionalProfile(params[0]!, input, actor, projectId));
+  } },
   { method: "GET", pattern: r("/api/profiles/{id}"), handler: ({ res, params }) => {
     const profile = getProfile(params[0]!, projectId);
     if (!profile) throw notFound("Perfil não encontrado.");
@@ -247,28 +383,71 @@ const routes: Route[] = [
 
   // Agentes
   { method: "GET", pattern: r("/api/agents"), handler: ({ res }) => ok(res, 200, listAgentConfigs(projectId)) },
+  // Snapshots publicados (rascunho nunca aparece): o catálogo que agentes e o MCP enxergam.
+  { method: "GET", pattern: r("/api/agents/published"), handler: ({ res }) => ok(res, 200, listPublishedAgentConfigs(projectId)) },
+  { method: "GET", pattern: r("/api/agents/{id}/published"), handler: ({ res, params }) => ok(res, 200, getPublishedAgentConfig(params[0]!, projectId)) },
+  // Rotas de agente do servidor MCP (#10, só token de serviço): a identidade vem do caminho e o
+  // domínio confere escopos e domínios permitidos da versão publicada.
+  { method: "POST", pattern: r("/api/agents/{id}/jobs"), handler: ({ actor, res, params, body }) => ok(res, 201, ingestJobFromAgent(requirePathAgent(actor, params[0]!), validateBody(schemas.jobCreate, body) as never, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/jobs/{id}/enrichment"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.agentEnrichment, body);
+    ok(res, 200, enrichJobFromAgent(requirePathAgent(actor, params[0]!), params[1]!, input.patch, input.evidence_source_url, String(input.evidence_excerpt ?? ""), projectId));
+  } },
+  // Lote validado antes de abrir a rodada: lote inválido não deixa rodada órfã. Domínios
+  // permitidos conferidos aqui também (como em ingestJobFromAgent), não só no MCP.
+  { method: "POST", pattern: r("/api/agents/{id}/batches"), bodyLimit: AGENT_BATCH_BODY_LIMIT, handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.agentBatch, body);
+    const agent = requirePublishedAgent(requirePathAgent(actor, params[0]!), "jobs.create");
+    const batch = { source_id: input.source_id, items: input.items, next_cursor: input.next_cursor ?? null };
+    const { items } = validateSourceBatch(input.source_id, batch);
+    for (const item of items) {
+      for (const field of ["source_url", "job_url", "linkedin_post_url", "application_url"] as const) assertAgentUrlAllowed(agent, item[field]);
+    }
+    const roundId = input.round_id ?? String(startSearchRound({ source_ids: [input.source_id] }, projectId, `agent:${agent.id}`).id);
+    ok(res, 200, { round_id: roundId, ...ingestRoundBatch(roundId, input.source_id, batch, projectId, agent.id) });
+  } },
+  { method: "POST", pattern: r("/api/agents/{id}/runs"), handler: ({ actor, res, params, body }) => {
+    const agent = requirePublishedAgent(requirePathAgent(actor, params[0]!));
+    ok(res, 201, recordAgentRunForAgent(agent.id, validateBody(schemas.agentRunReport, body), projectId));
+  } },
   { method: "POST", pattern: r("/api/agents"), handler: ({ actor, res, body }) => ok(res, 201, createAgentConfig(validateBody(schemas.agentCreate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/agents/{id}/versions"), handler: ({ res, params }) => ok(res, 200, listAgentConfigVersions(params[0]!, projectId)) },
-  { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => ok(res, 200, publishAgentConfigVersion(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
+  { method: "GET", pattern: r("/api/agents/{id}/versions/{id}/diff"), handler: ({ res, params }) => ok(res, 200, getAgentVersionDiff(params[0]!, params[1]!, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.agentPublish, body);
+    ok(res, 200, publishAgentConfigVersion(params[0]!, String(input.version_id ?? ""), actor, projectId, input.checksum));
+  } },
+  { method: "POST", pattern: r("/api/agents/{id}/discard-draft"), handler: ({ actor, res, params, body }) => ok(res, 200, discardAgentDraft(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
   { method: "POST", pattern: r("/api/agents/{id}/rollback"), handler: ({ actor, res, params, body }) => ok(res, 200, rollbackAgentConfig(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
-  { method: "POST", pattern: r("/api/agents/{id}/prompt-proposals"), handler: ({ res, params, body }) => ok(res, 201, proposeAgentPrompt(params[0]!, body, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/prompt-proposals"), handler: ({ actor, res, params, body }) => ok(res, 201, proposeAgentPrompt(params[0]!, validateBody(schemas.agentPromptProposal, body), projectId, actor)) },
   { method: "PATCH", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateAgentConfig(params[0]!, validateBody(schemas.agentPatch, body), actor, projectId)) },
-  { method: "DELETE", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params }) => ok(res, 200, deleteAgentConfig(params[0]!, actor, projectId)) },
+  { method: "DELETE", pattern: r("/api/agents/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteAgentConfig(params[0]!, actor, projectId)); } },
 
   // Fontes
-  { method: "GET", pattern: r("/api/sources"), handler: ({ res }) => ok(res, 200, listSourceConfigs(projectId)) },
-  { method: "POST", pattern: r("/api/sources"), handler: ({ actor, res, body }) => ok(res, 201, upsertSourceConfig(validateBody(schemas.sourceUpsert, body), actor, projectId)) },
-  { method: "PUT", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, upsertSourceConfig({ ...validateBody(schemas.sourceUpsert, body), id: params[0]! }, actor, projectId)) },
+  { method: "GET", pattern: r("/api/sources"), handler: ({ res }) => ok(res, 200, listSourceConfigsWithReadiness(projectId)) },
+  { method: "POST", pattern: r("/api/sources"), handler: ({ actor, res, body }) => {
+    const input = validateBody(schemas.sourceUpsert, body);
+    // POST também atualiza uma fonte existente (upsert): a mesma regra do PUT para religar.
+    assertServiceKeepsSourceOff(actor, String(input.id ?? "").trim().toLowerCase(), input);
+    ok(res, 201, upsertSourceConfig(input, actor, projectId));
+  } },
+  { method: "PUT", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.sourceUpsert, body);
+    assertServiceKeepsSourceOff(actor, params[0]!, input);
+    ok(res, 200, upsertSourceConfig({ ...input, id: params[0]! }, actor, projectId));
+  } },
   { method: "POST", pattern: r("/api/sources/{id}/readiness"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.sourceReadiness, body);
     ok(res, 200, setSourceReadiness(params[0]!, String(input.status ?? ""), String(input.reason ?? ""), actor, projectId));
   } },
-  { method: "POST", pattern: r("/api/sources/{id}/terms"), handler: ({ actor, res, params }) => ok(res, 200, approveSourceTerms(params[0]!, actor, projectId)) },
-  { method: "DELETE", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params }) => ok(res, 200, deleteSourceConfig(params[0]!, actor, projectId)) },
+  // Teste de acesso executado pelo servidor (só conectores determinísticos; ver smokeTestSource).
+  { method: "POST", pattern: r("/api/sources/{id}/smoke-test"), handler: async ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, await smokeTestSource(params[0]!, { actor, projectId })); } },
+  { method: "POST", pattern: r("/api/sources/{id}/terms"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, approveSourceTerms(params[0]!, actor, projectId)); } },
+  { method: "DELETE", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteSourceConfig(params[0]!, actor, projectId)); } },
 
   // Rodadas
   { method: "GET", pattern: r("/api/rounds"), handler: ({ res }) => ok(res, 200, listSearchRounds(projectId)) },
-  { method: "POST", pattern: r("/api/rounds"), handler: ({ actor, res, body }) => ok(res, 201, startSearchRound(body, projectId, actor)) },
+  { method: "POST", pattern: r("/api/rounds"), handler: ({ actor, res, body }) => ok(res, 201, startSearchRound(validateBody(schemas.roundStart, body), projectId, actor)) },
   { method: "GET", pattern: r("/api/rounds/{id}/duplicates"), handler: ({ res, params }) => {
     const roundId = params[0]!;
     if (!listSearchRounds(projectId).some((round) => round.id === roundId)) throw notFound("Rodada não encontrada.");
@@ -282,8 +461,17 @@ const routes: Route[] = [
     if (!round) throw notFound("Rodada não encontrada.");
     ok(res, 200, round);
   } },
-  { method: "POST", pattern: r("/api/rounds/{id}/status"), handler: ({ res, params, body }) => ok(res, 200, recordRoundSourceStatus(params[0]!, String(body.source_id ?? ""), String(body.status ?? ""), body, projectId)) },
-  { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => ok(res, 200, ingestRoundBatch(params[0]!, String(body.source_id ?? ""), body.batch && typeof body.batch === "object" && !Array.isArray(body.batch) ? body.batch as Record<string, unknown> : body, projectId)) },
+  { method: "POST", pattern: r("/api/rounds/{id}/status"), handler: ({ res, params, body }) => {
+    const input = validateBody(schemas.roundSourceStatus, body);
+    ok(res, 200, recordRoundSourceStatus(params[0]!, String(input.source_id ?? ""), String(input.status ?? ""), input, projectId));
+  } },
+  // O lote vem no próprio corpo ou embrulhado em `{ source_id, batch }`. Com a chave `batch`
+  // (mesmo nula ou lista), o corpo é o envelope e `batch` precisa ser um objeto (400 senão).
+  { method: "POST", pattern: r("/api/rounds/{id}/batch"), handler: ({ res, params, body }) => {
+    const envelope = body.batch !== undefined ? validateBody(schemas.roundBatchEnvelope, body) : null;
+    const batch = validateBody(schemas.roundBatch, envelope ? envelope.batch : body);
+    ok(res, 200, ingestRoundBatch(params[0]!, String(envelope?.source_id ?? batch.source_id ?? ""), batch, projectId));
+  } },
 
   // Vagas
   // Cadastro manual: nunca sobrescreve vaga existente/arquivada (a ingestão usa as rodadas e agent-events).
@@ -304,15 +492,18 @@ const routes: Route[] = [
     }));
   } },
   { method: "GET", pattern: r("/api/jobs/{id}/occurrences"), handler: ({ res, params }) => ok(res, 200, listJobOccurrences(params[0]!, projectId)) },
-  { method: "GET", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params }) => ok(res, 200, getMatchScore(params[0]!)) },
-  { method: "POST", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params, body }) => ok(res, 200, recordMatchScore({ ...body, job_id: params[0]! } as never)) },
+  { method: "GET", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params }) => ok(res, 200, getMatchScore(params[0]!, null, null, projectId)) },
+  // F15: histórico de notas paginado (o bootstrap leva só a mais recente de cada vaga).
+  { method: "GET", pattern: r("/api/jobs/{id}/scores"), handler: ({ req, res, params }) => ok(res, 200, listMatchScoreHistory(params[0]!, pageParams(req), projectId)) },
+  // I49-09: a nota exige um snapshot de perfil confirmado do projeto (o ativo, se não informado).
+  { method: "POST", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params, body }) => ok(res, 200, recordMatchScore({ ...validateBody(schemas.matchScore, body), job_id: params[0]!, project_id: projectId })) },
   { method: "GET", pattern: r("/api/jobs/{id}/provenance"), handler: ({ res, params }) => ok(res, 200, listFieldProvenance(params[0]!)) },
   { method: "PATCH", pattern: r("/api/jobs/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateJob(params[0]!, validateBody(schemas.jobPatch, body), { actor })) },
   // Excluir é reversível: a vaga é arquivada e pode ser restaurada.
   { method: "DELETE", pattern: r("/api/jobs/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, archiveJob(params[0]!, validateBody(schemas.jobArchive, body), actor)) },
-  { method: "POST", pattern: r("/api/jobs/{id}/restore"), handler: ({ actor, res, params }) => ok(res, 200, restoreJob(params[0]!, actor)) },
+  { method: "POST", pattern: r("/api/jobs/{id}/restore"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, restoreJob(params[0]!, actor)); } },
   // Reexibe uma vaga ocultada por regra "Não tenho interesse" (visão Ocultadas).
-  { method: "POST", pattern: r("/api/jobs/{id}/unsuppress"), handler: ({ actor, res, params }) => ok(res, 200, unsuppressJob(params[0]!, actor)) },
+  { method: "POST", pattern: r("/api/jobs/{id}/unsuppress"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, unsuppressJob(params[0]!, actor)); } },
   { method: "POST", pattern: r("/api/jobs/{id}/decision/undo"), handler: ({ actor, res, params, body }) => ok(res, 200, undoJobDecision(params[0]!, validateBody(schemas.jobUndoDecision, body), actor)) },
   { method: "GET", pattern: r("/api/jobs/{id}/history"), handler: ({ res, params }) => ok(res, 200, listJobHistory(params[0]!)) },
   { method: "GET", pattern: r("/api/jobs/{id}/feedback"), handler: ({ res, params }) => ok(res, 200, listJobFeedback(params[0]!)) },
@@ -330,11 +521,14 @@ const routes: Route[] = [
 
   // Duplicidades
   { method: "GET", pattern: r("/api/possible-duplicates"), handler: ({ res }) => ok(res, 200, listPossibleDuplicates(projectId)) },
-  { method: "POST", pattern: r("/api/possible-duplicates/{id}/resolve"), handler: ({ actor, res, params, body }) => ok(res, 200, resolvePossibleDuplicate(params[0]!, String(validateBody(schemas.duplicateResolve, body).status ?? "") as "merged" | "distinct" | "dismissed", actor)) },
+  // Desfazer a decisão dentro do prazo (DUPLICATE_UNDO_WINDOW_MS): só a sessão do dashboard.
+  { method: "POST", pattern: r("/api/possible-duplicates/{id}/undo"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, undoPossibleDuplicate(params[0]!, actor, Date.now(), projectId)); } },
+  { method: "POST", pattern: r("/api/possible-duplicates/{id}/resolve"), handler: ({ actor, res, params, body }) => ok(res, 200, resolvePossibleDuplicate(params[0]!, String(validateBody(schemas.duplicateResolve, body).status ?? "") as "merged" | "distinct" | "dismissed", actor, projectId)) },
 
   // Currículos adaptados
-  { method: "POST", pattern: r("/api/resumes"), handler: ({ actor, res, body }) => ok(res, 201, createResume(validateBody(schemas.resumeCreate, body) as never, actor)) },
-  { method: "POST", pattern: r("/api/resumes/generate"), handler: ({ actor, res, body }) => ok(res, 201, generateAtsResume(body, actor, projectId)) },
+  // Rascunho de agente MCP (`agent:*`) é do redator: entra na revisão de conteúdo inventado.
+  { method: "POST", pattern: r("/api/resumes"), handler: ({ actor, res, body }) => ok(res, 201, createResume({ ...validateBody(schemas.resumeCreate, body), ...(actor.startsWith("agent:") ? { generation_source: "writer" } : {}) } as never, actor)) },
+  { method: "POST", pattern: r("/api/resumes/generate"), handler: ({ actor, res, body }) => ok(res, 201, generateAtsResume(validateBody(schemas.resumeGenerate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/resumes/{id}/files/(pdf|docx)"), handler: async ({ res, params }) => {
     const resume = getResume(params[0]!);
     if (!resume) throw notFound("Currículo não encontrado.");
@@ -347,41 +541,58 @@ const routes: Route[] = [
     attachment(res, "application/json; charset=utf-8", `${safeName(resume.title)}-v${resume.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
   } },
   // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
+  // F15: currículo completo (conteúdo incluso) para o editor e a aprovação; o bootstrap leva o resumo.
+  { method: "GET", pattern: r("/api/resumes/{id}"), handler: ({ res, params }) => ok(res, 200, getResumeDetail(params[0]!, projectId)) },
   { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },
-  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params }) => ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }) },
+  { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }); } },
   { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: async ({ actor, res, params, body }) => {
     const input = validateBody(schemas.resumeApprove, body);
     await ensureResumeParseCheck(params[0]!);
     ok(res, 200, approveResume(params[0]!, String(input.confirmation ?? ""), { override_reason: input.override_reason == null ? undefined : String(input.override_reason), actor }));
   } },
   { method: "POST", pattern: r("/api/resumes/{id}/review"), handler: async ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.resumeReview, body);
     await ensureResumeParseCheck(params[0]!);
-    ok(res, 200, reviewResume(params[0]!, body, actor));
+    ok(res, 200, reviewResume(params[0]!, input, actor));
   } },
   // Checagem de fatos (#31): resolver um fato é declaração humana (rota só da sessão, ver isHumanOnlyRequest).
   { method: "GET", pattern: r("/api/resumes/{id}/facts"), handler: ({ res, params }) => ok(res, 200, getResumeFactChecks(params[0]!)) },
   { method: "POST", pattern: r("/api/resumes/{id}/facts/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, resolveResumeFact(params[0]!, params[1]!, validateBody(schemas.resumeFactAction, body), actor, projectId)) },
-  { method: "PATCH", pattern: r("/api/resumes/{id}"), handler: ({ res, params, body }) => ok(res, 200, updateResume(params[0]!, validateBody(schemas.resumePatch, body) as never)) },
+  { method: "PATCH", pattern: r("/api/resumes/{id}"), handler: ({ actor, res, params, body }) => {
+    const patch = validateBody(schemas.resumePatch, body);
+    // N2: tirar um currículo de "aprovado" desfaz o APROVO e revoga o AUTORIZO: só a sessão humana.
+    if (isServiceActor(actor) && getResume(params[0]!)?.status === "approved") throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
+    ok(res, 200, updateResume(params[0]!, patch as never, actor));
+  } },
 
   // Currículos-base (upload JSON com PDF em base64; único corpo de até 8 MB)
-  { method: "GET", pattern: r("/api/base-resumes"), handler: ({ res }) => ok(res, 200, listBaseResumes()) },
-  { method: "POST", pattern: r("/api/base-resumes"), bodyLimit: UPLOAD_BODY_LIMIT, handler: async ({ res, body }) => ok(res, 201, await createBaseResumeAsync(validateBody(schemas.baseResumeUpload, body) as never)) },
+  { method: "GET", pattern: r("/api/base-resumes"), handler: ({ res }) => ok(res, 200, listBaseResumes(projectId)) },
+  { method: "POST", pattern: r("/api/base-resumes"), bodyLimit: UPLOAD_BODY_LIMIT, handler: async ({ res, body }) => ok(res, 201, await createBaseResumeAsync(validateBody(schemas.baseResumeUpload, body) as never, projectId)) },
   { method: "GET", pattern: r("/api/base-resumes/{id}/file"), handler: ({ res, params }) => {
-    const file = getBaseResumeFile(params[0]!);
+    const file = getBaseResumeFile(params[0]!, projectId);
     if (!file) throw notFound("Currículo-base não encontrado.");
     attachment(res, "application/pdf", file.file_name, file.data);
   } },
-  { method: "GET", pattern: r("/api/base-resumes/{id}/extraction"), handler: ({ res, params }) => ok(res, 200, getBaseResumeExtraction(params[0]!)) },
-  { method: "POST", pattern: r("/api/base-resumes/{id}/create-profile"), handler: ({ actor, res, params }) => ok(res, 201, createProfileFromBaseResume(params[0]!, actor, projectId)) },
-  { method: "POST", pattern: r("/api/base-resumes/{id}/select"), handler: ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectBaseResume(params[0]!)); } },
-  { method: "DELETE", pattern: r("/api/base-resumes/{id}"), handler: ({ res, params }) => {
-    if (!deleteBaseResume(params[0]!)) throw notFound("Currículo-base não encontrado.");
+  { method: "GET", pattern: r("/api/base-resumes/{id}/extraction"), handler: ({ res, params }) => ok(res, 200, getBaseResumeExtraction(params[0]!, projectId)) },
+  { method: "POST", pattern: r("/api/base-resumes/{id}/create-profile"), handler: async ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 201, await createProfileFromBaseResume(params[0]!, actor, projectId)); } },
+  { method: "POST", pattern: r("/api/base-resumes/{id}/select"), handler: ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectBaseResume(params[0]!, projectId)); } },
+  // Excluir o PDF-base é decisão humana (isHumanOnlyRequest).
+  { method: "DELETE", pattern: r("/api/base-resumes/{id}"), handler: ({ actor, res, params, body }) => {
+    validateBody(schemas.empty, body);
+    if (!deleteBaseResume(params[0]!, actor, projectId)) throw notFound("Currículo-base não encontrado.");
     ok(res, 200, { deleted: true });
   } },
 
   // Candidaturas
   { method: "POST", pattern: r("/api/applications"), handler: ({ actor, res, body }) => ok(res, 201, createApplication(validateBody(schemas.applicationCreate, body) as never, actor)) },
-  { method: "GET", pattern: r("/api/authorized-applications"), handler: ({ res }) => ok(res, 200, listAuthorizedApplications()) },
+  { method: "GET", pattern: r("/api/authorized-applications"), handler: ({ res }) => ok(res, 200, listAuthorizedApplications(projectId)) },
+  { method: "GET", pattern: r("/api/applications/{id}"), handler: ({ res, params }) => {
+    const application = getApplication(params[0]!);
+    if (!application) throw new HttpError(404, "application.not_found", "Candidatura não encontrada.");
+    ok(res, 200, application);
+  } },
+  // Autorização vigente (sem nonce) para o executor conferir URL e hash antes de agir (#10).
+  { method: "GET", pattern: r("/api/applications/{id}/authorization"), handler: ({ res, params }) => ok(res, 200, getApplicationAuthorization(params[0]!)) },
   { method: "POST", pattern: r("/api/applications/{id}/claim"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationClaim, body);
     ok(res, 200, claimAuthorizedApplication(params[0]!, String(input.worker_id ?? ""), String(input.nonce ?? "")));
@@ -410,53 +621,101 @@ const routes: Route[] = [
     const input = validateBody(schemas.applicationFail, body);
     ok(res, 200, failAuthorizedApplication(params[0]!, { worker_id: input.worker_id, reason: input.reason }));
   } },
-  { method: "POST", pattern: r("/api/applications/{id}/select-manual"), handler: ({ actor, res, params }) => ok(res, 200, selectManualApplication(params[0]!, actor)) },
+  { method: "POST", pattern: r("/api/applications/{id}/select-manual"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectManualApplication(params[0]!, actor)); } },
   { method: "POST", pattern: r("/api/applications/{id}/authorize-auto"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.applicationAuthorize, body);
     ok(res, 200, authorizeAutoApplication(params[0]!, String(input.resume_id ?? ""), String(input.confirmation ?? ""), actor));
   } },
-  { method: "POST", pattern: r("/api/applications/{id}/revoke-auto"), handler: ({ actor, res, params }) => ok(res, 200, revokeAutoApplication(params[0]!, actor)) },
-  { method: "POST", pattern: r("/api/applications/{id}/questions"), handler: ({ res, params, body }) => ok(res, 201, createHumanQuestion(params[0]!, body)) },
+  { method: "POST", pattern: r("/api/applications/{id}/revoke-auto"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, revokeAutoApplication(params[0]!, actor)); } },
+  { method: "POST", pattern: r("/api/applications/{id}/questions"), handler: ({ res, params, body }) => ok(res, 201, createHumanQuestion(params[0]!, validateBody(schemas.humanQuestionCreate, body))) },
   { method: "PATCH", pattern: r("/api/applications/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateApplication(params[0]!, validateBody(schemas.applicationPatch, body) as never, actor)) },
 
   // #32 — kill-switch, limite diário e allowlist de ATS (mudança só pela sessão do dashboard).
-  { method: "GET", pattern: r("/api/settings/automation"), handler: ({ res }) => ok(res, 200, automationOverview()) },
+  { method: "GET", pattern: r("/api/settings/automation"), handler: ({ res }) => ok(res, 200, automationOverview(projectId)) },
   { method: "PUT", pattern: r("/api/settings/automation"), handler: ({ actor, res, body }) => ok(res, 200, updateAutomationSettings(validateBody(schemas.automationSettings, body), actor)) },
 
   // Preferências e perguntas humanas
   { method: "GET", pattern: r("/api/preferences"), handler: ({ res }) => ok(res, 200, listPreferenceState(projectId)) },
-  { method: "PATCH", pattern: r("/api/preference-rules/{id}"), handler: ({ res, params, body }) => ok(res, 200, setPreferenceRuleState(params[0]!, String(validateBody(schemas.preferenceRule, body).state ?? ""))) },
-  { method: "GET", pattern: r("/api/human-questions"), handler: ({ res }) => ok(res, 200, listHumanQuestions()) },
+  { method: "PATCH", pattern: r("/api/preference-rules/{id}"), handler: ({ res, params, body }) => ok(res, 200, setPreferenceRuleState(params[0]!, String(validateBody(schemas.preferenceRule, body).state ?? ""), projectId)) },
+  { method: "GET", pattern: r("/api/human-questions"), handler: ({ req, res }) => ok(res, 200, listHumanQuestions(new URL(req.url ?? "/", "http://radar.invalid").searchParams.get("application_id") || undefined)) },
   { method: "POST", pattern: r("/api/human-questions/{id}/delivery"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.humanDelivery, body);
     ok(res, 200, markHumanQuestionDelivery(params[0]!, Boolean(input.delivered), input.message_ref == null ? undefined : String(input.message_ref), input.error == null ? undefined : String(input.error)));
   } },
+  // Resposta pelo painel (inclusive de pergunta com entrega falha no Telegram): só a sessão do dashboard.
+  { method: "POST", pattern: r("/api/human-questions/{id}/respond"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.humanDashboardAnswer, body);
+    // Responder/pular retoma a execução; com a automação desligada nada a retomaria. Seguir
+    // manualmente e parar continuam valendo (só reduzem o que a automação faz).
+    if ((input.action ?? "answer") !== "manual" && input.action !== "stop" && process.env.RADAR_AUTO_APPLICATION_ENABLED !== "true") throw new HttpError(403, "AUTOMATION_DISABLED", "A candidatura automatizada está desligada nesta instalação.");
+    return ok(res, 200, answerHumanQuestionFromDashboard(params[0]!, input, actor));
+  } },
   { method: "POST", pattern: r("/api/human-questions/{id}/answer"), handler: ({ res, params, body }) => ok(res, 200, answerHumanQuestion(params[0]!, validateBody(schemas.humanAnswer, body))) },
 
   // Eventos de agentes
-  { method: "POST", pattern: r("/api/agent-events"), handler: ({ res, body }) => {
+  { method: "POST", pattern: r("/api/agent-events"), handler: ({ res, body: rawBody }) => {
+    const body = validateBody(schemas.agentEvent, rawBody);
     const event = String(body.event ?? "");
     if (event === "job.discovered" || event === "job.updated") {
       if (!body.agent_id) throw new HttpError(422, "agent_id.required", "Informe o agente responsável pelo evento.");
-      const job = body.job && typeof body.job === "object" && !Array.isArray(body.job) ? validateBody(schemas.jobPatch, body.job as Record<string, unknown>) : undefined;
+      const job = body.job ? validateBody(schemas.jobPatch, body.job) : undefined;
       if (event === "job.discovered") return ok(res, 201, createJobFromAgent(String(body.agent_id), (job ?? {}) as never, projectId));
       if (!job?.id) throw new HttpError(422, "job.id.required", "Informe o id da vaga a enriquecer.");
       const { id, ...patch } = job;
       return ok(res, 200, enrichJobFromAgent(String(body.agent_id), String(id), patch, String(body.evidence_source_url ?? ""), String(body.evidence_excerpt ?? ""), projectId));
     }
-    if (event === "agent.status") return ok(res, 201, recordAgentRun((body.run ?? {}) as never));
+    if (event === "agent.status") return ok(res, 201, recordAgentRun(validateBody(schemas.agentRun, body.run ?? {})));
     throw new HttpError(400, "event.unsupported", "Tipo de evento não suportado.");
   } },
 
   { method: "POST", pattern: r("/api/field-conflicts/{id}/resolve"), handler: ({ actor, res, params, body }) => {
     const choice = String(validateBody(schemas.fieldConflictResolve, body).choice ?? "");
     if (choice !== "current" && choice !== "candidate") throw new HttpError(422, "field_conflict.choice.invalid", "Escolha manter o valor atual ou usar a nova fonte.");
-    ok(res, 200, resolveFieldConflict(params[0]!, choice, actor));
+    ok(res, 200, resolveFieldConflict(params[0]!, choice, actor, projectId));
   } },
 ];
 
 // Coleta determinística (issue #16): empresas curadas por conector e fila de enriquecimento por LLM.
 routes.push(...connectorRoutes(projectId).map((route): Route => ({ method: route.method, pattern: r(route.path), handler: ({ actor, res, params, body }) => ok(res, route.status, route.handler({ actor, params, body })) })));
+
+/**
+ * RADAR_PROJECT_ID nas rotas por id (TD-06): vaga, currículo, candidatura, currículo-base, perfil
+ * ou pergunta humana de outro projeto responde 404 `<recurso>.not_found`, como um id inexistente.
+ * Vale para toda rota sob esses prefixos, inclusive as que ainda vierem; segmentos fixos
+ * (`/api/profiles/drafts`, `/api/resumes/generate`...) não são ids de linha e passam direto.
+ */
+const PROJECT_SCOPED_PATHS: ReadonlyArray<[RegExp, ScopedResource]> = [
+  [/^\/api\/jobs\/([^/]+)/u, "job"],
+  [/^\/api\/agents\/[^/]+\/jobs\/([^/]+)/u, "job"],
+  [/^\/api\/resumes\/([^/]+)/u, "resume"],
+  [/^\/api\/applications\/([^/]+)/u, "application"],
+  [/^\/api\/base-resumes\/([^/]+)/u, "base_resume"],
+  [/^\/api\/profiles\/([^/]+)/u, "profile"],
+  [/^\/api\/human-questions\/([^/]+)/u, "human_question"],
+];
+
+function assertPathInProject(pathname: string) {
+  for (const [pattern, kind] of PROJECT_SCOPED_PATHS) {
+    const raw = pattern.exec(pathname)?.[1];
+    if (!raw) continue;
+    let id: string;
+    try { id = decodeURIComponent(raw); } catch { throw new HttpError(400, "invalid_path", "Caminho inválido."); }
+    assertInProject(kind, id, projectId);
+  }
+}
+
+/** Ids de outro projeto no corpo (`job_id`, `resume_id`...) recebem o mesmo 404 das rotas por id. */
+const PROJECT_SCOPED_BODY_FIELDS: ReadonlyArray<[string, ScopedResource]> = [
+  ["job_id", "job"], ["resume_id", "resume"], ["application_id", "application"], ["base_resume_id", "base_resume"], ["profile_id", "profile"],
+];
+
+function assertBodyInProject(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  for (const [field, kind] of PROJECT_SCOPED_BODY_FIELDS) {
+    const value = (body as Record<string, unknown>)[field];
+    if (typeof value === "string" && value) assertInProject(kind, value, projectId);
+  }
+}
 
 function matchRoute(method: string, pathname: string): { route: Route; params: string[] } | null {
   for (const route of routes) {
@@ -482,8 +741,10 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string) 
     const actor = method === "POST" && pathname === "/api/logout" ? "" : authenticate(req, pathname);
     const matched = matchRoute(method, pathname);
     if (!matched) throw new HttpError(404, "not_found", "Rota não encontrada.");
+    assertPathInProject(pathname);
     assertAutomationEnabled(req, pathname);
     const body = MUTATING_METHODS.has(method) ? await readJsonBody(req, matched.route.bodyLimit ?? DEFAULT_BODY_LIMIT) : {};
+    assertBodyInProject(body);
     await matched.route.handler({ req, res, params: matched.params, body, actor });
   } catch (error) {
     if (error instanceof HttpError && error.status === 413) {
@@ -599,6 +860,9 @@ function runExpiration() {
     if (expired.length) console.log(JSON.stringify({ event: "jobs.expired", count: expired.length }));
     // Autorizações vencidas e leases sem heartbeat (#18) também expiram aqui, não no bootstrap.
     expireAuthorizations();
+    // #16: execuções de agente LLM além do tempo limite da versão publicada são abortadas.
+    const timedOut = expireTimedOutAgentRuns();
+    if (timedOut.length) console.log(JSON.stringify({ event: "agent_runs.timed_out", count: timedOut.length }));
   } catch (error) {
     console.error(JSON.stringify({ event: "jobs.expiration_failed", message: error instanceof Error ? error.message : String(error) }));
   }

@@ -6,8 +6,11 @@
 #
 # Pré-requisito em ~/.hermes/.env (não secreto, mas por máquina):
 #   RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
-#   RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+#   RADAR_API_URL=http://127.0.0.1:8787   # API do dashboard (padrão http://127.0.0.1:PORT)
+#   RADAR_FORWARDED_PROTO=                 # "https" com RADAR_TRUST_PROXY_TLS=true no dashboard (senão 426)
 #   RADAR_AUTO_APPLICATION_ENABLED=false   # "true" só com executor testado
+# Segredo em ~/.hermes/.env (modo 600; nunca imprima nem cole no chat):
+#   RADAR_INTERNAL_SERVICE_TOKEN=<valor>   # mesmo do .env.local; 403 nos portões humanos
 # TELEGRAM_ALLOWED_USERS / TELEGRAM_HOME_CHANNEL já são definidos pelo setup do Telegram do Hermes.
 #
 # Depois de mesclar: `hermes mcp test radar-vagas-coleta` (e os demais servidores).
@@ -36,7 +39,10 @@ mcp_servers:
     command: node
     args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
     env:
-      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
+      RADAR_API_URL: "${env:RADAR_API_URL}"
+      RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: coordenador
       RADAR_MCP_AGENT_ID: "${env:RADAR_COORDINATOR_AGENT_ID}"
@@ -69,7 +75,10 @@ mcp_servers:
     command: node
     args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
     env:
-      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
+      RADAR_API_URL: "${env:RADAR_API_URL}"
+      RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: coleta
     trust: untrusted
@@ -83,6 +92,9 @@ mcp_servers:
         - radar_ingest_batch
         - radar_enrich_job
         - radar_record_agent_run
+        # fila de enriquecimento (só agentes com jobs.enrich)
+        - radar_list_enrichment_queue
+        - radar_resolve_enrichment
       resources: false
       prompts: false
 
@@ -91,7 +103,10 @@ mcp_servers:
     command: node
     args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
     env:
-      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
+      RADAR_API_URL: "${env:RADAR_API_URL}"
+      RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: curriculo
     trust: untrusted
@@ -105,12 +120,35 @@ mcp_servers:
       resources: false
       prompts: false
 
+  radar-vagas-preferencias:
+    # Entrevistador de preferências (preferences.write): respostas dos eliminatórios viram fatos
+    # propostos no rascunho do perfil; valem só depois de confirmadas no dashboard.
+    command: node
+    args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
+    env:
+      # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
+      RADAR_API_URL: "${env:RADAR_API_URL}"
+      RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
+      RADAR_ENVIRONMENT: production
+      RADAR_MCP_ROLE: preferencias
+    trust: untrusted
+    tools:
+      include:
+        # escrita
+        - radar_answer_profile_interview
+      resources: false
+      prompts: false
+
   radar-vagas-executor:
     # Executor de candidatura autorizada: único servidor com claim/submit/fail.
     command: node
     args: ["${env:RADAR_APP_DIR}/dist/src/mcp-server.js"]
     env:
-      RADAR_DB_PATH: "${env:RADAR_DB_PATH}"
+      # #10: o MCP não abre o SQLite; fala com a API do dashboard pelo token de serviço.
+      RADAR_API_URL: "${env:RADAR_API_URL}"
+      RADAR_INTERNAL_SERVICE_TOKEN: "${env:RADAR_INTERNAL_SERVICE_TOKEN}"
+      RADAR_FORWARDED_PROTO: "${env:RADAR_FORWARDED_PROTO}"
       RADAR_ENVIRONMENT: production
       RADAR_MCP_ROLE: executor
       RADAR_MCP_AGENT_ID: "${env:RADAR_EXECUTOR_AGENT_ID}"

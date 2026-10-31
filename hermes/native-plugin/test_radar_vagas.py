@@ -19,6 +19,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("radar_vagas", HERE / "radar_vagas" / "__init__.py")
+assert _spec is not None and _spec.loader is not None
 radar_vagas = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(radar_vagas)
 

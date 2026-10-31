@@ -32,7 +32,7 @@ export function normalizeAtsDomain(value: unknown): string | null {
 }
 
 /** Host de uma URL https; null para URL inválida ou outro esquema. */
-export function httpsHost(url: unknown): string | null {
+function httpsHost(url: unknown): string | null {
   try {
     const parsed = new URL(String(url ?? "").trim());
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
@@ -42,6 +42,7 @@ export function httpsHost(url: unknown): string | null {
   }
 }
 
+/** Host igual ao domínio ou subdomínio dele: regra única do ATS e dos domínios de agente (TD-11). */
 export function hostMatchesDomain(host: string, domain: string) {
   return host === domain || host.endsWith(`.${domain}`);
 }

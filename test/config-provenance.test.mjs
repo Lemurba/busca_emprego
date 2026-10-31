@@ -28,7 +28,12 @@ test("Source configuration, agent publication/rollback, and field provenance", a
   const proposedAgent = store.proposeAgentPrompt(agent.id, { prompt: "v1 com aprendizado explícito", reason: "Uso recente mostrou respostas sem contexto suficiente." });
   assert.ok(proposedAgent.draft_version_id);
   assert.equal(store.listAgentConfigVersions(agent.id)[0].created_by, "hermes-memory");
-  store.publishAgentConfigVersion(agent.id, proposedAgent.draft_version_id, "operator");
+  // Proposta do coordenador não é publicada às cegas: exige o checksum da revisão do diff.
+  assert.throws(() => store.publishAgentConfigVersion(agent.id, proposedAgent.draft_version_id, "operator"), /agent\.version\.review_required/u);
+  const proposalDiff = store.getAgentVersionDiff(agent.id, proposedAgent.draft_version_id);
+  assert.equal(proposalDiff.origin, "coordinator");
+  assert.equal(proposalDiff.proposal_reason, "Uso recente mostrou respostas sem contexto suficiente.");
+  store.publishAgentConfigVersion(agent.id, proposedAgent.draft_version_id, "operator", undefined, proposalDiff.checksum);
 
   const draftAgent = store.updateAgentConfig(agent.id, { prompt: "v2", editable_fields: ["benefits"] }, "operator");
   assert.ok(draftAgent.draft_version_id);

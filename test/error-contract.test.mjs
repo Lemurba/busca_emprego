@@ -4,9 +4,12 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 
 const directory = mkdtempSync(join(tmpdir(), "radar-error-contract-"));
 process.env.RADAR_DB_PATH = join(directory, "errors.sqlite");
@@ -70,21 +73,43 @@ try {
   });
 
   await test("mensagem vem do dicionário: mudar o texto não muda o status", () => {
-    const a = errorResponse(new DomainError("job.archived", undefined, undefined, "texto qualquer"));
-    const b = errorResponse(new Error("job.archived"));
+    const a = errorResponse(new DomainError("job.archived", undefined, "texto qualquer"));
+    const b = errorResponse(new DomainError("job.archived"));
     assert.equal(a.status, b.status);
     assert.equal(a.body.message, ERROR_MESSAGES["job.archived"]);
     assert.equal(b.body.message, ERROR_MESSAGES["job.archived"]);
   });
 
-  await test("legado: Error com código estável continua mapeado (com sufixo nos detalhes)", () => {
-    const response = errorResponse(new Error("job.salary.invalid:min,max"));
+  await test("código com sufixo: o detalhe vai para details.reason nas duas bordas", () => {
+    const response = errorResponse(new DomainError("job.salary.invalid:min,max"));
     assert.equal(response.status, 422);
     assert.equal(response.body.error, "job.salary.invalid:min,max");
     assert.deepEqual(response.body.details, { reason: "min,max" });
-    const tool = mcp(new Error("agent.domain.forbidden"));
+    const tool = mcp(new DomainError("agent.domain.forbidden"));
     assert.equal(tool.code, "agent.domain.forbidden");
     assert.equal(tool.status, 403);
+  });
+
+  await test("#29: Error puro nunca é lido pelo texto — código ou frase pt-BR viram 500 interno", () => {
+    for (const message of ["job.salary.invalid:min", "Vaga não encontrada.", "Confirme digitando AUTORIZO para esta vaga."]) {
+      const response = errorResponse(new Error(message));
+      assert.equal(response.status, 500, message);
+      assert.equal(response.body.error, "internal_error");
+      assert.equal(response.internal, true);
+      assert.ok(!JSON.stringify(response.body).includes(message), "o texto interno não vaza");
+      const tool = mcp(new Error(message));
+      assert.equal(tool.code, "internal_error");
+      assert.equal(tool.status, 500);
+    }
+    assert.equal(toDomainError(new Error("job.not_found")), null);
+  });
+
+  await test("#29: portões humanos têm código estável e mensagem do dicionário", () => {
+    const response = errorResponse(new DomainError("application.authorization.confirmation_required", 400));
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error, "application.authorization.confirmation_required");
+    assert.equal(response.body.message, ERROR_MESSAGES["application.authorization.confirmation_required"]);
+    assert.equal(errorResponse(new DomainError("job.not_found")).status, 404);
   });
 
   await test("WorkflowError mantém status e detalhes nas duas bordas", () => {
@@ -119,6 +144,19 @@ try {
     assert.match(tool.request_id, /^[0-9a-f-]{36}$/u);
     assert.equal(logged.length, 1);
     assert.equal(JSON.parse(logged[0]).request_id, tool.request_id);
+  });
+
+  test("todo código estável lançado em src/ tem mensagem pt-BR no dicionário único (#29)", () => {
+    const files = readdirSync(srcDir, { recursive: true }).map(String).filter((file) => file.endsWith(".ts"));
+    const missing = new Set();
+    for (const file of files) {
+      const source = readFileSync(join(srcDir, file), "utf8");
+      // Códigos estáveis: com ponto (`job.not_found`) ou em MAIÚSCULAS (`PDF_DUPLICATE`); o resto é texto de validação.
+      for (const match of source.matchAll(/new (?:DomainError|WorkflowError)\(\s*[`"']([A-Za-z_]+(?:\.[A-Za-z_]+)+|[A-Z][A-Z_]+)[`"':]/gu)) {
+        if (!ERROR_MESSAGES[match[1]]) missing.add(`${match[1]} (${file})`);
+      }
+    }
+    assert.deepEqual([...missing], []);
   });
 } finally {
   rmSync(directory, { recursive: true, force: true });

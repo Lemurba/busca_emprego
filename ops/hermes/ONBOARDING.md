@@ -91,21 +91,25 @@ Acrescente ao `/opt/data/.env` (por máquina):
 
 ```sh
 RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
-RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+# API do dashboard que os servidores MCP chamam (padrão http://127.0.0.1:PORT, PORT 8787).
+RADAR_API_URL=http://127.0.0.1:8787
+# "https" quando o dashboard roda com RADAR_TRUST_PROXY_TLS=true (senão a API responde 426);
+# vazio sem o proxy TLS. O `env` de cada servidor MCP repassa a variável por referência.
+RADAR_FORWARDED_PROTO=
 # IDs no dashboard (Agentes) ou por `radar_list_agents`:
 RADAR_COORDINATOR_AGENT_ID=<id do Coordenador do Radar>
 RADAR_EXECUTOR_AGENT_ID=<id do Assistente de candidatura>
-# Para as pontes do Telegram e o executor (rodam como hermes). Mesmo valor do .env.local;
+# Para os servidores MCP, as pontes do Telegram e o executor (rodam como hermes). Mesmo valor do .env.local;
 # o token de serviço recebe 403 nos portões humanos. Nunca coloque RADAR_DASHBOARD_TOKEN aqui.
 RADAR_INTERNAL_SERVICE_TOKEN=<valor>
 ```
 
-**Pendente (#10):** o servidor MCP ainda abre o SQLite diretamente em vez de falar com o dashboard por HTTP. Com o banco em modo 600 do `radar`, o subprocesso MCP precisa rodar como `radar` (comando fixo, sem shell; por exemplo uma regra `sudo` restrita a `node /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js`). As ferramentas MCP não incluem nenhum portão humano.
+**Isolamento (#10):** o servidor MCP não abre o SQLite. Cada ferramenta chama a API do dashboard (`RADAR_API_URL`) com o token de serviço (`RADAR_INTERNAL_SERVICE_TOKEN`), e o subprocesso roda como `hermes`, sem acesso ao banco nem ao `.env.local`. Valem as mesmas regras de qualquer cliente do token: os portões humanos (interesse, `APROVO`, `AUTORIZO`, `ENVIAR`, confirmação de perfil, termos de fonte, publicação de agente…) respondem 403 `human_session_required`, e nenhuma ferramenta MCP chama essas rotas. A escrita vai com `x-radar-agent-id`: a auditoria grava `agent:<agent_id>`. Com o dashboard fora do ar as ferramentas falham fechadas (`radar_api.unavailable`); sem o token, `internal_token_not_configured`. Não declare `RADAR_DB_PATH` no `env` dos servidores MCP.
 
 Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste cada servidor:
 
 ```sh
-for papel in coordenador coleta curriculo executor; do hermes mcp test "radar-vagas-$papel"; done
+for papel in coordenador coleta curriculo preferencias executor; do hermes mcp test "radar-vagas-$papel"; done
 ```
 
 Um servidor MCP por papel (mesmo `dist/src/mcp-server.js`, separado por `RADAR_MCP_ROLE`):
@@ -115,6 +119,7 @@ Um servidor MCP por papel (mesmo `dist/src/mcp-server.js`, separado por `RADAR_M
 | `radar-vagas-coordenador` | `coordenador` | `coordinator` (escopo `agents.propose`) | obrigatório |
 | `radar-vagas-coleta` | `coleta` | `source_scout`, `job_enrichment` | opcional (um bloco por coletor isola portais) |
 | `radar-vagas-curriculo` | `curriculo` | `resume_writer`, `match_evaluator` | opcional |
+| `radar-vagas-preferencias` | `preferencias` | `preference_learner` (escopo `preferences.write`; respostas da entrevista viram fatos propostos no rascunho do perfil) | opcional |
 | `radar-vagas-executor` | `executor` | `application_assistant` | obrigatório |
 
 Cada processo registra só as ferramentas do papel (`tools.include` igual a `RADAR_MCP_ROLES` em `src/mcp-tools.ts`); `claim`/`verify`/`submit`/`fail`/`ask_human` existem apenas no executor. Com vínculo, `agent_id` divergente no argumento é recusado (`agent.binding.mismatch`); agente de outro papel é recusado com `agent.role.forbidden`. Sem `RADAR_MCP_ROLE` o processo sobe em `leitura` (só `radar_list_agents`, `radar_list_sources`, `radar_get_job`).
@@ -122,11 +127,11 @@ Cada processo registra só as ferramentas do papel (`tools.include` igual a `RAD
 Pontos do fragmento ("MCP Config Reference"):
 
 - `${env:VAR}` é resolvido a partir do `.env` do perfil ("Environment variable references").
-- O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_DB_PATH` está no `env` do servidor ("Security" → "MCP Credential Handling").
+- O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_API_URL`, `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_FORWARDED_PROTO` (por referência `${env:…}`, nunca o valor) estão no `env` do servidor ("Security" → "MCP Credential Handling").
 - `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics"); o servidor já se limita ao papel, e o filtro é a segunda barreira.
 - `trust: untrusted`: toda chamada sem `readOnlyHint: true` pede aprovação e falha fechada em execuções desassistidas, como cron ("Server keys" → `trust`). Agendamentos que precisem gravar devem usar os scripts de `scripts/ops/` com o token interno, não o MCP.
 
-Alternativa por CLI: `hermes mcp add radar-vagas-coleta --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` (um por papel) e depois ajustar `env` (`RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`), `trust` e `tools.include` no `config.yaml`.
+Alternativa por CLI: `hermes mcp add radar-vagas-coleta --command node --args /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js` (um por papel) e depois ajustar `env` (`RADAR_API_URL`, `RADAR_INTERNAL_SERVICE_TOKEN` e `RADAR_FORWARDED_PROTO` por referência `${env:…}`, `RADAR_MCP_ROLE`, `RADAR_MCP_AGENT_ID`), `trust` e `tools.include` no `config.yaml`.
 
 ## 6. Navegador e logins de portais
 
@@ -178,6 +183,18 @@ O dashboard pode ser publicado de duas formas:
 1. **Host/porta próprios** (padrão): `RADAR_BASE_PATH=/` e `RADAR_PUBLIC_URL=http://<host>:<PORT>` (ou `https://radar.local` atrás de um proxy dedicado). O cookie usa `Path=/`.
 2. **Subcaminho no proxy do Hermes**: inclua `ops/hermes/nginx-radar.conf.example` no virtual host TLS existente e, no `.env.local`, defina `RADAR_BASE_PATH=/plugins/busca-emprego/` (o mesmo prefixo do `location`), `RADAR_PUBLIC_URL=https://<host-do-hermes>/plugins/busca-emprego`, `RADAR_ALLOWED_HOSTS=<host-do-hermes>` e `RADAR_TRUST_PROXY_TLS=true`. O HTML recebe `<base href="/plugins/busca-emprego/">`, todos os assets e chamadas `api/...` são relativos a ela, `/auth` redireciona para o prefixo e o cookie fica com `Path=/plugins/busca-emprego` (não vaza para o resto do host). O servidor aceita o caminho com ou sem o prefixo, então funciona com `proxy_pass` que remove o prefixo (o exemplo) ou que o repassa.
 
+### Primeiro uso
+
+Com o link aberto, o onboarding é feito pela pessoa no painel; o Hermes não consegue fazê-lo por ela, porque cada passo de decisão é um portão humano (`403 human_session_required` para o token de serviço). A ordem é a do README ([Primeiro uso](../../README.md#primeiro-uso-onboarding)):
+
+1. *Currículos*: enviar o PDF-base e **Criar perfil a partir deste PDF** (ou **Importar JSON Resume**).
+2. *Saúde das buscas*: revisar cada informação do rascunho, responder os eliminatórios e **Confirmar perfil** (gera o snapshot).
+3. *Configurações*: **Aceitar termos** das fontes que serão usadas e testar o acesso (conectores: **Testar acesso**; fontes de agentes: registrar o teste).
+4. *Saúde das buscas* → *Rodadas de busca*: **Iniciar rodada**. Os coletores do Hermes (`radar-vagas-coleta`) e os conectores enviam os lotes para essa rodada.
+5. Na vaga: **Tenho interesse** → **Gerar currículo ATS** → revisar e `APROVO` → envio manual ou `AUTORIZO` (exige vaga confirmada aberta nas últimas 24 h e link de ATS de empresa).
+
+Enquanto não houver perfil confirmado, `POST /api/rounds` responde `422 PROFILE_CONFIRMATION_REQUIRED` e `radar_record_score` responde `422 PROFILE_SNAPSHOT_REQUIRED`; sem fonte pronta, `422 ROUND_SOURCES_NOT_READY`. O entrevistador do papel `preferencias` (`radar_answer_profile_interview`) só **propõe** respostas no rascunho: a pessoa confirma no painel.
+
 ## 9. Watchdog
 
 ```sh
@@ -208,8 +225,8 @@ O backup agendado (`hermes/cron/radar-backup.sh`: backup, teste de restore, cóp
 
 1. `curl -fsS http://127.0.0.1:${PORT:-8787}/api/health` e `/api/ready`.
 2. `node scripts/ops/smoke-agents.mjs` (instância isolada) e `node scripts/ops/live-prod-check.mjs` (produção).
-3. `hermes mcp test radar-vagas-<papel>` para os quatro papéis; numa sessão, `skills_list` mostra `radar-vagas`.
-4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido.
+3. `hermes mcp test radar-vagas-<papel>` para os cinco papéis; numa sessão, `skills_list` mostra `radar-vagas`.
+4. `node scripts/ops/dashboard-link.mjs --send` e abrir o link recebido; seguir o [Primeiro uso](#primeiro-uso) até a primeira rodada.
 5. `node scripts/ops/notify-human-questions.mjs` (simulação) e `node scripts/ops/telegram-diagnose.mjs`.
 6. `node test/e2e/executor.test.mjs` (após `npm run build`) antes de ligar `RADAR_AUTO_APPLICATION_ENABLED=true`.
 7. `hermes cron run <job_id>` do watchdog com o app no ar: nenhuma mensagem.
