@@ -53,7 +53,7 @@ As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs
 
 1. O agente registra a vaga. O registro fica como `found` e `pending`.
 2. O usuário marca interesse com a ação explícita **Tenho interesse**, digitando `TENHO INTERESSE` (maiúsculas ou minúsculas) para confirmar.
-3. O usuário (botão **Gerar currículo ATS** na vaga) ou o agente gera o currículo ATS só com as informações confirmadas do perfil; o usuário pode editar o texto, que passa de novo pela checagem de fatos. Gerar de novo substitui o rascunho anterior da vaga.
+3. O usuário (botão **Gerar currículo ATS** na vaga) ou o agente gera o currículo ATS só com as informações confirmadas do perfil; o usuário pode editar o texto, que passa de novo pela checagem de fatos. Gerar de novo substitui o rascunho gerado anterior que ninguém editou; rascunhos editados ou escritos à mão ficam.
 4. O usuário revisa e aprova a versão salva digitando `APROVO` no diálogo de aprovação (maiúsculas ou minúsculas; o painel só envia depois que a palavra confere).
 5. O usuário escolhe o envio manual ou digita `AUTORIZO` para permitir automação naquela vaga e naquela versão do currículo.
 
@@ -77,7 +77,7 @@ O Radar lê e grava currículos no formato aberto [JSON Resume v1](https://jsonr
 
 Fatos de texto livre extraídos do PDF são exportados como texto (ex.: `skills` vira um grupo “Habilidades”); a fidelidade campo a campo vale para fatos importados.
 
-O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcadores exigem latitude e longitude fornecidas com cada vaga; a aplicação não geocodifica automaticamente endereços (escopo reduzido: não há serviço de geocodificação). Abaixo do mapa, *Análises* lista as vagas sem coordenadas; informe-as em “Editar vaga”. O mapa-base requer conexão com a internet.
+O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcadores exigem latitude e longitude fornecidas com cada vaga; a aplicação não geocodifica automaticamente endereços (escopo reduzido: não há serviço de geocodificação). Abaixo do mapa, *Análises* lista as vagas sem coordenadas; informe-as em “Editar vaga” → “Coordenadas no mapa” (ou envie `latitude`/`longitude` pela API). O mapa-base requer conexão com a internet.
 
 ## API Hermes
 

@@ -69,25 +69,42 @@ export function listJobsDueForLiveness(db: DatabaseSync, options: { nowMs?: numb
 }
 
 /**
- * AUTORIZO só com a vaga aberta confirmada nas últimas 24 h por uma prova que não vem de LLM:
+ * Momento da prova mais recente de que a vaga está aberta, por uma fonte que não vem de LLM:
  * uma verificação determinística do Radar (`job_liveness_checks`) ou a confirmação manual do
- * usuário no dashboard (valor humano de `opening_checked_at`). `opening_status`/`opening_checked_at`
- * gravados por agente ou ingestão sozinhos não bastam.
+ * usuário no dashboard (o valor que a pessoa gravou em `opening_checked_at`, lido da própria
+ * evidência humana). `opening_status`/`opening_checked_at` gravados por agente ou ingestão não contam.
  */
-export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; opening_status?: string | null; opening_checked_at?: string | null; closed_at?: string | null } | null | undefined, nowMs = Date.now()) {
-  const fresh = (value: unknown) => {
-    const time = typeof value === "string" ? Date.parse(value) : Number.NaN;
-    const age = nowMs - time;
-    return !Number.isNaN(time) && age <= LIVENESS_FRESH_MS && age >= -5 * 60_000;
-  };
-  if (!job || job.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
-  const check = db.prepare("SELECT checked_at FROM job_liveness_checks WHERE job_id=? AND status='open' ORDER BY checked_at DESC LIMIT 1").get(job.id) as { checked_at: string } | undefined;
-  if (check && fresh(check.checked_at)) return;
-  const manual = db.prepare(`SELECT e.origin, p.selected_by FROM job_field_provenance p JOIN evidence_records e ON e.id = p.evidence_id
-    WHERE p.job_id=? AND p.field_path='opening_checked_at' AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(job.id) as { origin: string; selected_by: string } | undefined;
+export function livenessProofAt(db: DatabaseSync, jobId: string): string | null {
+  const check = db.prepare("SELECT checked_at FROM job_liveness_checks WHERE job_id=? AND status='open' ORDER BY checked_at DESC LIMIT 1").get(jobId) as { checked_at: string } | undefined;
+  const manual = db.prepare(`SELECT e.origin, e.observed_value_json, p.selected_by FROM job_field_provenance p JOIN evidence_records e ON e.id = p.evidence_id
+    WHERE p.job_id=? AND p.field_path='opening_checked_at' AND p.superseded_at IS NULL ORDER BY p.selected_at DESC LIMIT 1`).get(jobId) as { origin: string; observed_value_json: string | null; selected_by: string } | undefined;
   // Só a sessão do dashboard conta: PATCH com token de serviço (`service:*`) ou agente (`agent:*`) não é prova humana.
   const byPerson = manual?.origin === "human" && !/^(?:service|agent):/u.test(String(manual.selected_by ?? ""));
-  if (byPerson && fresh(job.opening_checked_at)) return;
+  let confirmed: string | null = null;
+  if (byPerson) {
+    try {
+      const value = JSON.parse(String(manual?.observed_value_json ?? "null"));
+      if (typeof value === "string" && !Number.isNaN(Date.parse(value))) confirmed = value;
+    } catch { /* evidência ilegível não é prova */ }
+  }
+  const candidates = [check?.checked_at ?? null, confirmed].filter((value): value is string => Boolean(value));
+  return candidates.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+}
+
+/** Prova de vaga aberta ainda válida (últimas 24 h, tolerando 5 min de relógio adiantado). */
+export function livenessProofFresh(proofAt: string | null | undefined, nowMs = Date.now()) {
+  const time = typeof proofAt === "string" ? Date.parse(proofAt) : Number.NaN;
+  const age = nowMs - time;
+  return !Number.isNaN(time) && age <= LIVENESS_FRESH_MS && age >= -5 * 60_000;
+}
+
+/**
+ * AUTORIZO só com a vaga aberta confirmada nas últimas 24 h por uma prova que não vem de LLM
+ * (ver `livenessProofAt`). O dashboard usa a mesma prova (`liveness_proof_at` no bootstrap).
+ */
+export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; opening_status?: string | null; opening_checked_at?: string | null; closed_at?: string | null } | null | undefined, nowMs = Date.now()) {
+  if (!job || job.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
+  if (livenessProofFresh(livenessProofAt(db, job.id), nowMs)) return;
   throw new Error("job.liveness.stale");
 }
 

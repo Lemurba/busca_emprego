@@ -97,6 +97,16 @@ try {
     // Excluir uma fonte sem agente vinculado.
     const extra = await api("POST", "/api/sources", { id: "fonte-e2e", name: "Fonte e2e", source_type: "job_board", domain: "fonte-e2e.example", enabled: true, auth_strategy: "none" });
     expectStatus(extra, 201);
+    // Teste de acesso executado pelo servidor: só conector determinístico; fonte de agente é registrada à mão.
+    assert.equal((await api("GET", "/api/sources")).data.find((item) => item.id === "fonte-e2e").connector, false);
+    const manualOnly = await api("POST", "/api/sources/fonte-e2e/smoke-test", {});
+    expectStatus(manualOnly, 422);
+    assert.equal(manualOnly.data.error, "source.smoke_test.manual_only");
+    const connector = bootstrap.data.sourceConfigs.find((item) => item.connector);
+    assert.ok(connector, "há fonte de conector entre as padrão");
+    const noCompany = await api("POST", `/api/sources/${connector.id}/smoke-test`, {});
+    expectStatus(noCompany, 422);
+    assert.equal(noCompany.data.error, "source.smoke_test.company_required");
     expectStatus(await api("DELETE", "/api/sources/fonte-e2e"), 200);
     assert.equal((await api("GET", "/api/sources")).data.some((item) => item.id === "fonte-e2e"), false);
   });
@@ -139,6 +149,25 @@ try {
     const blocked = await api("POST", `/api/resumes/${resumeId}/approve`, { confirmation: "APROVO", override_reason: "Assumo o risco desta versão" });
     expectStatus(blocked, 409);
     assert.equal(blocked.data.error, "resume.unverified_facts");
+
+    // Habilidade, idioma ou empresa inventados (a checagem de fatos não os modela): a trava
+    // estrutural sinaliza, inclusive quando o texto chega pelo token de serviço.
+    for (const content of [edited.replace("HTML, CSS, Javascript", "HTML, CSS, Javascript, COBOL, Rust"), edited.replace(/^IDIOMAS\n/mu, "IDIOMAS\nJaponês — Fluente\n"), edited.replace("CEO/President — Pied Piper", "CEO/President — Google")]) {
+      assert.notEqual(content, edited);
+      expectStatus(await api("PATCH", `/api/resumes/${resumeId}`, { content }, "service"), 200);
+      const review = await api("POST", `/api/resumes/${resumeId}/review`, {});
+      assert.equal(review.data.review_status, "fail");
+      assert.ok(review.data.review_findings.includes("content.unsupported_or_modified"));
+      const approve = await api("POST", `/api/resumes/${resumeId}/approve`, { confirmation: "APROVO" });
+      expectStatus(approve, 422);
+      assert.equal(approve.data.error, "ATS_REVIEW_REQUIRED");
+    }
+
+    // Gerar de novo pelo token de serviço não some com o rascunho editado pela pessoa.
+    const third = await api("POST", "/api/resumes/generate", { job_id: jobId, profile_snapshot_id: snapshot.id, facts_used: factsUsed }, "service");
+    expectStatus(third, 201);
+    const kept = (await api("GET", "/api/bootstrap")).data.resumes.filter((item) => item.job_id === jobId).map((item) => item.id).sort();
+    assert.deepEqual(kept, [resumeId, third.data.id].sort(), "o editado fica ao lado do novo");
 
     // De volta ao texto com respaldo: o APROVO é só da sessão humana.
     expectStatus(await api("PATCH", `/api/resumes/${resumeId}`, { content: edited }), 200);

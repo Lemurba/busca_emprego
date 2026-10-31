@@ -72,8 +72,8 @@ test("QA-06: currículo ATS legível, editável com checagem de fatos e sem rasc
   assert.throws(() => store.approveResume(first.id, "APROVO"), /resume\.superseded/u);
   assert.throws(() => store.updateResume(first.id, { content: "x" }), /resume\.superseded/u);
 
-  // Edição humana com respaldo nos fatos (reordenar, encurtar, reescrever o resumo) passa na revisão.
-  const edited = second.content.replace(/^RESUMO\n.*$/mu, "RESUMO\nFoco em compressão sem perdas e teoria da informação aplicada.").replace(/^• Successfully won Techcrunch Disrupt\n/mu, "");
+  // Edição humana com respaldo nos fatos (encurtar o resumo com as palavras dele, apagar um destaque) passa na revisão.
+  const edited = second.content.replace(/^RESUMO\n.*$/mu, "RESUMO\nHis work focuses on applied information theory and lossless compression.").replace(/^• Successfully won Techcrunch Disrupt\n/mu, "");
   assert.notEqual(edited, second.content);
   store.updateResume(second.id, { content: edited });
   const supported = store.reviewResume(second.id);
@@ -86,6 +86,23 @@ test("QA-06: currículo ATS legível, editável com checagem de fatos e sem rasc
   assert.ok(unsupported.review_findings.includes("content.unsupported_or_modified"));
   assert.ok(unsupported.review_findings.some((finding) => finding.startsWith("facts.unverified:")));
   assert.throws(() => store.approveResume(second.id, "APROVO", { override_reason: "Revisado manualmente por mim" }), /resume\.unverified_facts/u);
+
+  // Trava estrutural (S3-SEC-1): idioma, nível, habilidade ou empresa sem fato que os sustente
+  // não passam, mesmo que a checagem de fatos não modele esse tipo de afirmação.
+  for (const [label, content] of [
+    ["idioma novo", edited.replace(/^IDIOMAS\n/mu, "IDIOMAS\nJaponês — Fluente\n")],
+    ["nível trocado", edited.replace("Portuguese — Intermediate", "Portuguese — Native speaker")],
+    ["habilidade nova", edited.replace("HTML, CSS, Javascript", "HTML, CSS, Javascript, COBOL, Rust")],
+    ["empresa trocada", edited.replace("CEO/President — Pied Piper", "CEO/President — Google")],
+    ["texto livre", "Sou a melhor pessoa do mundo para esta vaga, contrate-me."],
+  ]) {
+    assert.notEqual(content, edited, label);
+    store.updateResume(second.id, { content });
+    const review = store.reviewResume(second.id);
+    assert.equal(review.review_status, "fail", label);
+    assert.ok(review.review_findings.includes("content.unsupported_or_modified"), label);
+    assert.throws(() => store.approveResume(second.id, "APROVO"), /ATS_REVIEW_REQUIRED/u, label);
+  }
 
   // Um currículo aprovado nunca é substituído por uma nova geração.
   store.updateResume(second.id, { content: edited });
@@ -103,4 +120,73 @@ test("QA-12: vaga sem nota registrada sai como não avaliada no bootstrap", () =
   assert.equal(fromBootstrap().match_evaluated, false);
   store.recordMatchScore({ job_id: job.id, scores: { role_family: 70, skills: 70, seniority: 70, location_work_model: 70, compensation: 70, explicit_preferences: 70 } });
   assert.equal(fromBootstrap().match_evaluated, true);
+});
+
+test("QA-06: conteúdo ATS imprime todos os fatos usados, sem JSON nem rótulo duplicado", async () => {
+  const { factualAtsContent } = await import("../src/ats-content.ts");
+  const content = factualAtsContent([
+    { type: "experience", value: { position: "CEO", name: "Pied Piper", summary: "Compression platform.", description: "Awesome compression company" } },
+    { type: "professional_link", value: { network: "Twitter", username: "neutralthoughts", url: "" } },
+    { type: "work_authorization", value: { countries: ["Brasil", "Portugal"], needs_sponsorship: false } },
+  ]);
+  assert.match(content, /^Compression platform\.$/mu);
+  assert.match(content, /^Awesome compression company$/mu, "descrição e resumo entram os dois");
+  assert.match(content, /^Twitter: neutralthoughts$/mu);
+  assert.doesNotMatch(content, /Link: Twitter/u);
+  assert.match(content, /^Autorização de trabalho: Brasil, Portugal · sem necessidade de patrocínio de visto$/mu);
+  assert.doesNotMatch(content, /\b(?:true|false)\b/u);
+});
+
+test("QA-06: nova geração não substitui rascunho manual ou editado; rascunho substituído não aceita revisão nem fatos", async () => {
+  const profile = store.getActiveProfile();
+  const factsUsed = profile.snapshot.facts.filter((fact) => fact.state === "confirmed").map((fact) => fact.id);
+  const job = store.upsertJob({ id: "qa06-supersede", title: "Data Compression", company: "Hooli", source: "fixture", source_url: "https://jobs.example/qa06-supersede" });
+  store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
+  const generate = () => store.generateAtsResume({ job_id: job.id, profile_snapshot_id: profile.snapshot.id, facts_used: factsUsed }, "service:hermes");
+  const manual = store.createResume({ job_id: job.id, title: "Meu manual", content: "Texto humano escrito à mão" });
+  const intact = generate();
+  const edited = generate();
+  assert.equal(store.getResume(intact.id).status, "superseded", "rascunho do redator intacto é substituído");
+  store.updateResume(edited.id, { content: edited.content.replace(/^• Successfully won Techcrunch Disrupt\n/mu, "") });
+  const latest = generate();
+  assert.equal(store.getResume(manual.id).status, "draft", "rascunho manual fica");
+  assert.equal(store.getResume(edited.id).status, "draft", "rascunho editado pela pessoa fica");
+  assert.equal(store.getResume(latest.id).status, "draft");
+
+  const profiles = store.listProfiles().length;
+  assert.throws(() => store.reviewResume(intact.id), /resume\.superseded/u);
+  assert.throws(() => store.resolveResumeFact(intact.id, "qualquer", { action: "confirm" }), /resume\.superseded/u);
+  await assert.rejects(() => store.runResumeParseCheck(intact.id), /resume\.superseded/u);
+  assert.equal(store.listProfiles().length, profiles, "nenhuma versão de perfil nasce de rascunho substituído");
+});
+
+test("QA-18: vaga revista avança a data da observação, mas só verificação ou confirmação humana vale para o AUTORIZO", () => {
+  const scout = store.createAgentConfig({
+    name: "Coletor QA-18 revisto", role_type: "source_scout", allowed_domains: ["jobs.example"],
+    tool_scopes: ["browser.read", "jobs.read", "jobs.create"], can_create_jobs: true, prompt: "Coletar.",
+  }, "tester");
+  const discover = (opening_checked_at, opening_status = "open") => store.createJobFromAgent(scout.id, { source: "fixture", title: "Vaga revista", company: "Kappa", source_url: "https://jobs.example/qa18/revista", opening_status, opening_checked_at });
+  const first = discover("2026-10-01T00:00:00.000Z");
+  const proof = () => store.getBootstrap().jobs.find((job) => job.id === first.id).liveness_proof_at;
+  assert.equal(proof(), null, "data informada pelo agente não é prova de vaga aberta");
+  assert.equal(discover("2026-10-20T00:00:00.000Z").id, first.id);
+  assert.equal(store.getJob(first.id).opening_checked_at, "2026-10-20T00:00:00.000Z", "a nova observação avança a data");
+  discover("2026-10-05T00:00:00.000Z");
+  assert.equal(store.getJob(first.id).opening_checked_at, "2026-10-20T00:00:00.000Z", "observação mais antiga não volta a data");
+  assert.equal(proof(), null);
+
+  // Confirmação humana vale pelo valor que a pessoa gravou; observação posterior do agente não a renova.
+  const confirmedAt = new Date(Date.now() - 60_000).toISOString();
+  store.updateJob(first.id, { opening_status: "open", opening_checked_at: confirmedAt });
+  assert.equal(proof(), confirmedAt);
+  discover(new Date().toISOString());
+  assert.equal(proof(), confirmedAt);
+
+  const checked = store.recordLivenessCheck(first.id, { status: "open", method: "test_fixture", confidence: 1, evidence: {} });
+  assert.equal(proof(), checked.checked_at);
+
+  // Fechada: vale a data que a fonte informou; data não ISO é recusada.
+  const closed = store.createJobFromAgent(scout.id, { source: "fixture", title: "Vaga fechada", company: "Lambda", source_url: "https://jobs.example/qa18/fechada", opening_status: "closed", opening_checked_at: "2026-10-01T00:00:00.000Z" });
+  assert.equal(store.getJob(closed.id).opening_checked_at, "2026-10-01T00:00:00.000Z");
+  assert.throws(() => store.ingestSourceItems("fixture", [{ source_id: "fixture", title: "X", company: "Y", job_url: "https://jobs.example/qa18/6", opening_status: "open", opening_checked_at: "1" }]), /SCHEMA_INVALID:source\.items\.0\.opening_checked_at/u);
 });

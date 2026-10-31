@@ -16,6 +16,7 @@ import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { getResumeFactChecks, resolveResumeFact } from "./db.js";
 import { connectorRoutes } from "./connectors/routes.js";
+import { smokeTestSource } from "./connectors/runner.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
 
@@ -313,6 +314,8 @@ const routes: Route[] = [
     const input = validateBody(schemas.sourceReadiness, body);
     ok(res, 200, setSourceReadiness(params[0]!, String(input.status ?? ""), String(input.reason ?? ""), actor, projectId));
   } },
+  // Teste de acesso executado pelo servidor (só conectores determinísticos; ver smokeTestSource).
+  { method: "POST", pattern: r("/api/sources/{id}/smoke-test"), handler: async ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, await smokeTestSource(params[0]!, { actor, projectId })); } },
   { method: "POST", pattern: r("/api/sources/{id}/terms"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, approveSourceTerms(params[0]!, actor, projectId)); } },
   { method: "DELETE", pattern: r("/api/sources/{id}"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, deleteSourceConfig(params[0]!, actor, projectId)); } },
 

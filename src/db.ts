@@ -12,12 +12,13 @@ import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertA
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
 import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
 import { buildProfileJsonResume, buildResumeJsonResume, jsonResumeImportFacts } from "./db/profile-import.js";
-import { assertJobLivenessFresh, insertLivenessCheck, listJobsDueForLiveness, livenessAndRepostSummaries, recordSightingRepost, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
+import { assertJobLivenessFresh, insertLivenessCheck, livenessProofAt, listJobsDueForLiveness, livenessAndRepostSummaries, recordSightingRepost, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
 import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./liveness/index.js";
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
 import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
-import { factualAtsContent } from "./ats-content.js";
+import { factualAtsContent, unsupportedAtsLines } from "./ats-content.js";
+import { connectorById } from "./connectors/sources.js";
 import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements, parseJobRequirementsColumn } from "./blockers.js";
 import { computeCoverage } from "./coverage.js";
 import { expectedContacts, runResumeParseCheck as runParseCheck } from "./resume-parse-check.js";
@@ -243,7 +244,8 @@ export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigReco
  * a rodada descarta a fonte mesmo que o teste tenha passado.
  */
 export function listSourceConfigsWithReadiness(projectId = "busca-emprego") {
-  return listSourceConfigs(projectId).map((source) => ({ ...source, effectiveReadiness: sourceReadiness(source) }));
+  // `connector`: fonte de conector determinístico (src/connectors), que o painel testa de verdade.
+  return listSourceConfigs(projectId).map((source) => ({ ...source, effectiveReadiness: sourceReadiness(source), connector: Boolean(connectorById(source.id)) }));
 }
 
 export function listAgentConfigVersions(agentId: string, projectId = "busca-emprego") {
@@ -308,7 +310,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     const applied = Boolean(application && ["submitted", "accepted", "rejected"].includes(application.status));
     const lifecycle = applied ? "applied" : (isClosed ? "lost" : (job.decision === "not_interested" || job.status === "discarded" ? "not_interested" : (job.opening_status === "unknown" ? "unknown" : "open")));
     const applicationAgeDays = application?.submitted_at ? Math.max(0, Math.floor((currentTime - new Date(application.submitted_at).getTime()) / 86_400_000)) : null;
-    return { ...job, repost_count: 0, first_seen_at: null, repost_dates: [], last_liveness_check: null, ...livenessRepost.get(job.id), application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", match_evaluated: scoredJobs.has(job.id) || job.match_score > 0, blockers: evaluateBlockers(profileFacts, job) };
+    return { ...job, repost_count: 0, first_seen_at: null, repost_dates: [], last_liveness_check: null, ...livenessRepost.get(job.id), liveness_proof_at: livenessProofAt(db, job.id), application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", match_evaluated: scoredJobs.has(job.id) || job.match_score > 0, blockers: evaluateBlockers(profileFacts, job) };
   });
   const statuses = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.status] = (acc[job.status] ?? 0) + 1; return acc; }, {});
   const sources = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.source] = (acc[job.source] ?? 0) + 1; return acc; }, {});
@@ -690,6 +692,9 @@ const sourceItemFields = new Set([
  * Vale a data enviada (`opening_checked_at`, nunca no futuro) ou o momento da ingestão;
  * sem estado informado (`unknown`), não há verificação a registrar.
  */
+// Data ISO 8601 (só data, ou data e hora com fuso opcional): Date.parse aceita "1" como o ano 2001.
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/u;
+
 function openingCheckedAt(item: Record<string, unknown>): string | null {
   if (!["open", "closed"].includes(String(item.opening_status ?? "unknown"))) return null;
   const reported = item.opening_checked_at == null ? Number.NaN : Date.parse(String(item.opening_checked_at));
@@ -707,7 +712,7 @@ export function validateSourceBatch(sourceId: string, batch: Record<string, unkn
     if (String(item.source_id ?? sourceId) !== sourceId || !String(item.job_url ?? "").trim() || !String(item.title ?? "").trim() || !String(item.company ?? "").trim()) throw new Error(`SCHEMA_INVALID:source.items.${index}.required`);
     const opening = String(item.opening_status ?? "unknown");
     if (!["open", "closed", "unknown"].includes(opening)) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_status`);
-    if (item.opening_checked_at != null && Number.isNaN(Date.parse(String(item.opening_checked_at)))) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_checked_at`);
+    if (item.opening_checked_at != null && (!ISO_DATE_TIME.test(String(item.opening_checked_at)) || Number.isNaN(Date.parse(String(item.opening_checked_at))))) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_checked_at`);
     for (const field of ["job_url", "source_url", "linkedin_post_url", "application_url"] as const) {
       if (item[field]) canonicalizeJobUrl(String(item[field]));
     }
@@ -913,14 +918,14 @@ function findDedupKeyMatch(projectId: string, incoming: { sourceId: string; sour
  * A source reporting the vacancy as closed is authoritative for the opening fields: the job
  * is closed (opening_status/closed_at) and, while no application is under way, expired via the workflow.
  */
-function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, roundId?: string, confidence = 0.9) {
+function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: string, roundId?: string, confidence = 0.9, checkedAt?: string) {
   const job = getJob(jobId);
   if (!job) return;
   const timestamp = now();
   const evidence = addEvidence({ projectId: job.project_id ?? "busca-emprego", jobId, field: "opening_status", value: "closed", sourceUrl, confidence, origin: "agent", runId: roundId, sourceId });
   selectEvidence(jobId, "opening_status", evidence.id, sourceId, evidence.timestamp);
   db.prepare("UPDATE field_conflicts SET status='resolved_candidate',reviewed_by=?,reviewed_at=? WHERE job_id=? AND field_path='opening_status' AND status='pending'").run(`source:${sourceId}`, timestamp, jobId);
-  db.prepare("UPDATE jobs SET opening_status='closed',opening_checked_at=?,closed_at=COALESCE(closed_at,?),updated_at=? WHERE id=?").run(timestamp, timestamp, timestamp, jobId);
+  db.prepare("UPDATE jobs SET opening_status='closed',opening_checked_at=?,closed_at=COALESCE(closed_at,?),updated_at=? WHERE id=?").run(checkedAt ?? timestamp, timestamp, timestamp, jobId);
   const busy = db.prepare("SELECT 1 FROM applications WHERE job_id=? AND status IN ('in_progress','submitted','accepted','rejected') LIMIT 1").get(jobId);
   if (!busy && PRE_APPLICATION_STATUSES.includes(job.status) && job.status !== "applying" && !["not_interested", "applied"].includes(job.decision)) {
     expireJob(jobId, "source_closed", true, `source:${sourceId}`);
@@ -1097,7 +1102,13 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
   // Uma sighting é reavaliada contra as regras atuais (a vaga nova já passou por upsertJob);
   // applySuppression é idempotente: cada vaga conta uma única vez por regra.
   const suppressed = applySuppression(job.id);
-  if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId ?? undefined);
+  if (String(item.opening_status ?? "") === "closed") closeJobFromSource(job.id, sourceId, sourceUrl, roundId ?? undefined, 0.9, jobInput.opening_checked_at ?? undefined);
+  // QA-18: a vaga revista ainda aberta avança a data da observação (só a data, sem evidência nem
+  // conflito). É informação de exibição: a prova do AUTORIZO vem de livenessProofAt.
+  if (existingJob && existingJob.opening_status === "open" && !existingJob.closed_at && jobInput.opening_status === "open" && jobInput.opening_checked_at
+    && (!existingJob.opening_checked_at || Date.parse(jobInput.opening_checked_at) > Date.parse(existingJob.opening_checked_at))) {
+    db.prepare("UPDATE jobs SET opening_checked_at=? WHERE id=?").run(jobInput.opening_checked_at, job.id);
+  }
   for (const [field, value] of Object.entries(jobInput)) {
     // opening_checked_at é a data da observação de opening_status, não um campo com fonte própria.
     if (["id", "project_id", "source_job_id", "source", "opening_checked_at"].includes(field) || value == null || value === "") continue;
@@ -1857,6 +1868,8 @@ function resumeContactFacts(resume: Resume): Record<string, unknown>[] {
 export async function runResumeParseCheck(id: string) {
   const resume = getResume(id);
   if (!resume) throw new Error("resume.not_found");
+  // Rascunho substituído por uma nova geração é só histórico: não revisa, não confirma fato, não testa.
+  if (resume.status === "superseded") throw new Error("resume.superseded");
   const check = await runParseCheck(resume, expectedContacts(resume.content, resumeContactFacts(resume)));
   // O texto pode ter mudado durante a extração: grava só se ainda é a mesma versão.
   const current = getResume(id);
@@ -1981,6 +1994,8 @@ export function resolveResumeFact(resumeId: string, claimId: string, input: Resu
   const resume = getResume(resumeId);
   if (!resume) throw new Error("resume.not_found");
   if (resume.status === "approved") throw new Error("resume.fact.approved_locked");
+  // Rascunho substituído por uma nova geração é só histórico: não revisa, não confirma fato, não testa.
+  if (resume.status === "superseded") throw new Error("resume.superseded");
   if (!["confirm", "correct", "remove"].includes(String(input.action))) throw new Error("resume.fact.action.invalid");
   const rows = tx(() => refreshResumeFactChecks(resume.id));
   const row = rows.find((item) => item.claim_id === claimId);
@@ -2040,8 +2055,10 @@ function writerFindings(resume: Resume): string[] {
   if (!snapshot) findings.push("profile_snapshot.required");
   if (!(resume.facts_used?.length) || used.length !== resume.facts_used.length) findings.push("facts.unconfirmed_or_missing");
   // QA-06: a pessoa pode editar o texto gerado. A edição passa se a checagem de fatos do texto
-  // editado não achar afirmação sem fato confirmado; senão o texto deixa de ser "dos fatos usados".
-  if (used.length && content !== factualAtsContent(used).trim() && refreshResumeFactChecks(resume.id).some((row) => row.status === "pending")) findings.push("content.unsupported_or_modified");
+  // editado não achar afirmação sem fato confirmado E se cada linha nova ou alterada tiver
+  // respaldo em um fato usado (unsupportedAtsLines); senão o texto deixa de ser "dos fatos usados".
+  if (used.length && content !== factualAtsContent(used).trim()
+    && (unsupportedAtsLines(content, used).length > 0 || refreshResumeFactChecks(resume.id).some((row) => row.status === "pending"))) findings.push("content.unsupported_or_modified");
   const supported = normalizeComparableText(used.map((fact) => printableFactValue(fact.value)).join(" "));
   if (resume.keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) findings.push("keyword.unsupported");
   return findings;
@@ -2056,6 +2073,8 @@ function writerFindings(resume: Resume): string[] {
 export function reviewResume(id: string, input: Record<string, unknown> = {}, actor = "reviewer") {
   const resume = getResume(id);
   if (!resume) throw new Error("resume.not_found");
+  // Rascunho substituído por uma nova geração é só histórico: não revisa, não confirma fato, não testa.
+  if (resume.status === "superseded") throw new Error("resume.superseded");
   if (input.verdict != null && !["pass", "fail"].includes(String(input.verdict))) throw new Error("resume.review.verdict.invalid");
   const reviewerFindings = [...(Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : []), ...(input.verdict === "fail" ? ["reviewer.fail"] : [])];
   return tx(() => {
@@ -2072,6 +2091,15 @@ export function reviewResume(id: string, input: Record<string, unknown> = {}, ac
     audit("resume", id, "ats_reviewed", { actor, verdict: finalVerdict, findings_count: findings.length });
     return getResume(id);
   });
+}
+
+/** O texto do rascunho do redator ainda é exatamente o que a geração montou (ninguém editou). */
+function writerContentIntact(resume: Resume) {
+  const snapshot = atsSnapshotForResume(resume);
+  if (!snapshot) return false;
+  const byId = new Map(snapshotFacts(snapshot).map((fact) => [String(fact.id), fact]));
+  const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
+  return used.length > 0 && resume.content.trim() === factualAtsContent(used).trim();
 }
 
 export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = "busca-emprego") {
@@ -2103,12 +2131,16 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   const supported = normalizeComparableText(selectedFacts.map((fact) => printableFactValue(fact.value)).join(" "));
   if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new Error("ATS_KEYWORD_UNSUPPORTED");
   const gaps = Array.isArray(input.gaps) ? input.gaps.map(String) : [];
-  // Gerar de novo substitui o rascunho anterior da vaga em vez de empilhar versões: os não
-  // aprovados e sem candidatura viram `superseded` (somem do painel, ficam no banco e na auditoria).
-  const superseded = (db.prepare(`SELECT id FROM resumes WHERE job_id=? AND status IN ('draft','review')
-    AND id NOT IN (SELECT resume_id FROM applications WHERE resume_id IS NOT NULL)`).all(job.id) as { id: string }[]).map((row) => row.id);
+  // Gerar de novo substitui o rascunho anterior da vaga em vez de empilhar versões: os rascunhos
+  // do redator ainda intactos, não aprovados e sem candidatura, viram `superseded` (somem do
+  // painel, ficam no banco e na auditoria). Rascunho manual ou editado pela pessoa nunca é
+  // substituído (por nenhum ator, nem pelo token de serviço): convive com o novo.
+  let superseded: string[] = [];
   const resume = tx(() => {
     const timestamp = now();
+    superseded = (db.prepare(`SELECT id FROM resumes WHERE job_id=? AND status IN ('draft','review') AND generation_source='writer'
+      AND id NOT IN (SELECT resume_id FROM applications WHERE resume_id IS NOT NULL)`).all(job.id) as { id: string }[])
+      .map((row) => getResume(row.id)).filter((previous): previous is Resume => Boolean(previous) && writerContentIntact(previous as Resume)).map((previous) => previous.id);
     for (const id of superseded) {
       db.prepare("UPDATE resumes SET status='superseded',updated_at=? WHERE id=?").run(timestamp, id);
       audit("resume", id, "superseded", { job_id: job.id, actor });

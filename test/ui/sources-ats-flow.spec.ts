@@ -2,8 +2,9 @@
  * Fluxos da etapa "Fontes e ATS" (auditoria 2026-10-30, §1.3 e §2) pelo navegador:
  *   1. aceitar os termos de uma fonte → registrar o teste de acesso → fonte pronta → iniciar rodada;
  *   2. Tenho interesse (palavra digitada) → Gerar currículo ATS → editar → portão do APROVO.
- * Usa o mesmo servidor e banco do smoke (playwright.config.ts) e roda depois dele (ordem
- * alfabética dos arquivos): cria só dados próprios, com nomes que o smoke não usa.
+ * Usa o mesmo servidor e banco do smoke e roda depois dele por dependência explícita de
+ * projeto ("fluxos" depende de "chromium" em playwright.config.ts): cria só dados próprios,
+ * com nomes que o smoke não usa, e deixa no banco perfil confirmado, termos aceitos e rodada.
  * O perfil confirmado vem da API (a revisão do perfil pela UI é outra tela).
  */
 import { readFileSync } from "node:fs";
@@ -154,6 +155,25 @@ test.describe("fluxos de fontes e currículo ATS", () => {
     await expect(dialog.getByLabel("Digite APROVO para confirmar")).toHaveCount(0);
     await dialog.getByRole("button", { name: "Cancelar" }).click();
 
+    // QA-07: sem a linha de e-mail, o teste de leitura do PDF reprova e o Aprovar fica desligado.
+    await page.locator("#modal-root").getByRole("button", { name: "Cancelar" }).click();
+    await page.getByRole("button", { name: "Detalhes de Engenharia de compressão UI" }).click();
+    await modal.getByRole("button", { name: "Revisar e aprovar currículo" }).click();
+    await titleFocused();
+    await content.fill(original.replace(/^E-mail: .*\n/mu, ""));
+    await page.locator("#modal-root").getByRole("button", { name: "Salvar alterações" }).click();
+    await expect(page.locator("#toast-root")).toContainText("Currículo salvo.");
+    await page.getByRole("button", { name: "Detalhes de Engenharia de compressão UI" }).click();
+    await modal.getByRole("button", { name: "Revisar e aprovar currículo" }).click();
+    const approveRequests: string[] = [];
+    page.on("request", (request) => { if (/\/api\/resumes\/[^/]+\/approve$/u.test(request.url())) approveRequests.push(request.url()); });
+    await page.locator("#modal-root").getByRole("button", { name: "Aprovar versão salva…" }).click();
+    await expect(dialog).toContainText("Um parser não consegue ler parte deste currículo.");
+    await expect(dialog.getByRole("button", { name: "Aprovar esta versão" })).toBeDisabled();
+    await expect(dialog.getByLabel("Digite APROVO para confirmar")).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Cancelar" }).click();
+    expect(approveRequests, "nenhum /approve com o PDF reprovado").toEqual([]);
+
     // Edição com respaldo (remove um destaque): revisão passa e o APROVO digitado aprova.
     await page.locator("#modal-root").getByRole("button", { name: "Cancelar" }).click();
     await page.getByRole("button", { name: "Detalhes de Engenharia de compressão UI" }).click();
@@ -171,6 +191,10 @@ test.describe("fluxos de fontes e currículo ATS", () => {
     await approve.fill("aprovado");
     await dialog.getByRole("button", { name: "Aprovar esta versão" }).click();
     await expect(dialog.locator(".dialog-error")).toHaveText("Digite APROVO para confirmar.");
+    // O foco volta ao campo da palavra (não ao topo do diálogo), ligado à mensagem de erro.
+    await expect(approve).toBeFocused();
+    await expect(approve).toHaveAttribute("aria-invalid", "true");
+    await expect(approve).toHaveAttribute("aria-describedby", (await dialog.locator(".dialog-error").getAttribute("id")) ?? "");
     const approved = page.waitForResponse((response) => /\/api\/resumes\/[^/]+\/approve$/u.test(response.url()));
     await approve.fill("aprovo");
     await dialog.getByRole("button", { name: "Aprovar esta versão" }).click();

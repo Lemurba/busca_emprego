@@ -68,6 +68,8 @@ type Job = {
   first_seen_at?: string | null;
   repost_dates?: string[];
   last_liveness_check?: LivenessCheck | null;
+  /** Prova de vaga aberta que vale para o AUTORIZO (verificação do Radar ou confirmação manual); calculada pelo servidor. */
+  liveness_proof_at?: string | null;
   blockers?: Blocker[];
   requirements_json?: Record<string, unknown> | null;
 };
@@ -86,7 +88,7 @@ type Application = { id: string; job_id: string; resume_id: string | null; statu
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
 type AgentRun = { id: string; agent_name: string; status: string; started_at: string; finished_at: string | null; found_count: number; message: string };
 type AgentConfig = { id: string; name: string; description: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; memory_enabled: boolean; hermes_prompt_optimization: boolean; version: number; published_version_id: string | null; draft_version_id: string | null };
-type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null; readiness_status?: string; readiness_reason?: string; last_smoke_test_at?: string | null; effectiveReadiness?: { status: string; reason: string } };
+type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null; readiness_status?: string; readiness_reason?: string; last_smoke_test_at?: string | null; effectiveReadiness?: { status: string; reason: string }; connector?: boolean };
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
 type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
@@ -391,10 +393,14 @@ function formatNumericDate(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
 }
 
-/** Horas desde a última confirmação de vaga aberta, ou null quando não há confirmação. */
+/**
+ * Horas desde a última confirmação de vaga aberta, ou null quando não há confirmação.
+ * Usa a mesma prova que o servidor exige no AUTORIZO (`liveness_proof_at`): o `opening_checked_at`
+ * informado por agente ou fonte é só a data da observação e não conta como verificação.
+ */
 function openCheckedHoursAgo(job: Job) {
-  if (job.opening_status !== "open" || !job.opening_checked_at) return null;
-  const age = Date.now() - new Date(job.opening_checked_at).getTime();
+  if (job.opening_status !== "open" || job.closed_at || !job.liveness_proof_at) return null;
+  const age = Date.now() - new Date(job.liveness_proof_at).getTime();
   return Number.isNaN(age) || age < -300_000 ? null : Math.max(0, Math.floor(age / 3_600_000));
 }
 
@@ -1134,7 +1140,7 @@ function openDialog(options: { title: string; body: string; confirmLabel: string
   const root = dialogRoot();
   const titleId = `dialog-title-${++modalCounter}`;
   root.hidden = false;
-  root.innerHTML = `<form class="modal dialog" role="alertdialog" aria-modal="true" aria-labelledby="${titleId}" novalidate><div class="modal-header"><h2 id="${titleId}">${escapeHtml(options.title)}</h2></div><div class="modal-body dialog-body">${options.body}</div><p class="dialog-error" role="alert" hidden></p><div class="modal-actions"><button type="button" class="secondary-button" data-dialog-cancel>Cancelar</button><button type="submit" class="${options.danger ? "danger-button solid" : "primary-button"}">${escapeHtml(options.confirmLabel)}</button></div></form>`;
+  root.innerHTML = `<form class="modal dialog" role="alertdialog" aria-modal="true" aria-labelledby="${titleId}" novalidate><div class="modal-header"><h2 id="${titleId}">${escapeHtml(options.title)}</h2></div><div class="modal-body dialog-body">${options.body}</div><p class="dialog-error" id="${titleId}-error" role="alert" hidden></p><div class="modal-actions"><button type="button" class="secondary-button" data-dialog-cancel>Cancelar</button><button type="submit" class="${options.danger ? "danger-button solid" : "primary-button"}">${escapeHtml(options.confirmLabel)}</button></div></form>`;
   const form = root.querySelector<HTMLFormElement>("form")!;
   options.onRender?.(form);
   return new Promise((resolve) => {
@@ -1154,7 +1160,14 @@ function openDialog(options: { title: string; body: string; confirmLabel: string
       const errorBox = form.querySelector<HTMLElement>(".dialog-error")!;
       const invalid = form.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input:invalid, select:invalid, textarea:invalid");
       const message = invalid ? (invalid.dataset.message || invalid.validationMessage) : options.validate?.(form) ?? null;
-      if (message) { errorBox.textContent = message; errorBox.hidden = false; (invalid ?? form.querySelector<HTMLElement>(FOCUSABLE))?.focus(); return; }
+      if (message) {
+        errorBox.textContent = message; errorBox.hidden = false;
+        // O foco vai ao campo com erro (nativo ou marcado pelo validate, ex.: a palavra digitada errada), ligado à mensagem.
+        const field = invalid ?? form.querySelector<HTMLElement>("[aria-invalid=\"true\"]");
+        if (field) { field.setAttribute("aria-invalid", "true"); field.setAttribute("aria-describedby", errorBox.id); }
+        (field ?? form.querySelector<HTMLElement>(FOCUSABLE))?.focus();
+        return;
+      }
       finish(new FormData(form));
     });
   });
@@ -1175,7 +1188,11 @@ function typedConfirmationField(word: string, id: string) {
 
 function typedConfirmationError(form: HTMLFormElement, word: string) {
   const typed = String(new FormData(form).get("confirmation") ?? "").trim().replace(/\s+/gu, " ").toLocaleUpperCase("pt-BR");
-  return typed === word ? null : `Digite ${word} para confirmar.`;
+  const input = form.querySelector<HTMLInputElement>("[name=\"confirmation\"]");
+  // Marca o campo para o openDialog levar o foco a ele (e não ao topo do diálogo).
+  if (typed === word) { input?.removeAttribute("aria-invalid"); return null; }
+  input?.setAttribute("aria-invalid", "true");
+  return `Digite ${word} para confirmar.`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1226,6 +1243,11 @@ function showJobFormModal(jobId?: string) {
       <div class="form-field full"><label for="job-salary-url">Onde o salário foi visto (link)</label><input class="input" id="job-salary-url" name="salary_source_url" type="url" value="${value("salary_source_url")}" /></div>
       <div class="form-field"><label for="job-seniority">Senioridade</label><input class="input" id="job-seniority" name="seniority" value="${job && job.seniority !== "Não informado" ? value("seniority") : ""}" /></div>
       <div class="form-field"><label for="job-deadline">Prazo para se candidatar</label><input class="input" id="job-deadline" name="deadline_at" type="datetime-local" value="${escapeHtml(localFromIso(job?.deadline_at ?? null))}" /></div>
+    </div></details>
+    <details class="form-section" ${job && job.latitude != null && job.longitude != null ? "open" : ""}><summary>Coordenadas no mapa</summary><div class="form-grid">
+      <div class="form-field full"><p class="muted-text" id="job-coordinates-hint">O Radar não geocodifica endereços. Informe latitude e longitude (em graus decimais) para a vaga aparecer no mapa; deixe as duas em branco para tirá-la.</p></div>
+      <div class="form-field"><label for="job-latitude">Latitude</label><input class="input" id="job-latitude" name="latitude" type="number" min="-90" max="90" step="any" value="${job?.latitude ?? ""}" aria-describedby="job-coordinates-hint" placeholder="-23.5505" /></div>
+      <div class="form-field"><label for="job-longitude">Longitude</label><input class="input" id="job-longitude" name="longitude" type="number" min="-180" max="180" step="any" value="${job?.longitude ?? ""}" aria-describedby="job-coordinates-hint" placeholder="-46.6333" /></div>
     </div></details>
     <details class="form-section"><summary>Outros links</summary><div class="form-grid">
       <div class="form-field full"><label for="job-linkedin-url">Post no LinkedIn</label><input class="input" id="job-linkedin-url" name="linkedin_post_url" type="url" value="${value("linkedin_post_url")}" placeholder="https://www.linkedin.com/posts/..." /></div>
@@ -1316,6 +1338,14 @@ async function acceptSourceTerms(id: string) {
 
 async function recordSourceSmokeTest(id: string) {
   const source = sourceById(id);
+  // Conector determinístico: o servidor executa o teste de verdade; o resultado vira a prontidão.
+  if (source.connector) {
+    if (!await confirmDialog(`Testar o acesso a ${source.name}?`, `O Radar consulta agora a API pública de ${source.name} para a primeira empresa ativa da sua lista de conectores. Nenhuma candidatura é enviada.`, "Testar agora")) return;
+    const { result, source: updated } = await fetchJson<{ result: { status: string; items?: number; reason?: string }; source: SourceConfig | null }>(`/api/sources/${encodeURIComponent(id)}/smoke-test`, { method: "POST", body: "{}" });
+    await loadData();
+    toast(result.status === "ready" ? `Teste de ${source.name} passou (${result.items ?? 0} vaga(s) lida(s)). ${readinessOutcome(updated)}` : `O teste de ${source.name} falhou: ${result.reason ?? "erro do conector"}. A fonte fica fora das buscas.`, result.status !== "ready");
+    return;
+  }
   const result = await openDialog({
     title: `Teste de acesso: ${source.name}`,
     confirmLabel: "Registrar resultado",
@@ -1346,7 +1376,16 @@ async function startRound() {
   const data = currentData();
   const ready = data.sourceConfigs.filter((source) => effectiveReadiness(source).status === "ready");
   const ignored = data.sourceConfigs.filter((source) => source.enabled && effectiveReadiness(source).status !== "ready").length;
-  if (!await confirmDialog("Iniciar uma rodada de busca?", `${ready.length ? `Fontes prontas: ${ready.map((source) => source.name).join(", ")}.` : "Nenhuma fonte está pronta agora."}${ignored ? ` ${ignored} fonte(s) ativa(s) sem aceite de termos ou sem teste ficam de fora.` : ""} Os agentes do Hermes fazem a coleta; nenhuma candidatura é enviada.`, "Iniciar rodada")) return;
+  // Sem perfil confirmado ou sem fonte pronta a rodada falharia no servidor: explica e leva ao lugar certo.
+  if (!profileSnapshot(data) || !ready.length) {
+    const noProfile = !profileSnapshot(data);
+    const message = noProfile
+      ? "A rodada usa o perfil profissional confirmado para buscar e pontuar as vagas. Revise e confirme o perfil antes de começar."
+      : `Nenhuma fonte está pronta agora.${ignored ? ` ${ignored} fonte(s) ativa(s) ainda não estão prontas (termos de uso, acesso ou teste).` : ""} Em ${pageMeta.settings.label}, aceite os termos e teste o acesso de cada fonte.`;
+    if (await confirmDialog("Ainda não dá para iniciar a rodada", message, noProfile ? "Revisar perfil" : `Abrir ${pageMeta.settings.label}`)) navigate(noProfile ? "operations" : "settings");
+    return;
+  }
+  if (!await confirmDialog("Iniciar uma rodada de busca?", `Fontes prontas: ${ready.map((source) => source.name).join(", ")}.${ignored ? ` ${ignored} fonte(s) ativa(s) não estão prontas e ficam de fora (o motivo de cada uma está em ${pageMeta.settings.label}).` : ""} Os agentes do Hermes fazem a coleta; nenhuma candidatura é enviada.`, "Iniciar rodada")) return;
   const round = await fetchJson<{ source_ids?: string[] }>("/api/rounds", { method: "POST", body: "{}" });
   await loadData();
   const count = round.source_ids?.length ?? 0;
@@ -1607,11 +1646,14 @@ function jobFormBody(form: HTMLFormElement, get: (name: string) => string, editi
   const salaryMin = number("salary_min");
   const salaryMax = number("salary_max");
   if (salaryMin != null && salaryMax != null && salaryMin > salaryMax) throw new Error("O salário mínimo não pode ser maior que o máximo.");
+  const latitude = number("latitude");
+  const longitude = number("longitude");
+  if ((latitude == null) !== (longitude == null)) throw new Error("Informe latitude e longitude juntas, ou deixe as duas em branco.");
   const jobUrl = get("job_url");
   const body: Record<string, unknown> = {
     title: get("title"), company: get("company"), location: get("location") || "Não informado", country: get("country") || "Brasil",
     work_model: get("work_model"), job_url: jobUrl, linkedin_post_url: get("linkedin_post_url"), application_url: get("application_url"),
-    deadline_at: isoFromLocal(get("deadline_at")), salary_min: salaryMin, salary_max: salaryMax, currency: get("currency") || "BRL",
+    deadline_at: isoFromLocal(get("deadline_at")), salary_min: salaryMin, salary_max: salaryMax, latitude, longitude, currency: get("currency") || "BRL",
     salary_period: get("salary_period") || null, salary_source_url: get("salary_source_url"), seniority: get("seniority") || "Não informado",
     description: get("description"), requirements: get("requirements"), responsibilities: get("responsibilities"), benefits: get("benefits"), additional_information: get("additional_information")
   };
@@ -1943,7 +1985,7 @@ async function generateResume(jobId: string) {
   const snapshot = profileSnapshot(data);
   if (!snapshot) throw new Error(errorMessages.PROFILE_SNAPSHOT_REQUIRED);
   const draft = data.resumes.find((item) => item.job_id === jobId && item.status !== "approved");
-  if (draft && !await confirmDialog("Gerar o currículo de novo?", `O rascunho atual (“${draft.title}”, versão ${draft.version}) será substituído por um novo, montado com o perfil confirmado. Edições feitas nele não passam para o novo.`, "Gerar de novo")) return;
+  if (draft && !await confirmDialog("Gerar o currículo de novo?", `Um novo currículo será montado com o perfil confirmado. O rascunho gerado antes e não editado (“${draft.title}”) é substituído; rascunhos que você editou ou escreveu ficam guardados ao lado do novo.`, "Gerar de novo")) return;
   const factsUsed = snapshot.facts.filter((fact) => fact.state === "confirmed" && !nonResumeFactTypes.has(fact.type)).map((fact) => fact.id);
   if (!factsUsed.length) throw new Error(errorMessages.ATS_CONFIRMED_FACTS_REQUIRED);
   // Perfil vindo de PDF usa o PDF de origem; importado de JSON Resume dispensa currículo-base.

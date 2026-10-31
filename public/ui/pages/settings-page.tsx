@@ -4,7 +4,8 @@
  * Mesmas classes, textos e atributos `data-*` da versão em string: Editar fonte, + Fonte,
  * Restaurar e Abrir agentes continuam tratados pela delegação do #view (`handleAction`).
  * I49-07/§1.3: cada fonte mostra a prontidão CALCULADA (`effectiveReadiness`, a mesma da rodada)
- * com o motivo traduzido, e oferece Aceitar termos (portão humano), Registrar teste de acesso e
+ * com o motivo traduzido, e oferece Aceitar termos (portão humano), Testar acesso (conector,
+ * executado pelo servidor) ou Registrar teste de acesso (fontes de agentes) e
  * Excluir, todos pela delegação do #view (`data-action` + `data-source-id`).
  * Duas peças viraram handlers Preact, porque o DOM agora persiste entre renders:
  *   - os interruptores de privacidade (`data-pref`): antes `bindViewEvents()` religava um
@@ -50,7 +51,9 @@ function SourceRow({ source, sourceTypeLabel, authLabel, readiness, readinessRea
       <td class="source-actions">
         <div class="button-row">
           {source.terms_approved_at ? null : <button type="button" class="primary-button" data-action="accept-source-terms" data-source-id={source.id} aria-label={`Aceitar termos de ${source.name}`}>Aceitar termos…</button>}
-          <button type="button" class="secondary-button" data-action="smoke-source" data-source-id={source.id} aria-label={`Registrar teste de acesso de ${source.name}`}>Registrar teste…</button>
+          {source.connector
+            ? <button type="button" class="secondary-button" data-action="smoke-source" data-source-id={source.id} aria-label={`Testar acesso de ${source.name}`}>Testar acesso…</button>
+            : <button type="button" class="secondary-button" data-action="smoke-source" data-source-id={source.id} aria-label={`Registrar teste de acesso de ${source.name}`}>Registrar teste…</button>}
           <button type="button" class="secondary-button" data-edit-source={source.id} aria-label={`Editar ${source.name}`}>Editar</button>
           <button type="button" class="text-button danger-text" data-action="delete-source" data-source-id={source.id} aria-label={`Excluir ${source.name}`}>Excluir…</button>
         </div>

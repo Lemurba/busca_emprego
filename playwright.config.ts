@@ -19,6 +19,13 @@ const dashboardToken = process.env.RADAR_UI_SMOKE_TOKEN;
 // o executável aqui em vez de baixar o navegador da versão fixada do Playwright.
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
 
+function browser() {
+  return {
+    ...devices["Desktop Chrome"],
+    ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
+  };
+}
+
 export default defineConfig({
   testDir: "test/ui",
   fullyParallel: false,
@@ -35,14 +42,13 @@ export default defineConfig({
     timezoneId: "America/Sao_Paulo",
     trace: "retain-on-failure"
   },
+  // Todas as specs dividem um servidor e um banco. A ordem é explícita (não a ordem alfabética
+  // dos arquivos): o smoke vê o banco como ele o semeia; os fluxos rodam depois e deixam
+  // perfil confirmado, termos aceitos e uma rodada no banco. Spec nova que dependa de banco
+  // limpo entra no projeto "smoke"; a que aceite esse estado, num projeto que dependa de "fluxos".
   projects: [
-    {
-      name: "chromium",
-      use: {
-        ...devices["Desktop Chrome"],
-        ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
-      }
-    }
+    { name: "chromium", testMatch: "smoke.spec.ts", use: browser() },
+    { name: "fluxos", testMatch: "sources-ats-flow.spec.ts", dependencies: ["chromium"], use: browser() }
   ],
   webServer: {
     command: "node dist/src/server.js",

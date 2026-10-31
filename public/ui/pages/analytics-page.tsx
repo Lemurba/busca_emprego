@@ -235,7 +235,7 @@ function MapPanel({ data, filtered, lifecycleMeta, onSelectJob, onMapChange }: {
           {missing.length ? (
             <details class="map-missing">
               <summary>{`${missing.length} ${missing.length === 1 ? "vaga sem coordenadas" : "vagas sem coordenadas"} fora do mapa`}</summary>
-              <p class="map-caption">O Radar não geocodifica endereços automaticamente. Para uma vaga aparecer no mapa, abra a vaga e informe latitude e longitude em “Editar vaga”.</p>
+              <p class="map-caption">O Radar não geocodifica endereços automaticamente. Para uma vaga aparecer no mapa, abra a vaga, clique em “Editar vaga” e informe latitude e longitude em “Coordenadas no mapa” (ou envie as coordenadas pela API de agentes).</p>
               <ul>
                 {missing.slice(0, 20).map((job) => (
                   <li key={job.id}><button type="button" class="text-button" data-detail={job.id}>{`${job.title} · ${job.company}`}</button><small>{job.location}</small></li>

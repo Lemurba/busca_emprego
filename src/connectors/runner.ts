@@ -9,7 +9,7 @@
 //   o limite efetivo é maxRequests;
 // - maxRequests / maxEnrichments: teto de requisições e de páginas lidas na cascata.
 // Os valores vêm das opções, ou do agente publicado indicado em agentId.
-import { db, ingestRoundBatch, listAgentConfigs, recordAgentRun, recordRoundSourceStatus, setSourceReadiness, startSearchRound, listSourceConfigs } from "../db.js";
+import { db, ingestRoundBatch, listAgentConfigs, recordAgentRun, recordRoundSourceStatus, setSourceReadiness, startSearchRound, listSourceConfigs, listSourceConfigsWithReadiness } from "../db.js";
 import { enrichItem, needsEnrichment, type EnrichmentStage } from "./enrichment.js";
 import { ConnectorBudgetError, ConnectorHttpClient, type ConnectorHttpOptions } from "./http.js";
 import { connectorById } from "./sources.js";
@@ -254,4 +254,19 @@ export async function smokeTestConnectors(options: ConnectorRunOptions = {}) {
     }
   }
   return results;
+}
+
+/**
+ * Teste de acesso de UMA fonte pelo painel (POST /api/sources/{id}/smoke-test): só fontes de
+ * conector determinístico têm teste executável aqui (uma chamada à API pública do ATS para a
+ * primeira empresa ativa da lista). Fontes coletadas por agentes no Hermes seguem com o teste
+ * registrado pela pessoa ou pelo agente (POST /api/sources/{id}/readiness).
+ */
+export async function smokeTestSource(sourceId: string, options: ConnectorRunOptions = {}) {
+  const projectId = options.projectId ?? "busca-emprego";
+  if (!listSourceConfigs(projectId).some((source) => source.id === sourceId)) throw new Error("source.not_found");
+  if (!connectorById(sourceId)) throw new Error("source.smoke_test.manual_only");
+  const [result] = await smokeTestConnectors({ ...options, connectors: [sourceId] });
+  if (!result) throw new Error("source.smoke_test.company_required");
+  return { result, source: listSourceConfigsWithReadiness(projectId).find((source) => source.id === sourceId) ?? null };
 }
