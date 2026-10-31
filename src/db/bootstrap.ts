@@ -1,6 +1,6 @@
 // Payload do GET /api/bootstrap: leitura pura do estado do painel (a expiração roda no timer).
 import type { Application } from "../types.js";
-import { db } from "./handle.js";
+import { db, storeProjectId } from "./handle.js";
 import { livenessProofAt, livenessAndRepostSummaries } from "./liveness.js";
 import { evaluateBlockers } from "../blockers.js";
 import { mapMatchScoreRow } from "./scoring.js";
@@ -18,8 +18,8 @@ import { listSearchRounds, listSourceConfigsWithReadiness } from "./sources.js";
 
 // Leitura pura: a expiração roda no job periódico (timer do servidor e scripts/ops/expire-jobs.mjs),
 // e `lifecycle` abaixo já mostra como perdida a vaga com prazo vencido antes do próximo tick.
-export function getBootstrap(projectId = "busca-emprego") {
-  const applications = listApplications();
+export function getBootstrap(projectId = storeProjectId()) {
+  const applications = listApplications(projectId);
   const applicationByJob = new Map<string, Application>();
   for (const application of applications) {
     if (!applicationByJob.has(application.job_id)) applicationByJob.set(application.job_id, application);
@@ -30,7 +30,8 @@ export function getBootstrap(projectId = "busca-emprego") {
   const profileFacts = activeProfile?.facts ?? [];
   // QA-12: sem nota registrada (e sem nota legada), a vaga é "não avaliada", não "0%".
   const scoredJobs = new Set((db.prepare("SELECT DISTINCT job_id FROM match_scores WHERE project_id=?").all(projectId) as { job_id: string }[]).map((row) => row.job_id));
-  const jobs = listJobs().map((job) => {
+  const visibleJobs = listJobs({ projectId });
+  const jobs = visibleJobs.map((job) => {
     const application = applicationByJob.get(job.id);
     const closedByDeadline = deadlinePassed(job.deadline_at, currentTime);
     const isClosed = job.opening_status === "closed" || Boolean(job.closed_at) || closedByDeadline || job.status === "expired";
@@ -47,11 +48,11 @@ export function getBootstrap(projectId = "busca-emprego") {
   return {
     jobs,
     // Rascunhos substituídos por uma nova geração ATS ficam só no histórico.
-    resumes: listResumes().filter((resume) => resume.status !== "superseded").map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
-    baseResumes: listBaseResumes(),
+    resumes: listResumes(projectId).filter((resume) => resume.status !== "superseded").map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
+    baseResumes: listBaseResumes(projectId),
     applications,
     preferences: listPreferenceState(projectId),
-    humanQuestions: listHumanQuestions(),
+    humanQuestions: listHumanQuestions(undefined, projectId),
     profiles: listProfiles(projectId),
     // #49: rascunhos com fatos e pendências para a revisão no dashboard.
     draftProfiles: listDraftProfiles(projectId),
@@ -60,11 +61,11 @@ export function getBootstrap(projectId = "busca-emprego") {
     possibleDuplicates: listPossibleDuplicates(projectId),
     recentDuplicateDecisions: listRecentDuplicateDecisions(projectId),
     matchScores: (db.prepare("SELECT job_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at FROM match_scores WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[]).map(mapMatchScoreRow),
-    companies: listCompanies(),
-    agentRuns: listAgentRuns(),
+    companies: listCompanies(projectId, visibleJobs),
+    agentRuns: listAgentRuns(projectId),
     agentConfigs: listAgentConfigs(projectId),
     sourceConfigs: listSourceConfigsWithReadiness(projectId),
-    enrichmentEvents: listJobEnrichmentEvents(),
+    enrichmentEvents: listJobEnrichmentEvents(undefined, projectId),
     archivedJobs: listArchivedJobs(projectId),
     suppressedJobs,
     timezone: radarTimeZone(),

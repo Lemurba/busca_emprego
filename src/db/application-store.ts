@@ -2,15 +2,16 @@
 import { randomUUID } from "node:crypto";
 import type { Application } from "../types.js";
 import { WorkflowError } from "../workflow.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now } from "./util.js";
 import { advanceJobTo } from "./job-workflow.js";
 import { assertJobNotArchived } from "./jobs.js";
 import { mapApplication } from "./mappers.js";
 import { revokeAuthorizationRows } from "./authorizations.js";
 
-export function listApplications(): Application[] {
-  return (db.prepare("SELECT * FROM applications ORDER BY updated_at DESC").all() as Record<string, unknown>[]).map(mapApplication);
+/** Candidaturas das vagas do projeto (TD-06). */
+export function listApplications(projectId = storeProjectId()): Application[] {
+  return (db.prepare("SELECT a.* FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.project_id=? ORDER BY a.updated_at DESC").all(projectId) as Record<string, unknown>[]).map(mapApplication);
 }
 
 /** Uma candidatura pela chave primária (sem varrer a tabela, TD-22). */

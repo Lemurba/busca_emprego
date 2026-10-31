@@ -103,7 +103,7 @@ export function insertAgentVersion(db: DatabaseSync, agentId: string, version: n
 }
 
 /** Valida e grava um agente novo (config + versão publicada + auditoria). Devolve o id criado. */
-export function insertAgentConfig(db: DatabaseSync, input: Record<string, unknown>, actor: string, projectId = "busca-emprego"): string {
+export function insertAgentConfig(db: DatabaseSync, input: Record<string, unknown>, actor: string, projectId: string): string {
   const values = validateAgentConfigInput({
     ...input,
     prompt: String(input.prompt ?? "").trim() || DEFAULT_AGENT_PROMPT,

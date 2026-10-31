@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Job } from "../types.js";
 import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, companyKey, extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { jobDedupKey, jobDescriptionHash } from "./dedup-keys.js";
 import { idFor, now, parseObject } from "./util.js";
 import { normalizeJobRequirements } from "../blockers.js";
@@ -255,14 +255,14 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
  * Cada item revisto vira nova ocorrência da vaga canônica.
  */
 export function ingestSourceItems(sourceId: string, items: unknown[], options: { projectId?: string; agentId?: string | null } = {}) {
-  const projectId = options.projectId ?? "busca-emprego";
+  const projectId = options.projectId ?? storeProjectId();
   const { items: validated } = validateSourceBatch(sourceId, { source_id: sourceId, items });
   const fuzzyIndex = buildFuzzyIndex(projectId);
   const batchFuzzyIndex: FuzzyIndex = new Map();
   return tx(() => validated.map((item) => ingestSourceItem(item, { projectId, sourceId, roundId: null, agentId: options.agentId ?? null, fuzzyIndex, batchFuzzyIndex })));
 }
 
-export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = "busca-emprego", agentId: string | null = null) {
+export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = storeProjectId(), agentId: string | null = null) {
   const round = getRound(roundId, projectId);
   if (!round) throw new Error("round.not_found");
   const roundSource = (round.sources as Record<string, unknown>[]).find((source) => source.source_id === sourceId);
@@ -315,11 +315,11 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   });
 }
 
-export function listJobOccurrences(jobId?: string, projectId = "busca-emprego") {
+export function listJobOccurrences(jobId?: string, projectId = storeProjectId()) {
   return jobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND job_id=? ORDER BY observed_at DESC").all(projectId, jobId) : db.prepare("SELECT * FROM job_occurrences WHERE project_id=? ORDER BY observed_at DESC").all(projectId);
 }
 
-export function listPossibleDuplicates(projectId = "busca-emprego", status = "pending") {
+export function listPossibleDuplicates(projectId = storeProjectId(), status = "pending") {
   return db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status=? ORDER BY created_at DESC").all(projectId, status);
 }
 
@@ -331,14 +331,14 @@ export function listPossibleDuplicates(projectId = "busca-emprego", status = "pe
 export const DUPLICATE_UNDO_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Decisões dentro do prazo de desfazer, com o limite de cada uma (`undo_until`). */
-export function listRecentDuplicateDecisions(projectId = "busca-emprego", reference = Date.now()) {
+export function listRecentDuplicateDecisions(projectId = storeProjectId(), reference = Date.now()) {
   const since = new Date(reference - DUPLICATE_UNDO_WINDOW_MS).toISOString();
   return (db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status<>'pending' AND reviewed_at>=? ORDER BY reviewed_at DESC LIMIT 50").all(projectId, since) as Record<string, unknown>[])
     .map((row) => ({ ...row, undo_until: new Date(Date.parse(String(row.reviewed_at)) + DUPLICATE_UNDO_WINDOW_MS).toISOString() }));
 }
 
 /** Desfaz a decisão (mesclar, distintas ou dispensar) dentro do prazo: a suspeita volta para a fila. */
-export function undoPossibleDuplicate(id: string, actor = "user", reference = Date.now(), projectId = "busca-emprego") {
+export function undoPossibleDuplicate(id: string, actor = "user", reference = Date.now(), projectId = storeProjectId()) {
   const row = db.prepare("SELECT status,reviewed_at FROM possible_duplicates WHERE id=? AND project_id=?").get(id, projectId) as { status: string; reviewed_at: string | null } | undefined;
   if (!row) throw new Error("possible_duplicate.not_found");
   if (row.status === "pending") throw new Error("possible_duplicate.not_resolved");
@@ -349,7 +349,7 @@ export function undoPossibleDuplicate(id: string, actor = "user", reference = Da
   return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
 }
 
-export function resolvePossibleDuplicate(id: string, status: "merged" | "distinct" | "dismissed", actor = "user", projectId = "busca-emprego") {
+export function resolvePossibleDuplicate(id: string, status: "merged" | "distinct" | "dismissed", actor = "user", projectId = storeProjectId()) {
   if (!["merged", "distinct", "dismissed"].includes(status)) throw new Error("possible_duplicate.status.invalid");
   const timestamp = now();
   const result = db.prepare("UPDATE possible_duplicates SET status=?,reviewed_at=?,reviewed_by=? WHERE id=? AND project_id=? AND status='pending'").run(status, timestamp, actor, id, projectId);

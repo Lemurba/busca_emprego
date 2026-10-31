@@ -5,7 +5,7 @@ import type { CompanySummary, Job, JobStatus } from "../types.js";
 import { WorkflowError } from "../workflow.js";
 import { deadlinePassed as isDeadlinePassed, isIsoDeadline, resolveTimeZone } from "../deadline.js";
 import { DomainValidationError, canonicalizeJobUrl, validateCoordinates, validateSalary } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { jobDedupKey, jobDescriptionHash } from "./dedup-keys.js";
 import { idFor, now, parseJsonArray, parseObject } from "./util.js";
 import { insertLivenessCheck, listJobsDueForLiveness, recordSightingRepost, storeFingerprintAndDetectReposts } from "./liveness.js";
@@ -21,13 +21,13 @@ import { revokeAuthorizationRows, withdrawPendingAuthorizations } from "./author
  * includeArchived (deduplicação) devolve todas as vagas, ocultadas inclusive; includeSuppressed
  * inclui só as ocultadas.
  */
-export function listJobs(options: { includeArchived?: boolean; includeSuppressed?: boolean } = {}): Job[] {
-  const where = options.includeArchived ? "" : (options.includeSuppressed ? "WHERE archived_at IS NULL" : "WHERE archived_at IS NULL AND suppressed=0");
-  return (db.prepare(`SELECT * FROM jobs ${where} ORDER BY match_score DESC, updated_at DESC`).all() as Record<string, unknown>[]).map(mapJob);
+export function listJobs(options: { includeArchived?: boolean; includeSuppressed?: boolean; projectId?: string } = {}): Job[] {
+  const visibility = options.includeArchived ? "" : (options.includeSuppressed ? " AND archived_at IS NULL" : " AND archived_at IS NULL AND suppressed=0");
+  return (db.prepare(`SELECT * FROM jobs WHERE project_id=?${visibility} ORDER BY match_score DESC, updated_at DESC`).all(options.projectId ?? storeProjectId()) as Record<string, unknown>[]).map(mapJob);
 }
 
 /** Vagas ocultadas por regras ativas, com o motivo (regra) de cada uma: a visão "Ocultadas" do painel. */
-export function listSuppressedJobs(projectId = "busca-emprego") {
+export function listSuppressedJobs(projectId = storeProjectId()) {
   const rules = new Map((db.prepare("SELECT id,match_json,reason,state FROM preference_rules WHERE project_id=?").all(projectId) as Record<string, unknown>[])
     .map((rule) => [String(rule.id), { id: String(rule.id), reason: String(rule.reason ?? ""), state: String(rule.state), match_json: parseObject(rule.match_json) }]));
   return (db.prepare("SELECT id,title,company,location,source,suppressed_rule_ids,updated_at FROM jobs WHERE suppressed=1 AND archived_at IS NULL AND project_id=? ORDER BY updated_at DESC").all(projectId) as Record<string, unknown>[])
@@ -38,7 +38,7 @@ export function listSuppressedJobs(projectId = "busca-emprego") {
 }
 
 /** Todas as vagas excluídas do projeto: a lista de Configurações é o único caminho para restaurá-las. */
-export function listArchivedJobs(projectId = "busca-emprego") {
+export function listArchivedJobs(projectId = storeProjectId()) {
   return db.prepare("SELECT id,title,company,location,source,archived_at,archived_reason FROM jobs WHERE archived_at IS NOT NULL AND project_id=? ORDER BY archived_at DESC").all(projectId);
 }
 
@@ -52,15 +52,15 @@ export function listFieldProvenance(jobId: string) {
   return { evidence, conflicts };
 }
 
-export function listJobEnrichmentEvents(jobId?: string) {
+export function listJobEnrichmentEvents(jobId?: string, projectId = storeProjectId()) {
   return jobId
     ? db.prepare("SELECT * FROM job_enrichment_events WHERE job_id=? ORDER BY created_at DESC").all(jobId)
-    : db.prepare("SELECT * FROM job_enrichment_events ORDER BY created_at DESC LIMIT 200").all();
+    : db.prepare("SELECT e.* FROM job_enrichment_events e JOIN jobs j ON j.id=e.job_id WHERE j.project_id=? ORDER BY e.created_at DESC LIMIT 200").all(projectId);
 }
 
-export function listCompanies(): CompanySummary[] {
+export function listCompanies(projectId = storeProjectId(), jobs: Job[] = listJobs({ projectId })): CompanySummary[] {
   const companies = new Map<string, { jobs: number; salaries: number[]; locations: Set<string>; sources: Set<string> }>();
-  for (const job of listJobs()) {
+  for (const job of jobs) {
     const company = companies.get(job.company) ?? { jobs: 0, salaries: [], locations: new Set<string>(), sources: new Set<string>() };
     company.jobs += 1;
     if (job.salary_min != null) company.salaries.push(job.salary_min);
@@ -217,7 +217,7 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
     }
     const rawInput = input as unknown as Record<string, unknown>;
     db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
-      .run(String(rawInput.project_id ?? currentJob?.project_id ?? "busca-emprego"), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
+      .run(String(rawInput.project_id ?? currentJob?.project_id ?? storeProjectId()), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
     if ("requirements_json" in rawInput) db.prepare("UPDATE jobs SET requirements_json=? WHERE id=?").run((rawInput.requirements_json ?? null) as string | null, id);
     db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?").run(jobDedupKey(job.title, job.company, job.location), jobDescriptionHash(job.description, job.company), id);
     audit("job", id, currentJob ? "updated" : "discovered", { changed_fields: Object.keys(input) });
@@ -233,7 +233,7 @@ const nonCreatableJobFields = new Set(["id", "match_score", "project_id", "statu
  * Cadastro manual de vaga (dashboard/API). Diferente de `upsertJob` (ingestão), nunca
  * sobrescreve uma vaga existente nem uma arquivada, e grava proveniência humana dos campos.
  */
-export function createJobFromHuman(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
+export function createJobFromHuman(input: Record<string, unknown>, actor = "user", projectId = storeProjectId()) {
   const forbidden = Object.keys(input).filter((key) => nonCreatableJobFields.has(key));
   if (forbidden.length) throw new Error(`job.field.not_editable:${forbidden.join(",")}`);
   const job = input as Partial<Job> & { source: string; title: string; company: string; source_url: string };
@@ -281,7 +281,7 @@ export function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: s
   const job = getJob(jobId);
   if (!job) return;
   const timestamp = now();
-  const evidence = addEvidence({ projectId: job.project_id ?? "busca-emprego", jobId, field: "opening_status", value: "closed", sourceUrl, confidence, origin: "agent", runId: roundId, sourceId });
+  const evidence = addEvidence({ projectId: job.project_id ?? storeProjectId(), jobId, field: "opening_status", value: "closed", sourceUrl, confidence, origin: "agent", runId: roundId, sourceId });
   selectEvidence(jobId, "opening_status", evidence.id, sourceId, evidence.timestamp);
   db.prepare("UPDATE field_conflicts SET status='resolved_candidate',reviewed_by=?,reviewed_at=? WHERE job_id=? AND field_path='opening_status' AND status='pending'").run(`source:${sourceId}`, timestamp, jobId);
   db.prepare("UPDATE jobs SET opening_status='closed',opening_checked_at=?,closed_at=COALESCE(closed_at,?),updated_at=? WHERE id=?").run(checkedAt ?? timestamp, timestamp, timestamp, jobId);
@@ -327,7 +327,7 @@ export async function checkJobLivenessNow(jobId: string, deps: LivenessDeps = {}
 }
 
 export function listJobsForLivenessCheck(options: { nowMs?: number; limit?: number; projectId?: string } = {}) {
-  return listJobsDueForLiveness(db, options);
+  return listJobsDueForLiveness(db, { ...options, projectId: options.projectId ?? storeProjectId() });
 }
 
 /** Impressão digital da descrição + repostagem; chamado uma vez por vaga nova na ingestão. */
@@ -393,7 +393,7 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
     if ("source_url" in normalized) db.prepare("UPDATE jobs SET canonical_url=? WHERE id=?").run(String(normalized.source_url ?? ""), id);
     if ((options.origin ?? "human") === "human") {
       for (const [field, value] of entries) {
-        const evidence = addEvidence({ projectId: options.projectId ?? "busca-emprego", jobId: id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
+        const evidence = addEvidence({ projectId: options.projectId ?? storeProjectId(), jobId: id, field, value, sourceUrl: "human://dashboard", confidence: 1, origin: "human" });
         selectEvidence(id, field, evidence.id, options.actor ?? "user", evidence.timestamp);
       }
     }
@@ -425,7 +425,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
   const timestamp = now();
   tx(() => {
     db.prepare("UPDATE jobs SET decision = ?, decision_at = ?, updated_at = ? WHERE id = ?").run(decision, timestamp, timestamp, id);
-    const projectId = job.project_id ?? "busca-emprego";
+    const projectId = job.project_id ?? storeProjectId();
     if (decision === "interested") {
       const resume = db.prepare("SELECT status FROM resumes WHERE job_id = ? AND status <> 'superseded' ORDER BY updated_at DESC LIMIT 1").get(id) as { status: string } | undefined;
       const approved = db.prepare("SELECT id FROM resumes WHERE job_id = ? AND status = 'approved' LIMIT 1").get(id);

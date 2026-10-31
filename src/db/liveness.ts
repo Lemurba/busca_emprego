@@ -40,7 +40,7 @@ export interface LivenessDueJob {
  * "sem interesse". Interesse/candidatura em preparo: a cada 6 h; demais: a cada 48 h.
  * Prioritárias primeiro, depois as verificadas há mais tempo (nunca verificadas no topo).
  */
-export function listJobsDueForLiveness(db: DatabaseSync, options: { nowMs?: number; limit?: number; projectId?: string } = {}): LivenessDueJob[] {
+export function listJobsDueForLiveness(db: DatabaseSync, options: { nowMs?: number; limit?: number; projectId: string }): LivenessDueJob[] {
   const nowMs = options.nowMs ?? Date.now();
   const limit = Math.max(1, Math.min(500, Math.floor(options.limit ?? 50)));
   const rows = db.prepare(`
@@ -51,7 +51,7 @@ export function listJobsDueForLiveness(db: DatabaseSync, options: { nowMs?: numb
       AND j.opening_status <> 'closed' AND j.closed_at IS NULL
       AND j.decision NOT IN ('not_interested', 'applied', 'expired')
       AND j.status NOT IN (${FINISHED_STATUSES.map(() => "?").join(",")})
-  `).all(options.projectId ?? "busca-emprego", ...FINISHED_STATUSES) as Array<Record<string, unknown>>;
+  `).all(options.projectId, ...FINISHED_STATUSES) as Array<Record<string, unknown>>;
   return rows
     .map((row) => ({
       id: String(row.id), title: String(row.title), company: String(row.company),
@@ -164,7 +164,7 @@ export function storeFingerprintAndDetectReposts(db: DatabaseSync, jobId: string
   const fingerprint = descriptionFingerprint(fingerprintText(row as never));
   db.prepare("UPDATE jobs SET description_fingerprint=? WHERE id=?").run(fingerprint, jobId);
   if (!fingerprint) return [];
-  const candidates = (db.prepare("SELECT id,title,company,description_fingerprint,posted_at,created_at FROM jobs WHERE project_id=? AND id<>? AND description_fingerprint IS NOT NULL").all(String(row.project_id ?? "busca-emprego"), jobId) as Array<Record<string, unknown>>).map(candidateFrom);
+  const candidates = (db.prepare("SELECT id,title,company,description_fingerprint,posted_at,created_at FROM jobs WHERE project_id=? AND id<>? AND description_fingerprint IS NOT NULL").all(String(row.project_id), jobId) as Array<Record<string, unknown>>).map(candidateFrom);
   const matches = findReposts({ ...candidateFrom(row), fingerprint }, candidates);
   const timestamp = now();
   const insert = db.prepare("INSERT OR IGNORE INTO job_reposts (id,job_id,previous_job_id,previous_posted_at,reposted_at,detected_at,similarity) VALUES (?,?,?,?,?,?,?)");

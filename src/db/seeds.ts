@@ -61,6 +61,16 @@ function activateDefaultSources(db: DatabaseSync, projectId: string): boolean {
 }
 
 /**
+ * Linhas anteriores ao escopo por projeto (0007) sem vínculo (currículo-base nunca usado por um
+ * perfil, execução sem agente) passam a ser do projeto da instalação. Idempotente e barato: só
+ * toca linhas com project_id NULL. Não grava marcador (roda a cada abertura).
+ */
+function adoptUnscopedRows(db: DatabaseSync, projectId: string) {
+  db.prepare("UPDATE base_resumes SET project_id=? WHERE project_id IS NULL").run(projectId);
+  db.prepare("UPDATE agent_runs SET project_id=? WHERE project_id IS NULL").run(projectId);
+}
+
+/**
  * Aplica as sementes ainda pendentes do projeto numa transação (concorrência: o segundo processo
  * espera o lock e relê os marcadores) e devolve os marcadores gravados agora.
  */
@@ -69,6 +79,7 @@ export function seedProject(db: DatabaseSync, projectId: string): string[] {
     const applied: string[] = [];
     if (installDefaultAgents(db, projectId)) applied.push(seedMarker("install_default_agent_presets_v1", projectId));
     if (activateDefaultSources(db, projectId)) applied.push(seedMarker("activate_default_sources_v2", projectId));
+    adoptUnscopedRows(db, projectId);
     return applied;
   });
 }

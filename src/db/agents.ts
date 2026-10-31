@@ -4,20 +4,30 @@ import { randomUUID } from "node:crypto";
 import type { AgentConfig, AgentRun } from "../types.js";
 import { DomainError } from "../errors.js";
 import { canonicalizeJobUrl } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./agent-configs.js";
 import { now } from "./util.js";
 import { mapAgentConfig } from "./mappers.js";
 
-export function listAgentRuns(): AgentRun[] {
-  return (db.prepare("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 20").all() as Record<string, unknown>[]).map((row) => ({ ...row, config_snapshot: row.config_snapshot ? JSON.parse(String(row.config_snapshot)) : null } as unknown as AgentRun));
+function mapAgentRun(row: Record<string, unknown>): AgentRun {
+  return { ...row, config_snapshot: row.config_snapshot ? JSON.parse(String(row.config_snapshot)) : null } as unknown as AgentRun;
 }
 
-export function listAgentConfigs(projectId = "busca-emprego"): AgentConfig[] {
+/** Últimas execuções de agente do projeto (TD-06). */
+export function listAgentRuns(projectId = storeProjectId(), limit = 20): AgentRun[] {
+  return (db.prepare("SELECT * FROM agent_runs WHERE project_id=? ORDER BY started_at DESC LIMIT ?").all(projectId, limit) as Record<string, unknown>[]).map(mapAgentRun);
+}
+
+function getAgentRun(id: string): AgentRun | null {
+  const row = db.prepare("SELECT * FROM agent_runs WHERE id=?").get(id) as Record<string, unknown> | undefined;
+  return row ? mapAgentRun(row) : null;
+}
+
+export function listAgentConfigs(projectId = storeProjectId()): AgentConfig[] {
   return (db.prepare("SELECT * FROM agent_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapAgentConfig);
 }
 
-export function listAgentConfigVersions(agentId: string, projectId = "busca-emprego") {
+export function listAgentConfigVersions(agentId: string, projectId = storeProjectId()) {
   if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new Error("agent.not_found");
   // Versão com proposta registrada (`prompt_proposed`) é do coordenador, qualquer que seja o ator.
   const proposed = new Set((db.prepare("SELECT payload FROM audit_events WHERE entity_type='agent_config' AND entity_id=? AND event_type='prompt_proposed'").all(agentId) as { payload: string }[])
@@ -96,7 +106,7 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     versionId = versionId ?? existing.config_version_id;
   }
   if (agentId && (!versionId || !snapshot)) {
-    const agent = listAgentConfigs().find((item) => item.id === agentId);
+    const agent = db.prepare("SELECT published_version_id FROM agent_configs WHERE id=?").get(agentId) as { published_version_id: string | null } | undefined;
     if (!agent?.published_version_id) throw new Error("agent.published_version.required");
     const version = db.prepare("SELECT id,config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { id: string; config_json: string } | undefined;
     if (!version) throw new Error("agent.published_version.required");
@@ -124,27 +134,29 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     else if (input.latency_ms != null && input.latency_ms > limits.timeoutSeconds * 1000) violation = { code: "agent.run.timeout", detail: `tempo limite de ${limits.timeoutSeconds} s excedido` };
     if (violation) { status = "failed"; message = `${RUN_LIMIT_PREFIX}: ${violation.detail}.`; }
   }
+  // A execução é do projeto do agente; sem agente (registro avulso), do projeto aberto.
+  const projectId = (agentId ? (db.prepare("SELECT project_id FROM agent_configs WHERE id=?").get(agentId) as { project_id: string } | undefined)?.project_id : undefined) ?? storeProjectId();
   db.prepare(`INSERT INTO agent_runs
-    (id,agent_name,status,started_at,finished_at,found_count,message,agent_id,config_version_id,config_snapshot,model_effective,input_tokens,output_tokens,cost,latency_ms)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    (id,agent_name,status,started_at,finished_at,found_count,message,agent_id,config_version_id,config_snapshot,model_effective,input_tokens,output_tokens,cost,latency_ms,project_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET agent_name=excluded.agent_name,status=excluded.status,finished_at=excluded.finished_at,found_count=excluded.found_count,
       message=excluded.message,agent_id=COALESCE(excluded.agent_id,agent_runs.agent_id),config_version_id=COALESCE(excluded.config_version_id,agent_runs.config_version_id),
       config_snapshot=COALESCE(excluded.config_snapshot,agent_runs.config_snapshot),model_effective=COALESCE(excluded.model_effective,agent_runs.model_effective),
       input_tokens=COALESCE(excluded.input_tokens,agent_runs.input_tokens),output_tokens=COALESCE(excluded.output_tokens,agent_runs.output_tokens),
-      cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, status, startedAt, input.finished_at ?? (status === "running" ? null : timestamp), input.found_count ?? 0, message, input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
+      cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, status, startedAt, input.finished_at ?? (status === "running" ? null : timestamp), input.found_count ?? 0, message, input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null, projectId);
   audit("agent_run", id, "status", { status, found_count: input.found_count ?? 0, agent_id: agentId, config_version_id: versionId });
   if (violation) {
     audit("agent_run", id, "limit_exceeded", { limit: violation.code, agent_id: agentId, detail: violation.detail });
     throw new Error(violation.code);
   }
-  return listAgentRuns().find((run) => run.id === id) ?? null;
+  return getAgentRun(id);
 }
 
 /**
  * Execução registrada por um agente (MCP, #10): o nome vem da configuração e uma execução
  * pertence ao agente que a abriu — outro agente não a reescreve.
  */
-export function recordAgentRunForAgent(agentId: string, input: Omit<Partial<AgentRun>, "agent_id" | "agent_name"> & { status: AgentRun["status"] }, projectId = "busca-emprego") {
+export function recordAgentRunForAgent(agentId: string, input: Omit<Partial<AgentRun>, "agent_id" | "agent_name"> & { status: AgentRun["status"] }, projectId = storeProjectId()) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   if (!agent) throw new Error("agent.not_found");
   const existing = input.id ? db.prepare("SELECT agent_id FROM agent_runs WHERE id=?").get(input.id) as { agent_id: string | null } | undefined : undefined;
@@ -180,14 +192,14 @@ export function publishedAgentConfig(agentId: string, projectId: string): AgentC
 }
 
 /** Agente vivo e o snapshot publicado (null sem publicação): base do portão de agente do MCP (#10). */
-export function getPublishedAgentConfig(agentId: string, projectId = "busca-emprego") {
+export function getPublishedAgentConfig(agentId: string, projectId = storeProjectId()) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   if (!agent) throw new Error("agent.not_found");
   return { agent, published: publishedAgentConfig(agentId, projectId) };
 }
 
 /** Snapshots publicados de todos os agentes do projeto (o que listagem e execuções enxergam). */
-export function listPublishedAgentConfigs(projectId = "busca-emprego"): AgentConfig[] {
+export function listPublishedAgentConfigs(projectId = storeProjectId()): AgentConfig[] {
   return listAgentConfigs(projectId).flatMap((agent) => {
     const published = publishedAgentConfig(agent.id, projectId);
     // Pausa imediata (linha viva desativada) também vale para o snapshot.
@@ -195,7 +207,7 @@ export function listPublishedAgentConfigs(projectId = "busca-emprego"): AgentCon
   });
 }
 
-export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
+export function createAgentConfig(input: Record<string, unknown>, actor: string, projectId = storeProjectId()) {
   const id = insertAgentConfig(db, input, actor, projectId);
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
 }
@@ -206,7 +218,7 @@ export function createAgentConfig(input: Record<string, unknown>, actor: string,
  * só muda em publicação/rollback (issue #11): rascunho nunca governa listagem nem execução.
  * Única exceção: pausar (`enabled: false`) vale na hora, porque só reduz permissões.
  */
-export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
+export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = storeProjectId()) {
   const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
   if (!current) throw new Error("agent.not_found");
   const merged = { ...current, ...input } as unknown as Record<string, unknown>;
@@ -244,7 +256,7 @@ export function agentVersionOrigin(createdBy: string): "human" | "coordinator" |
  * com a origem e, para propostas do coordenador, a justificativa registrada. É o que o dashboard
  * mostra antes de publicar; o `checksum` devolvido é o que a publicação confere.
  */
-export function getAgentVersionDiff(agentId: string, versionId: string, projectId = "busca-emprego") {
+export function getAgentVersionDiff(agentId: string, versionId: string, projectId = storeProjectId()) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
   if (!agent || !version) throw new Error("agent.version.not_found");
@@ -276,7 +288,7 @@ export function getAgentVersionDiff(agentId: string, versionId: string, projectI
  * publicação é recusada. Rascunho que não nasceu de uma edição humana (proposta do coordenador
  * ou do token de serviço) só é publicado com esse checksum, isto é, depois de o diff ser visto.
  */
-export function publishAgentConfigVersion(agentId: string, versionId: string, actor: string, projectId = "busca-emprego", reviewedChecksum?: string) {
+export function publishAgentConfigVersion(agentId: string, versionId: string, actor: string, projectId = storeProjectId(), reviewedChecksum?: string) {
   return publishAgentVersion(agentId, versionId, actor, projectId, reviewedChecksum, false);
 }
 
@@ -303,7 +315,7 @@ function publishAgentVersion(agentId: string, versionId: string, actor: string, 
   return listAgentConfigs(projectId).find((item) => item.id === agentId) ?? null;
 }
 
-export function rollbackAgentConfig(agentId: string, targetVersionId: string, actor: string, projectId = "busca-emprego") {
+export function rollbackAgentConfig(agentId: string, targetVersionId: string, actor: string, projectId = storeProjectId()) {
   const target = db.prepare("SELECT config_json,version,published_at FROM agent_config_versions WHERE id=? AND agent_id=?").get(targetVersionId, agentId) as { config_json: string; version: number; published_at: string | null } | undefined;
   if (!target || !listAgentConfigs(projectId).some((item) => item.id === agentId)) throw new Error("agent.version.not_found");
   // Restaurar só vale para versões que já estiveram publicadas: rascunho (ou proposta descartada)
@@ -320,7 +332,7 @@ export function rollbackAgentConfig(agentId: string, targetVersionId: string, ac
 }
 
 /** Proposta de prompt do coordenador: vira rascunho com origem `coordinator`; só vale após revisão e publicação humana. */
-export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = "busca-emprego", actor = "hermes-memory") {
+export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = storeProjectId(), actor = "hermes-memory") {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   if (!agent) throw new Error("agent.not_found");
   if (!agent.hermes_prompt_optimization) throw new Error("agent.prompt_optimization.disabled");
@@ -335,7 +347,7 @@ export function proposeAgentPrompt(agentId: string, input: Record<string, unknow
 }
 
 /** Descarta um rascunho (ex.: proposta do coordenador recusada): a versão fica `retired` no histórico. */
-export function discardAgentDraft(agentId: string, versionId: string, actor: string, projectId = "busca-emprego") {
+export function discardAgentDraft(agentId: string, versionId: string, actor: string, projectId = storeProjectId()) {
   const result = db.prepare("UPDATE agent_config_versions SET status='retired' WHERE id=? AND agent_id=? AND status='draft' AND agent_id IN (SELECT id FROM agent_configs WHERE project_id=?)").run(versionId, agentId, projectId);
   if (!result.changes) throw new Error("agent.version.not_draft");
   db.prepare("UPDATE agent_configs SET draft_version_id=NULL,updated_at=? WHERE id=? AND draft_version_id=?").run(now(), agentId, versionId);
@@ -343,7 +355,7 @@ export function discardAgentDraft(agentId: string, versionId: string, actor: str
   return listAgentConfigs(projectId).find((item) => item.id === agentId) ?? null;
 }
 
-export function deleteAgentConfig(id: string, actor: string, projectId = "busca-emprego") {
+export function deleteAgentConfig(id: string, actor: string, projectId = storeProjectId()) {
   if (db.prepare("SELECT id FROM job_enrichment_events WHERE agent_id=? LIMIT 1").get(id)) throw new Error("agent.has_history.disable_instead");
   const result = db.prepare("DELETE FROM agent_configs WHERE id=? AND project_id=?").run(id, projectId);
   if (!result.changes) throw new Error("agent.not_found");

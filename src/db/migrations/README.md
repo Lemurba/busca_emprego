@@ -35,8 +35,9 @@ SQLite (#10): fala só com a API do dashboard.
 | `0004` | #33   | vaga viva / repost    |
 | `0005` | #34   | score / blockers      |
 | `0006` | #35   | JSON Resume           |
+| `0007` | TD-06 | projeto em currículos-base e execuções |
 
-Outras mudanças usam o próximo número livre a partir de `0007`. Como as branches podem ser
+Outras mudanças usam o próximo número livre a partir de `0008`. Como as branches podem ser
 integradas fora de ordem (ex.: `0004` em produção antes de `0002`), uma migração reservada não
 pode depender de outra reservada; ela só pode assumir o baseline e as que já estavam em `main`
 quando foi escrita. O runner aplica qualquer id ausente, mesmo que um id maior já esteja aplicado.

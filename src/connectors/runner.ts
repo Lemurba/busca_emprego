@@ -9,7 +9,7 @@
 //   o limite efetivo é maxRequests;
 // - maxRequests / maxEnrichments: teto de requisições e de páginas lidas na cascata.
 // Os valores vêm das opções, ou do agente publicado indicado em agentId.
-import { db, ingestRoundBatch, listAgentConfigs, recordAgentRun, recordRoundSourceStatus, setSourceReadiness, startSearchRound, listSourceConfigs, listSourceConfigsWithReadiness } from "../db.js";
+import { getPublishedAgentConfig, ingestRoundBatch, listAgentConfigs, recordAgentRun, recordRoundSourceStatus, setSourceReadiness, startSearchRound, listSourceConfigs, listSourceConfigsWithReadiness, storeProjectId } from "../db.js";
 import { enrichItem, needsEnrichment, type EnrichmentStage } from "./enrichment.js";
 import { ConnectorBudgetError, ConnectorHttpClient, type ConnectorHttpOptions } from "./http.js";
 import { connectorById } from "./sources.js";
@@ -50,17 +50,15 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
 }
 
 function publishedAgentLimits(agentId: string, projectId: string) {
-  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
-  if (!agent?.published_version_id) throw new Error("agent.published_version.required");
-  const version = db.prepare("SELECT config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { config_json: string } | undefined;
-  if (!version) throw new Error("agent.published_version.required");
-  const config = JSON.parse(version.config_json) as Record<string, unknown>;
-  if (config.enabled === false) throw new Error("agent.disabled");
-  return { concurrency: config.concurrency, timeout_seconds: config.timeout_seconds, max_cost_per_run: config.max_cost_per_run };
+  // TD-11: a mesma versão publicada que o MCP e as execuções de agente enxergam (getPublishedAgentConfig).
+  const published = listAgentConfigs(projectId).some((item) => item.id === agentId) ? getPublishedAgentConfig(agentId, projectId).published : null;
+  if (!published) throw new Error("agent.published_version.required");
+  if (!published.enabled) throw new Error("agent.disabled");
+  return { concurrency: published.concurrency, timeout_seconds: published.timeout_seconds, max_cost_per_run: published.max_cost_per_run };
 }
 
 export function resolveConnectorLimits(options: ConnectorRunOptions = {}): ConnectorRunLimits {
-  const agent = options.agentId ? publishedAgentLimits(options.agentId, options.projectId ?? "busca-emprego") : {} as Record<string, unknown>;
+  const agent = options.agentId ? publishedAgentLimits(options.agentId, options.projectId ?? storeProjectId()) : {} as Record<string, unknown>;
   const env = process.env;
   const maxCost = options.maxCostPerRun !== undefined ? options.maxCostPerRun : agent.max_cost_per_run != null ? Number(agent.max_cost_per_run) : env.RADAR_CONNECTOR_MAX_COST ? Number(env.RADAR_CONNECTOR_MAX_COST) : null;
   if (maxCost != null && (!Number.isFinite(maxCost) || maxCost < 0)) throw new Error("connector.max_cost.invalid");
@@ -100,7 +98,7 @@ function interleave<T>(groups: T[][]): T[] {
 type SourceState = { companies: ConnectorCompany[]; items: ConnectorItem[]; succeeded: number; failed: number; errors: string[] };
 
 export async function runConnectorCollection(options: ConnectorRunOptions = {}) {
-  const projectId = options.projectId ?? "busca-emprego";
+  const projectId = options.projectId ?? storeProjectId();
   const actor = options.actor ?? "connector-cron";
   const startedAt = Date.now();
   const limits = resolveConnectorLimits(options);
@@ -232,7 +230,7 @@ export async function runConnectorCollection(options: ConnectorRunOptions = {}) 
  * como pronta ou não. A aprovação dos termos de uso continua manual no painel.
  */
 export async function smokeTestConnectors(options: ConnectorRunOptions = {}) {
-  const projectId = options.projectId ?? "busca-emprego";
+  const projectId = options.projectId ?? storeProjectId();
   const actor = options.actor ?? "connector-smoke";
   const client = new ConnectorHttpClient({ maxRequests: 50, ...options.http });
   const sources = new Set(listSourceConfigs(projectId).map((source) => source.id));
@@ -263,7 +261,7 @@ export async function smokeTestConnectors(options: ConnectorRunOptions = {}) {
  * registrado pela pessoa ou pelo agente (POST /api/sources/{id}/readiness).
  */
 export async function smokeTestSource(sourceId: string, options: ConnectorRunOptions = {}) {
-  const projectId = options.projectId ?? "busca-emprego";
+  const projectId = options.projectId ?? storeProjectId();
   if (!listSourceConfigs(projectId).some((source) => source.id === sourceId)) throw new Error("source.not_found");
   if (!connectorById(sourceId)) throw new Error("source.smoke_test.manual_only");
   const [result] = await smokeTestConnectors({ ...options, connectors: [sourceId] });

@@ -1,7 +1,7 @@
 // Nota de aderência (match_scores), sempre ligada a um snapshot de perfil confirmado (I49-09).
 import { randomUUID } from "node:crypto";
 import { calculateMatchScore, applyPreferenceAdjustment } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { now } from "./util.js";
 import { mapMatchScoreRow, normalizeCriterionInputs } from "./scoring.js";
 import { feedbackFacetValue } from "./preferences.js";
@@ -40,12 +40,12 @@ function resolveScoreSnapshot(snapshotId: string | null | undefined, roundId: st
 export function recordMatchScore(input: { job_id: string; scores: Record<string, unknown>; profile_snapshot_id?: string | null; round_id?: string | null; evidence?: unknown[]; strengths?: string[]; gaps?: string[]; project_id?: string }) {
   const job = getJob(input.job_id);
   if (!job) throw new Error("job.not_found");
-  const projectId = input.project_id ?? "busca-emprego";
+  const projectId = input.project_id ?? storeProjectId();
   const { snapshotId, roundId, active } = resolveScoreSnapshot(input.profile_snapshot_id, input.round_id, projectId);
   // Critério = número (legado, "estimado") ou {value, basis, evidence}; a conta não muda.
   const criteria = normalizeCriterionInputs(input.scores);
   const result = calculateMatchScore(criteria.values as never);
-  const values = db.prepare("SELECT facet_key,normalized_value,positive_count,negative_count FROM preference_values WHERE project_id=?").all(input.project_id ?? "busca-emprego") as { facet_key: string; normalized_value: string; positive_count: number; negative_count: number }[];
+  const values = db.prepare("SELECT facet_key,normalized_value,positive_count,negative_count FROM preference_values WHERE project_id=?").all(projectId) as { facet_key: string; normalized_value: string; positive_count: number; negative_count: number }[];
   const matchingValues = values.filter((value) => {
     const candidate = feedbackFacetValue(job, value.facet_key);
     return candidate !== "unknown" && candidate !== "feedback-specified" && candidate === value.normalized_value;

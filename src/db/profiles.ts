@@ -2,18 +2,18 @@
 // novas versões. Revisar e confirmar são decisões humanas (atores `service:`/`agent:` recusados).
 import { randomUUID } from "node:crypto";
 import { compactProfileContext } from "../pdf-profile.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now, parseObject } from "./util.js";
 import { buildProfileJsonResume, jsonResumeImportFacts } from "./profile-import.js";
 import { BLOCKER_FACT_TYPES, normalizeBlockerFact } from "../blockers.js";
 import { getBaseResumeExtraction, proposeBaseResumeFacts } from "./base-resumes.js";
 import { mapProfile, mapProfileFact } from "./mappers.js";
 
-export function listProfiles(projectId = "busca-emprego") {
+export function listProfiles(projectId = storeProjectId()) {
   return (db.prepare("SELECT * FROM professional_profiles WHERE project_id=? ORDER BY version DESC").all(projectId) as Record<string, unknown>[]).map(mapProfile);
 }
 
-export function getProfile(id: string, projectId = "busca-emprego"): any {
+export function getProfile(id: string, projectId = storeProjectId()): any {
   const row = db.prepare("SELECT * FROM professional_profiles WHERE id=? AND project_id=?").get(id, projectId) as Record<string, unknown> | undefined;
   return row ? mapProfile(row) : null;
 }
@@ -50,7 +50,7 @@ function isAutomatedActor(actor: string): boolean {
   return /^(?:service|agent):/u.test(actor);
 }
 
-export function addProfileFact(profileId: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
+export function addProfileFact(profileId: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()) {
   const profile = getProfile(profileId, projectId);
   if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const type = String(input.type ?? "").trim();
@@ -120,7 +120,7 @@ function assertNoOpenDraft(projectId: string) {
 }
 
 /** `options.source` não vem do corpo da requisição: só o import de JSON Resume cria perfis `json_resume`. */
-export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego", options: { source?: string } = {}): any {
+export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = storeProjectId(), options: { source?: string } = {}): any {
   const baseResumeId = input.base_resume_id == null || input.base_resume_id === "" ? null : String(input.base_resume_id);
   if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new Error("base_resume.not_found");
   const source = options.source ?? "pdf";
@@ -148,7 +148,7 @@ export function createProfessionalProfile(input: Record<string, unknown>, actor 
  * PDF, e perfil + fatos entram numa única transação (createProfessionalProfile), então um fato
  * inválido não deixa rascunho vazio para trás.
  */
-export async function createProfileFromBaseResume(baseResumeId: string, actor = "user", projectId = "busca-emprego"): Promise<any> {
+export async function createProfileFromBaseResume(baseResumeId: string, actor = "user", projectId = storeProjectId()): Promise<any> {
   const base = getBaseResumeExtraction(baseResumeId);
   assertNoOpenDraft(projectId);
   const facts = await proposeBaseResumeFacts(baseResumeId);
@@ -161,7 +161,7 @@ export async function createProfileFromBaseResume(baseResumeId: string, actor = 
  * sem PDF-base). Cada trecho vira um fato `origin: "import"`, `state: "proposed"`, com o JSON
  * Pointer de origem como evidência; o usuário revisa e confirma pelo fluxo normal (snapshot).
  */
-export function importJsonResumeProfile(doc: unknown, actor = "user", projectId = "busca-emprego"): any {
+export function importJsonResumeProfile(doc: unknown, actor = "user", projectId = storeProjectId()): any {
   const facts = jsonResumeImportFacts(doc);
   assertNoOpenDraft(projectId);
   const profile = createProfessionalProfile({ facts }, actor, projectId, { source: "json_resume" });
@@ -170,13 +170,13 @@ export function importJsonResumeProfile(doc: unknown, actor = "user", projectId 
 }
 
 /** JSON Resume v1 do perfil-mestre: só fatos confirmados. */
-export function exportProfileJsonResume(id: string, projectId = "busca-emprego") {
+export function exportProfileJsonResume(id: string, projectId = storeProjectId()) {
   const profile = getProfile(id, projectId);
   if (!profile) throw new Error("profile.not_found");
   return { profile, document: buildProfileJsonResume(db, profile) };
 }
 
-export function updateProfessionalProfile(id: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): any {
+export function updateProfessionalProfile(id: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()): any {
   const profile = getProfile(id, projectId);
   if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const context = input.context === undefined && input.context_json === undefined ? profile.context : parseObject(input.context ?? input.context_json);
@@ -196,7 +196,7 @@ function profileContext(profile: ReturnType<typeof getProfile>, facts: ReturnTyp
   return compactProfileContext({ ...base, confirmed_facts: confirmedFacts });
 }
 
-export function confirmProfessionalProfile(id: string, actor = "user", projectId = "busca-emprego"): any {
+export function confirmProfessionalProfile(id: string, actor = "user", projectId = storeProjectId()): any {
   if (isAutomatedActor(actor)) throw new Error("profile.confirm.forbidden");
   const profile = getProfile(id, projectId);
   if (profile?.status !== "draft") throw new Error("profile.draft_required");
@@ -247,7 +247,7 @@ function isInterviewProposal(fact: { id?: unknown; profile_id?: unknown; type?: 
  * pendentes (mesma regra que bloqueia `confirmProfessionalProfile`) e os eliminatórios ainda sem
  * fato confirmado (perguntas da entrevista). Mais recente primeiro.
  */
-export function listDraftProfiles(projectId = "busca-emprego"): any[] {
+export function listDraftProfiles(projectId = storeProjectId()): any[] {
   return listProfiles(projectId).filter((profile) => profile.status === "draft").map((profile) => {
     const facts = listProfileFacts(profile.id);
     const confirmedTypes = new Set(facts.filter((fact) => fact.state === "confirmed").map((fact) => String(fact.type)));
@@ -266,7 +266,7 @@ export function listDraftProfiles(projectId = "busca-emprego"): any[] {
  * do rascunho que têm evidência. Os sem evidência e as respostas da entrevista repassadas por
  * agente/serviço ficam pendentes (a pessoa revisa uma a uma) e voltam em `skipped`. Decisão humana: atores automatizados recebem `profile.fact.review.forbidden`.
  */
-export function reviewAllProfileFacts(profileId: string, state: string, actor = "user", projectId = "busca-emprego") {
+export function reviewAllProfileFacts(profileId: string, state: string, actor = "user", projectId = storeProjectId()) {
   if (isAutomatedActor(actor)) throw new Error("profile.fact.review.forbidden");
   if (state !== "confirmed") throw new Error("profile.fact.state.invalid");
   const profile = getProfile(profileId, projectId);
@@ -288,7 +288,7 @@ export function reviewAllProfileFacts(profileId: string, state: string, actor = 
  * Só rascunho: perfil confirmado ou aposentado tem snapshot e histórico e nunca é apagado.
  * Fatos e entrevistas saem junto (ON DELETE CASCADE).
  */
-export function deleteDraftProfile(id: string, actor = "user", projectId = "busca-emprego") {
+export function deleteDraftProfile(id: string, actor = "user", projectId = storeProjectId()) {
   if (isAutomatedActor(actor)) throw new Error("profile.delete.forbidden");
   const profile = getProfile(id, projectId);
   if (!profile) throw new Error("profile.not_found");
@@ -327,7 +327,7 @@ export function cloneProfileAsDraft(source: any, actor: string, projectId: strin
  * (`profile.draft_required`); para mudar algo, a pessoa abre um rascunho N+1 a partir dele, revisa
  * e confirma de novo. Só um rascunho por vez (`profile.draft_exists`).
  */
-export function createProfileNewVersion(id: string, actor = "user", projectId = "busca-emprego"): any {
+export function createProfileNewVersion(id: string, actor = "user", projectId = storeProjectId()): any {
   if (isAutomatedActor(actor)) throw new Error("profile.new_version.forbidden");
   const profile = getProfile(id, projectId);
   if (!profile) throw new Error("profile.not_found");
@@ -341,14 +341,14 @@ export function createProfileNewVersion(id: string, actor = "user", projectId = 
   return { ...getProfile(draftId, projectId), facts: listProfileFacts(draftId) };
 }
 
-export function getActiveProfile(projectId = "busca-emprego"): any {
+export function getActiveProfile(projectId = storeProjectId()): any {
   const row = db.prepare("SELECT * FROM professional_profiles WHERE project_id=? AND status='confirmed' ORDER BY version DESC LIMIT 1").get(projectId) as Record<string, unknown> | undefined;
   if (!row) return null;
   const profile = mapProfile(row);
   return { ...profile, facts: listProfileFacts(profile.id), snapshot: getLatestProfileSnapshot(profile.id) };
 }
 
-export function getLatestProfileSnapshot(profileId?: string, projectId = "busca-emprego"): any {
+export function getLatestProfileSnapshot(profileId?: string, projectId = storeProjectId()): any {
   const row = profileId
     ? db.prepare("SELECT * FROM profile_snapshots WHERE profile_id=? ORDER BY profile_version DESC,created_at DESC LIMIT 1").get(profileId)
     : db.prepare(`SELECT s.* FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id WHERE p.project_id=? AND p.status='confirmed' ORDER BY s.profile_version DESC LIMIT 1`).get(projectId);
@@ -357,7 +357,7 @@ export function getLatestProfileSnapshot(profileId?: string, projectId = "busca-
   return { ...result, facts: JSON.parse(String(result.facts_json ?? "[]")), context: JSON.parse(String(result.context_json ?? "{}")) };
 }
 
-export function answerProfileInterview(profileId: string, questionKey: string, answer: unknown, actor = "user", projectId = "busca-emprego") {
+export function answerProfileInterview(profileId: string, questionKey: string, answer: unknown, actor = "user", projectId = storeProjectId()) {
   const profile = getProfile(profileId, projectId);
   if (profile?.status !== "draft") throw new Error("profile.draft_required");
   const key = questionKey.trim();

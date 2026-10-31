@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import type { JobStatus, Resume } from "../types.js";
 import { normalizeComparableText } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now } from "./util.js";
 import { buildResumeJsonResume } from "./profile-import.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./resume-facts.js";
@@ -19,8 +19,14 @@ import { getBaseResumeExtraction } from "./base-resumes.js";
 import { mapResume } from "./mappers.js";
 import { revokeAuthorizationRows } from "./authorizations.js";
 
-export function listResumes(): Resume[] {
-  return (db.prepare("SELECT * FROM resumes ORDER BY updated_at DESC").all() as Record<string, unknown>[]).map(mapResume);
+/** Projeto do currículo: o da vaga dele (resumes não tem coluna própria). */
+function resumeProjectId(resume: Resume): string {
+  return (db.prepare("SELECT project_id FROM jobs WHERE id=?").get(resume.job_id) as { project_id: string } | undefined)?.project_id ?? storeProjectId();
+}
+
+/** Currículos adaptados das vagas do projeto (TD-06). */
+export function listResumes(projectId = storeProjectId()): Resume[] {
+  return (db.prepare("SELECT r.* FROM resumes r JOIN jobs j ON j.id=r.job_id WHERE j.project_id=? ORDER BY r.updated_at DESC").all(projectId) as Record<string, unknown>[]).map(mapResume);
 }
 
 export function getResume(id: string): Resume | null {
@@ -29,7 +35,7 @@ export function getResume(id: string): Resume | null {
 }
 
 /** JSON Resume v1 de um currículo adaptado (somente leitura; não altera o currículo). */
-export function exportResumeJsonResume(id: string, projectId = "busca-emprego") {
+export function exportResumeJsonResume(id: string, projectId = storeProjectId()) {
   const resume = getResume(id);
   if (!resume) throw new Error("resume.not_found");
   return { resume, document: buildResumeJsonResume(db, resume, projectId) };
@@ -56,7 +62,7 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
     refreshResumeFactChecks(id);
     audit("resume", id, "created", { job_id: input.job_id, base_resume_id: baseResumeId, status: "draft", actor: eventActor });
   });
-  return listResumes().find((resume) => resume.id === id) ?? null;
+  return getResume(id);
 }
 
 export function updateResume(id: string, patch: Partial<Resume>) {
@@ -65,8 +71,8 @@ export function updateResume(id: string, patch: Partial<Resume>) {
   const allowed = ["base_resume_id", "title", "status", "content", "keywords", "changes"] as const;
   if (patch.base_resume_id && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(patch.base_resume_id)) throw new Error("Currículo-base selecionado não encontrado.");
   const entries = allowed.flatMap((key) => patch[key] === undefined ? [] : [[key, Array.isArray(patch[key]) ? JSON.stringify(patch[key]) : patch[key]] as [string, unknown]]);
-  if (!entries.length) return listResumes().find((resume) => resume.id === id) ?? null;
-  const current = listResumes().find((resume) => resume.id === id);
+  if (!entries.length) return getResume(id);
+  const current = getResume(id);
   if (current?.status === "superseded") throw new Error("resume.superseded");
   if (current?.status === "approved" && patch.status !== "review") throw new Error("Retorne o currículo aprovado para revisão antes de alterá-lo.");
   if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
@@ -89,7 +95,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
     refreshResumeFactChecks(id);
     audit("resume", id, "updated", { changed_fields: Object.keys(patch) });
   });
-  return listResumes().find((resume) => resume.id === id) ?? null;
+  return getResume(id);
 }
 
 /** Recalcula a cobertura de requisitos (determinística) do currículo contra a vaga. */
@@ -97,7 +103,7 @@ function refreshResumeCoverage(id: string) {
   const resume = getResume(id);
   const job = resume ? getJob(resume.job_id) : null;
   if (!resume || !job) return;
-  const seniority = (getActiveProfile(job.project_id ?? "busca-emprego")?.facts ?? []).find((fact: Record<string, unknown>) => fact.type === "seniority" && fact.state === "confirmed")?.value;
+  const seniority = (getActiveProfile(job.project_id)?.facts ?? []).find((fact: Record<string, unknown>) => fact.type === "seniority" && fact.state === "confirmed")?.value;
   storeResumeCoverage(db, id, computeCoverage({ job, resume, profileSeniority: seniority == null ? null : String(seniority) }));
 }
 
@@ -105,7 +111,7 @@ function refreshResumeCoverage(id: string) {
 function resumeContactFacts(resume: Resume): Record<string, unknown>[] {
   const snapshot = atsSnapshotForResume(resume);
   if (snapshot) return snapshotFacts(snapshot);
-  return getActiveProfile()?.facts ?? [];
+  return getActiveProfile(resumeProjectId(resume))?.facts ?? [];
 }
 
 /** Teste de leitura do PDF: gera, extrai e compara; o resultado fica gravado no currículo. */
@@ -165,13 +171,13 @@ function atsSnapshotForResume(resume: Resume) {
 // ---------------------------------------------------------------------------
 
 /** Snapshot usado na checagem: o do currículo ou, se ele não tiver, o do perfil ativo. */
-function factCheckSnapshot(resume: Resume, projectId = "busca-emprego") {
+function factCheckSnapshot(resume: Resume, projectId = storeProjectId()) {
   return atsSnapshotForResume(resume) ?? (db.prepare(`SELECT s.* FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id
     WHERE p.project_id=? AND p.status='confirmed' ORDER BY s.profile_version DESC, s.created_at DESC LIMIT 1`).get(projectId) as Record<string, unknown> | undefined) ?? null;
 }
 
 function factCorpusValues(resume: Resume): unknown[] {
-  const snapshot = factCheckSnapshot(resume);
+  const snapshot = factCheckSnapshot(resume, resumeProjectId(resume));
   return snapshot ? snapshotFacts(snapshot).filter((fact) => fact.state === "confirmed").map((fact) => fact.value) : [];
 }
 
@@ -223,7 +229,7 @@ function createProfileVersionWithFact(fact: { type: string; value: string; evide
 export type ResumeFactAction = { action: "confirm" | "correct" | "remove"; replacement?: string | null };
 
 /** Resolve uma afirmação da versão atual: confirmar (perfil N+1), corrigir ou remover o trecho. */
-export function resolveResumeFact(resumeId: string, claimId: string, input: ResumeFactAction, actor = "user", projectId = "busca-emprego") {
+export function resolveResumeFact(resumeId: string, claimId: string, input: ResumeFactAction, actor = "user", projectId = storeProjectId()) {
   const resume = getResume(resumeId);
   if (!resume) throw new Error("resume.not_found");
   if (resume.status === "approved") throw new Error("resume.fact.approved_locked");
@@ -335,7 +341,7 @@ function writerContentIntact(resume: Resume) {
   return used.length > 0 && resume.content.trim() === factualAtsContent(used).trim();
 }
 
-export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = "busca-emprego") {
+export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = storeProjectId()) {
   const job = getJob(String(input.job_id ?? ""));
   if (!job) throw new Error("job.not_found");
   assertJobNotArchived(job.id);
@@ -386,7 +392,7 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
 
 export function approveResume(id: string, confirmation: string, options: { override_reason?: string; actor?: string } = {}) {
   if (confirmation !== "APROVO") throw new Error("Digite APROVO para confirmar a revisão deste currículo.");
-  const resume = listResumes().find((item) => item.id === id);
+  const resume = getResume(id);
   if (!resume) throw new Error("Currículo não encontrado.");
   if (resume.status === "superseded") throw new Error("resume.superseded");
   // #31: afirmação sem fato confirmado bloqueia sempre; override_reason não vale para esta regra.
@@ -409,5 +415,5 @@ export function approveResume(id: string, confirmation: string, options: { overr
     advanceJobTo(resume.job_id, application ? "ready_to_apply" : "resume_approved", { actor: options.actor ?? "user", data: { reason: "resume_approved" } });
     audit("resume", id, "approved", { job_id: resume.job_id, approved_at: timestamp, review_status: getResume(id)?.review_status ?? resume.review_status, actor: options.actor ?? "user" });
   });
-  return listResumes().find((item) => item.id === id) ?? null;
+  return getResume(id);
 }

@@ -1,7 +1,7 @@
 // Feedback "Não tenho interesse", regras de supressão, contadores de preferência e desfazer decisões.
 import type { Job } from "../types.js";
 import { compareTotalRejection } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now, parseJsonArray, parseObject } from "./util.js";
 import { repostBucketFor } from "./liveness.js";
 import { ACTIVE_STATUSES, applyWorkflowCommand } from "./job-workflow.js";
@@ -15,7 +15,7 @@ function activeSuppressionRules(projectId: string) {
   return db.prepare("SELECT id,match_json FROM preference_rules WHERE project_id=? AND state='active'").all(projectId) as SuppressionRule[];
 }
 
-function activeSuppression(job: Job, projectId = "busca-emprego", rules: SuppressionRule[] = activeSuppressionRules(projectId)) {
+function activeSuppression(job: Job, projectId = storeProjectId(), rules: SuppressionRule[] = activeSuppressionRules(projectId)) {
   const matched: string[] = [];
   for (const rule of rules) {
     const match = parseObject(rule.match_json);
@@ -50,7 +50,7 @@ export function applySuppression(jobId: string): string[] {
   const job = mapJob(row);
   const previous = job.suppressed ? parseJsonArray(row.suppressed_rule_ids) : [];
   if (row.suppression_dismissed_at || (job.decision && job.decision !== "pending")) return previous;
-  const projectId = job.project_id ?? "busca-emprego";
+  const projectId = job.project_id ?? storeProjectId();
   const matched = activeSuppression(job, projectId);
   const added = matched.filter((ruleId) => !previous.includes(ruleId));
   if (!added.length) return previous;
@@ -91,7 +91,7 @@ export function feedbackFacetValue(job: Job, detailKey: string) {
   return normalizedFacet(values[detailKey]);
 }
 
-export function recordJobFeedback(jobId: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego") {
+export function recordJobFeedback(jobId: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()) {
   assertJobNotArchived(jobId);
   const mode = String(input.mode ?? "");
   const reasonCode = String(input.reason_code ?? "");
@@ -148,7 +148,7 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   });
 }
 
-export function listPreferenceState(projectId = "busca-emprego") {
+export function listPreferenceState(projectId = storeProjectId()) {
   const rules = (db.prepare("SELECT * FROM preference_rules WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[])
     .map((row) => ({ ...row, source_feedback_ids: parseJsonArray(row.source_feedback_ids), match_json: JSON.parse(String(row.match_json)) }));
   // Contagem viva (o que de fato está oculto agora); suppressed_count guarda o total histórico.
@@ -221,7 +221,7 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   assertJobNotArchived(id);
   const job = getJob(id);
   if (!job) throw new Error("job.not_found");
-  const projectId = job.project_id ?? "busca-emprego";
+  const projectId = job.project_id ?? storeProjectId();
   const timestamp = now();
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
   const locked = activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status);

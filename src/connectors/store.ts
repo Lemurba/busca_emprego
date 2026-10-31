@@ -1,8 +1,8 @@
 // Persistência dos conectores determinísticos: lista curada de empresas por conector (editável no
 // painel) e fila de vagas que a cascata não conseguiu enriquecer sem LLM. Tabelas próprias, no
 // mesmo SQLite, separadas do esquema central (criadas pelo baseline em src/db/migrations/).
-import { createHash } from "node:crypto";
-import { db } from "../db.js";
+import { db, storeProjectId } from "../db/handle.js";
+import { idFor, insertAuditEvent, now } from "../db/util.js";
 import { connectorById, CONNECTORS } from "./sources.js";
 
 // As tabelas connector_companies e connector_enrichment_queue são criadas pela migração
@@ -23,11 +23,9 @@ export interface ConnectorCompany {
   updated_at: string;
 }
 
-const now = () => new Date().toISOString();
-const idFor = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 18);
-
+// TD-11: id, data e auditoria vêm dos utilitários do núcleo (src/db/util.ts), não de cópias locais.
 function audit(entityId: string, eventType: string, payload: unknown) {
-  db.prepare("INSERT INTO audit_events (entity_type, entity_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)").run("connector_company", entityId, eventType, JSON.stringify(payload), now());
+  insertAuditEvent(db, "connector_company", entityId, eventType, payload);
 }
 
 function mapCompany(row: Record<string, unknown>): ConnectorCompany {
@@ -43,7 +41,7 @@ export function listConnectorDefinitions() {
   return CONNECTORS.map((connector) => ({ id: connector.id, name: connector.name, slug_hint: connector.slugHint }));
 }
 
-export function listConnectorCompanies(projectId = "busca-emprego", options: { enabledOnly?: boolean } = {}): ConnectorCompany[] {
+export function listConnectorCompanies(projectId = storeProjectId(), options: { enabledOnly?: boolean } = {}): ConnectorCompany[] {
   const rows = db.prepare(`SELECT * FROM connector_companies WHERE project_id=? ${options.enabledOnly ? "AND enabled=1" : ""} ORDER BY connector, name COLLATE NOCASE`).all(projectId) as Record<string, unknown>[];
   return rows.map(mapCompany);
 }
@@ -63,7 +61,7 @@ function validateCompany(input: Record<string, unknown>) {
   return { connector, slug, name, query, enabled: input.enabled === false ? 0 : 1 };
 }
 
-export function upsertConnectorCompany(input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): ConnectorCompany {
+export function upsertConnectorCompany(input: Record<string, unknown>, actor = "user", projectId = storeProjectId()): ConnectorCompany {
   const value = validateCompany(input);
   const id = idFor(`connector-company|${projectId}|${value.connector}|${value.slug}`);
   const timestamp = now();
@@ -75,12 +73,12 @@ export function upsertConnectorCompany(input: Record<string, unknown>, actor = "
   return getConnectorCompany(id, projectId)!;
 }
 
-export function getConnectorCompany(id: string, projectId = "busca-emprego"): ConnectorCompany | null {
+export function getConnectorCompany(id: string, projectId = storeProjectId()): ConnectorCompany | null {
   const row = db.prepare("SELECT * FROM connector_companies WHERE id=? AND project_id=?").get(id, projectId) as Record<string, unknown> | undefined;
   return row ? mapCompany(row) : null;
 }
 
-export function updateConnectorCompany(id: string, input: Record<string, unknown>, actor = "user", projectId = "busca-emprego"): ConnectorCompany {
+export function updateConnectorCompany(id: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()): ConnectorCompany {
   const current = getConnectorCompany(id, projectId);
   if (!current) throw new Error("connector.company.not_found");
   // Conector e slug formam a identidade; mudar um deles é outra empresa.
@@ -90,7 +88,7 @@ export function updateConnectorCompany(id: string, input: Record<string, unknown
   return getConnectorCompany(id, projectId)!;
 }
 
-export function deleteConnectorCompany(id: string, actor = "user", projectId = "busca-emprego") {
+export function deleteConnectorCompany(id: string, actor = "user", projectId = storeProjectId()) {
   const result = db.prepare("DELETE FROM connector_companies WHERE id=? AND project_id=?").run(id, projectId);
   if (!result.changes) throw new Error("connector.company.not_found");
   audit(id, "deleted", { actor, project_id: projectId });
@@ -120,7 +118,7 @@ export function queueLlmEnrichment(input: { projectId: string; sourceId: string;
  * coberta por idx_occurrences_identity) e, quando ela não acha, pela URL observada na
  * ocorrência ou gravada na vaga.
  */
-export function listLlmEnrichmentQueue(projectId = "busca-emprego", status = "pending", limit = 500) {
+export function listLlmEnrichmentQueue(projectId = storeProjectId(), status = "pending", limit = 500) {
   // COALESCE para no primeiro valor não nulo: a busca por URL só roda quando a identidade falha.
   return db.prepare(`SELECT q.*, COALESCE(
       (SELECT o.job_id FROM job_occurrences o WHERE q.source_job_id IS NOT NULL AND o.source_id=q.source_id AND o.source_job_id=q.source_job_id AND o.project_id=q.project_id ORDER BY o.observed_at DESC LIMIT 1),
@@ -133,12 +131,12 @@ export function listLlmEnrichmentQueue(projectId = "busca-emprego", status = "pe
  * Fecha um item pendente da fila (`done` = enriquecido, `dismissed` = descartado). Item já
  * tratado não é reaberto nem trocado de estado; a decisão vai para a auditoria com o ator.
  */
-export function resolveLlmEnrichment(id: string, status: "done" | "dismissed", projectId = "busca-emprego", actor = "system") {
+export function resolveLlmEnrichment(id: string, status: "done" | "dismissed", projectId = storeProjectId(), actor = "system") {
   if (status !== "done" && status !== "dismissed") throw new Error("connector.enrichment.status.invalid");
   const exists = db.prepare("SELECT status FROM connector_enrichment_queue WHERE id=? AND project_id=?").get(id, projectId) as { status: string } | undefined;
   if (!exists) throw new Error("connector.enrichment.not_found");
   const result = db.prepare("UPDATE connector_enrichment_queue SET status=?,updated_at=? WHERE id=? AND project_id=? AND status='pending'").run(status, now(), id, projectId);
   if (!result.changes) throw new Error("connector.enrichment.already_resolved");
-  db.prepare("INSERT INTO audit_events (entity_type, entity_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)").run("connector_enrichment", id, "resolved", JSON.stringify({ status, actor }), now());
+  insertAuditEvent(db, "connector_enrichment", id, "resolved", { status, actor });
   return { id, status };
 }

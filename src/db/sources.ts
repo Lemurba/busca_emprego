@@ -1,13 +1,13 @@
 // Fontes (source_configs), prontidão calculada e rodadas de busca (search_rounds/round_sources).
 import type { SourceConfigRecord } from "../types.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now, parseJsonArray, parseObject } from "./util.js";
 import { connectorById } from "../connectors/sources.js";
 import { getActiveProfile } from "./profiles.js";
 import { listAgentConfigs, publishedAgentConfig } from "./agents.js";
 import { mapSourceConfig } from "./mappers.js";
 
-export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigRecord[] {
+export function listSourceConfigs(projectId = storeProjectId()): SourceConfigRecord[] {
   return (db.prepare("SELECT * FROM source_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapSourceConfig);
 }
 
@@ -16,7 +16,7 @@ export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigReco
  * `readiness_status` é só o último teste gravado: sem termos aceitos ou com a fonte pausada,
  * a rodada descarta a fonte mesmo que o teste tenha passado.
  */
-export function listSourceConfigsWithReadiness(projectId = "busca-emprego") {
+export function listSourceConfigsWithReadiness(projectId = storeProjectId()) {
   // `connector`: fonte de conector determinístico (src/connectors), que o painel testa de verdade.
   return listSourceConfigs(projectId).map((source) => ({ ...source, effectiveReadiness: sourceReadiness(source), connector: Boolean(connectorById(source.id)) }));
 }
@@ -30,7 +30,7 @@ function sourceReadiness(source: SourceConfigRecord): { status: string; reason: 
   return { status: source.readiness_status ?? "configured", reason: reason || "source.smoke_test.required" };
 }
 
-export function setSourceReadiness(id: string, status: string, reason = "", actor = "system", projectId = "busca-emprego") {
+export function setSourceReadiness(id: string, status: string, reason = "", actor = "system", projectId = storeProjectId()) {
   if (!["configured", "not_ready", "ready", "paused", "blocked"].includes(status)) throw new Error("source.readiness.invalid");
   const timestamp = now();
   const result = db.prepare("UPDATE source_configs SET readiness_status=?,readiness_reason=?,last_smoke_test_at=?,updated_at=? WHERE id=? AND project_id=?")
@@ -40,7 +40,7 @@ export function setSourceReadiness(id: string, status: string, reason = "", acto
   return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
 
-export function approveSourceTerms(id: string, actor = "user", projectId = "busca-emprego") {
+export function approveSourceTerms(id: string, actor = "user", projectId = storeProjectId()) {
   const timestamp = now();
   const result = db.prepare("UPDATE source_configs SET terms_approved_at=?,terms_approved_by=?,updated_at=? WHERE id=? AND project_id=?")
     .run(timestamp, actor, timestamp, id, projectId);
@@ -49,7 +49,7 @@ export function approveSourceTerms(id: string, actor = "user", projectId = "busc
   return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
 
-export function getRound(roundId: string, projectId = "busca-emprego"): any {
+export function getRound(roundId: string, projectId = storeProjectId()): any {
   const row = db.prepare("SELECT * FROM search_rounds WHERE id=? AND project_id=?").get(roundId, projectId) as Record<string, unknown> | undefined;
   if (!row) return null;
   return {
@@ -61,13 +61,13 @@ export function getRound(roundId: string, projectId = "busca-emprego"): any {
   };
 }
 
-export function listSearchRounds(projectId = "busca-emprego"): any[] {
+export function listSearchRounds(projectId = storeProjectId()): any[] {
   return (db.prepare("SELECT * FROM search_rounds WHERE project_id=? ORDER BY started_at DESC").all(projectId) as Record<string, unknown>[]).map((row) => ({
     ...row, source_ids: parseJsonArray(row.source_ids), config_snapshot: parseObject(row.config_snapshot), counters: parseObject(row.counters_json)
   }));
 }
 
-export function startSearchRound(input: Record<string, unknown> = {}, projectId = "busca-emprego", actor = "user") {
+export function startSearchRound(input: Record<string, unknown> = {}, projectId = storeProjectId(), actor = "user") {
   const profile = getActiveProfile(projectId);
   if (!profile?.snapshot) throw new Error("PROFILE_CONFIRMATION_REQUIRED");
   const configuredSources = listSourceConfigs(projectId).filter((source) => source.enabled);
@@ -105,7 +105,7 @@ export function startSearchRound(input: Record<string, unknown> = {}, projectId 
   return getRound(id, projectId);
 }
 
-export function recordRoundSourceStatus(roundId: string, sourceId: string, status: string, input: Record<string, unknown> = {}, projectId = "busca-emprego") {
+export function recordRoundSourceStatus(roundId: string, sourceId: string, status: string, input: Record<string, unknown> = {}, projectId = storeProjectId()) {
   if (!["running", "completed", "failed", "cancelled", "ready", "not_ready", "paused", "blocked"].includes(status)) throw new Error("round.source.status.invalid");
   const round = getRound(roundId, projectId);
   if (!round) throw new Error("round.not_found");
@@ -146,7 +146,7 @@ function validateSourceConfig(input: Record<string, unknown>) {
   return { id, name, sourceType, domain, authStrategy, secretRef, browserProfileId, enabled: input.enabled === false ? 0 : 1 };
 }
 
-export function upsertSourceConfig(input: Record<string, unknown>, actor: string, projectId = "busca-emprego") {
+export function upsertSourceConfig(input: Record<string, unknown>, actor: string, projectId = storeProjectId()) {
   const value = validateSourceConfig(input);
   const existing = db.prepare("SELECT * FROM source_configs WHERE id=? AND project_id=?").get(value.id, projectId) as Record<string, unknown> | undefined;
   const domainChanged = Boolean(existing && existing.domain !== value.domain);
@@ -166,7 +166,7 @@ export function upsertSourceConfig(input: Record<string, unknown>, actor: string
   return listSourceConfigs(projectId).find((source) => source.id === value.id) ?? null;
 }
 
-export function deleteSourceConfig(id: string, actor: string, projectId = "busca-emprego") {
+export function deleteSourceConfig(id: string, actor: string, projectId = storeProjectId()) {
   if (listAgentConfigs(projectId).some((agent) => agent.source_ids.includes(id))) throw new Error("source.in_use.disable_instead");
   const result = db.prepare("DELETE FROM source_configs WHERE id=? AND project_id=?").run(id, projectId);
   if (!result.changes) throw new Error("source.not_found");

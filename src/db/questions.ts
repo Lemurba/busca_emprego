@@ -1,10 +1,10 @@
 // Perguntas humanas do executor (Telegram/dashboard): criação, entrega e resposta correlacionada.
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now, parseJsonArray } from "./util.js";
 import { abortApplyingJob } from "./job-workflow.js";
 import { assertCurrentAuthorization, currentAuthorization, leaseExpiresAt, revokeAuthorizationRows } from "./authorizations.js";
 import { getApplication } from "./application-store.js";
-import { listResumes } from "./resumes.js";
+import { getResume } from "./resumes.js";
 
 export function createHumanQuestion(applicationId: string, input: Record<string, unknown>) {
   const application = getApplication(applicationId);
@@ -13,7 +13,7 @@ export function createHumanQuestion(applicationId: string, input: Record<string,
   if (application.status !== "in_progress") throw new Error("application.claim.required");
   assertCurrentAuthorization(currentAuthorization(applicationId), "claimed");
   if (db.prepare("SELECT id FROM human_questions WHERE application_id=? AND status IN ('pending','delivered')").get(applicationId)) throw new Error("human_question.already_active");
-  const resume = listResumes().find((item) => item.id === application.resume_id);
+  const resume = getResume(application.resume_id);
   if (!resume || resume.version !== application.authorized_resume_version) throw new Error("application.resume_version.changed");
   const fieldRef = String(input.field_ref ?? "").trim();
   const question = String(input.question ?? "").trim();
@@ -128,9 +128,10 @@ function recordHumanAnswer(row: Record<string, unknown>, input: Record<string, u
   return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
 }
 
-export function listHumanQuestions(applicationId?: string) {
+/** Perguntas das vagas do projeto (TD-06); com `applicationId`, só as dessa candidatura. */
+export function listHumanQuestions(applicationId?: string, projectId = storeProjectId()) {
   const rows = applicationId
-    ? db.prepare("SELECT * FROM human_questions WHERE application_id=? ORDER BY asked_at DESC").all(applicationId)
-    : db.prepare("SELECT * FROM human_questions ORDER BY asked_at DESC").all();
+    ? db.prepare("SELECT q.* FROM human_questions q JOIN jobs j ON j.id=q.job_id WHERE q.application_id=? AND j.project_id=? ORDER BY q.asked_at DESC").all(applicationId, projectId)
+    : db.prepare("SELECT q.* FROM human_questions q JOIN jobs j ON j.id=q.job_id WHERE j.project_id=? ORDER BY q.asked_at DESC").all(projectId);
   return (rows as Record<string, unknown>[]).map((row) => ({ ...row, required: Number(row.required ?? 1) === 1, choices: parseJsonArray(row.choices_json) }));
 }

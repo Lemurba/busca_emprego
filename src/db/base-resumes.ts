@@ -1,12 +1,24 @@
 // Currículos-base em PDF: upload validado, extração de texto, seleção do base e arquivo guardado.
 import type { BaseResume } from "../types.js";
 import { extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256 } from "../pdf-profile.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now } from "./util.js";
 import { mapBaseResume } from "./mappers.js";
 
-export function listBaseResumes(): BaseResume[] {
-  return (db.prepare("SELECT id,title,file_name,mime_type,is_base,sha256,extraction_status,extraction_error,page_count,created_at,updated_at FROM base_resumes ORDER BY is_base DESC, updated_at DESC").all() as Record<string, unknown>[]).map((row) => ({ ...mapBaseResume(row), page_count: Number(row.page_count ?? 0) }));
+const BASE_RESUME_COLUMNS = "id,title,file_name,mime_type,is_base,sha256,extraction_status,extraction_error,page_count,created_at,updated_at";
+
+function mapBaseResumeSummary(row: Record<string, unknown>): BaseResume {
+  return { ...mapBaseResume(row), page_count: Number(row.page_count ?? 0) };
+}
+
+/** Currículos-base do projeto (TD-06), o selecionado como base primeiro. */
+export function listBaseResumes(projectId = storeProjectId()): BaseResume[] {
+  return (db.prepare(`SELECT ${BASE_RESUME_COLUMNS} FROM base_resumes WHERE project_id=? ORDER BY is_base DESC, updated_at DESC`).all(projectId) as Record<string, unknown>[]).map(mapBaseResumeSummary);
+}
+
+function getBaseResumeSummary(id: string): BaseResume | null {
+  const row = db.prepare(`SELECT ${BASE_RESUME_COLUMNS} FROM base_resumes WHERE id=?`).get(id) as Record<string, unknown> | undefined;
+  return row ? mapBaseResumeSummary(row) : null;
 }
 
 export function getBaseResumeExtraction(id: string): any {
@@ -54,12 +66,13 @@ function insertBaseResume(prepared: ReturnType<typeof prepareBaseResume>, extrac
   if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
   const id = idFor(`base-resume|${checksum}`);
   const timestamp = now();
-  const hasBase = Boolean(db.prepare("SELECT id FROM base_resumes WHERE is_base = 1 LIMIT 1").get());
+  const projectId = storeProjectId();
+  const hasBase = Boolean(db.prepare("SELECT id FROM base_resumes WHERE is_base = 1 AND project_id = ? LIMIT 1").get(projectId));
   db.prepare(`INSERT INTO base_resumes
-    (id,title,file_name,mime_type,file_data,file_blob,is_base,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at,created_at,updated_at)
-    VALUES (?,?,?,'application/pdf','',?,?,?,?,?,?,?,?,?,?)`).run(id, title, fileName, bytes, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
+    (id,project_id,title,file_name,mime_type,file_data,file_blob,is_base,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at,created_at,updated_at)
+    VALUES (?,?,?,?,'application/pdf','',?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, title, fileName, bytes, hasBase ? 0 : 1, checksum, extraction.status, extraction.text, extraction.error, extraction.pageCount, timestamp, timestamp, timestamp);
   audit("base_resume", id, "uploaded", { bytes: bytes.length, sha256: checksum, extraction_status: extraction.status, page_count: extraction.pageCount });
-  return listBaseResumes().find((resume) => resume.id === id) ?? null;
+  return getBaseResumeSummary(id);
 }
 
 export function createBaseResume(input: BaseResumeUpload) {
@@ -73,22 +86,25 @@ export async function createBaseResumeAsync(input: BaseResumeUpload) {
   return insertBaseResume(prepared, await extractPdfTextAsync(prepared.bytes));
 }
 
-export function selectBaseResume(id: string) {
-  if (!db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(id)) throw new Error("Currículo-base não encontrado.");
+export function selectBaseResume(id: string, projectId = storeProjectId()) {
+  if (!db.prepare("SELECT id FROM base_resumes WHERE id = ? AND project_id = ?").get(id, projectId)) throw new Error("Currículo-base não encontrado.");
   tx(() => {
-    db.prepare("UPDATE base_resumes SET is_base = 0, updated_at = ?").run(now());
+    db.prepare("UPDATE base_resumes SET is_base = 0, updated_at = ? WHERE project_id = ?").run(now(), projectId);
     db.prepare("UPDATE base_resumes SET is_base = 1, updated_at = ? WHERE id = ?").run(now(), id);
   });
   audit("base_resume", id, "selected", {});
-  return listBaseResumes().find((resume) => resume.id === id) ?? null;
+  return getBaseResumeSummary(id);
 }
 
 export function getBaseResumeFile(id: string) {
-  const row = db.prepare("SELECT id,title,file_name,mime_type,file_data,file_blob FROM base_resumes WHERE id = ?").get(id) as { id: string; title: string; file_name: string; mime_type: string; file_data: string; file_blob: Uint8Array | null } | undefined;
+  const row = db.prepare("SELECT id,title,file_name,mime_type,file_blob FROM base_resumes WHERE id = ?").get(id) as { id: string; title: string; file_name: string; mime_type: string; file_blob: Uint8Array | null } | undefined;
   if (!row) return null;
   const { file_blob: blob, ...rest } = row;
-  // file_data legado só sobra se a migração não rodou (banco aberto por versão antiga no meio).
-  return { ...rest, data: blob ? Buffer.from(blob) : Buffer.from(row.file_data, "base64") };
+  if (blob) return { ...rest, data: Buffer.from(blob) };
+  // TD-13: o base64 legado (file_data) só é lido quando falta o BLOB, isto é, se a migração do
+  // baseline ainda não converteu a linha (banco aberto por uma versão antiga no meio).
+  const legacy = db.prepare("SELECT file_data FROM base_resumes WHERE id = ?").get(id) as { file_data: string } | undefined;
+  return { ...rest, data: Buffer.from(legacy?.file_data ?? "", "base64") };
 }
 
 export function deleteBaseResume(id: string, actor = "user") {

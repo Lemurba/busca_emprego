@@ -2,7 +2,7 @@
 // respeitando domínios e campos permitidos pela versão publicada do agente.
 import type { Job } from "../types.js";
 import { canonicalizeJobUrl, validateCoordinates, validateSalary } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { agentEditableJobFields } from "./agent-configs.js";
 import { idFor, now } from "./util.js";
 import { addEvidence, getJob, selectEvidence, updateJob } from "./jobs.js";
@@ -28,7 +28,7 @@ function agentJobItem(input: Partial<Job> & { source: string; title: string; com
  * ingestão em lote: identidade canônica, dedup multi-chave, ocorrência e supressão. Rever uma
  * vaga existente registra nova ocorrência e devolve a vaga canônica (sem sobrescrevê-la).
  */
-export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = storeProjectId()) {
   const agent = publishedAgentConfig(agentId, projectId);
   if (!agent?.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
   if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
@@ -43,11 +43,11 @@ export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { sour
   });
 }
 
-export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = "busca-emprego") {
+export function createJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = storeProjectId()) {
   return ingestJobFromAgent(agentId, input, projectId).job;
 }
 
-export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = "busca-emprego") {
+export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = storeProjectId()) {
   const agent = publishedAgentConfig(agentId, projectId);
   if (!agent?.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
   const current = getJob(jobId);
