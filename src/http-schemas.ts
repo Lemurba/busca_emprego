@@ -149,6 +149,20 @@ const profileContext = {
   facts: z.array(profileFact).max(500).optional(),
 };
 const optCount = z.number().int().min(0).nullable().optional();
+/** Execução de agente sem a identidade (vem da rota ou do corpo do evento). */
+const agentRunFields = {
+  id: id.optional(),
+  status: z.enum(["running", "completed", "failed"]),
+  started_at: z.string().max(64).optional(),
+  finished_at: z.string().max(64).nullable().optional(),
+  found_count: z.number().int().min(0).optional(),
+  message: z.string().max(2_000).optional(),
+  model_effective: optShort,
+  input_tokens: optCount,
+  output_tokens: optCount,
+  cost: z.number().finite().min(0).nullable().optional(),
+  latency_ms: optCount,
+};
 
 export const schemas = {
   // Cadastro manual: id, nota e versão não vêm do cliente (mesma regra de `updateJob`).
@@ -243,21 +257,13 @@ export const schemas = {
     evidence_excerpt: optText,
   }),
   // Execução de agente: versão e snapshot da configuração são derivados no servidor, nunca do corpo.
-  agentRun: z.strictObject({
-    id: id.optional(),
-    agent_id: optId,
-    agent_name: z.string().min(1).max(200),
-    status: z.enum(["running", "completed", "failed"]),
-    started_at: z.string().max(64).optional(),
-    finished_at: z.string().max(64).nullable().optional(),
-    found_count: z.number().int().min(0).optional(),
-    message: z.string().max(2_000).optional(),
-    model_effective: optShort,
-    input_tokens: optCount,
-    output_tokens: optCount,
-    cost: z.number().finite().min(0).nullable().optional(),
-    latency_ms: optCount,
-  }),
+  agentRun: z.strictObject({ agent_id: optId, agent_name: z.string().min(1).max(200), ...agentRunFields }),
+  // Rotas de agente do MCP (#10): o agente vem do caminho; o corpo nunca escolhe outra identidade.
+  agentRunReport: z.strictObject(agentRunFields),
+  // Lote de uma fonte; sem round_id a rota inicia a rodada. Itens validados em validateSourceBatch.
+  agentBatch: z.strictObject({ source_id: id, round_id: optId, items: z.array(z.unknown()).max(1_000), next_cursor: optShort }),
+  // Campos do patch: o domínio decide o que o agente pode editar (agent.job_field.forbidden).
+  agentEnrichment: z.strictObject({ patch: z.record(z.string(), z.unknown()), evidence_source_url: z.string().max(4_000), evidence_excerpt: optText }),
 } as const;
 
 const SEMANTIC_ISSUES = new Set(["url.scheme.invalid", "deadline.format.invalid"]);
