@@ -40,9 +40,9 @@ function resolveScoreSnapshot(snapshotId: string | null | undefined, roundId: st
 }
 
 export function recordMatchScore(input: { job_id: string; scores: Record<string, unknown>; profile_snapshot_id?: string | null; round_id?: string | null; evidence?: unknown[]; strengths?: string[]; gaps?: string[]; project_id?: string }) {
-  const job = getJob(input.job_id);
-  if (!job) throw new DomainError("job.not_found");
   const projectId = input.project_id ?? storeProjectId();
+  const job = getJob(input.job_id);
+  if (!job || job.project_id !== projectId) throw new DomainError("job.not_found");
   const { snapshotId, roundId, active } = resolveScoreSnapshot(input.profile_snapshot_id, input.round_id, projectId);
   // Critério = número (legado, "estimado") ou {value, basis, evidence}; a conta não muda.
   const criteria = normalizeCriterionInputs(input.scores);
@@ -63,13 +63,14 @@ export function recordMatchScore(input: { job_id: string; scores: Record<string,
     if (active) db.prepare("UPDATE jobs SET match_score=?,updated_at=? WHERE id=?").run(Math.round(adjusted.scoreFinal), now(), input.job_id);
   });
   audit("job", input.job_id, "match_scored", { score_base: result.scoreBase, coverage_percent: result.coveragePercent, band: result.band, score_final: adjusted.scoreFinal, profile_snapshot_id: snapshotId, round_id: roundId || null, active_profile: active });
-  return getMatchScore(input.job_id, snapshotId, roundId);
+  return getMatchScore(input.job_id, snapshotId, roundId, projectId);
 }
 
 /** Última nota da vaga; snapshot/rodada só filtram quando informados (`""` = sem rodada). */
-export function getMatchScore(jobId: string, profileSnapshotId?: string | null, roundId?: string | null) {
-  const filters = ["job_id=?"];
-  const params: string[] = [jobId];
+/** Nota mais recente da vaga no projeto; vaga de outro projeto não tem nota visível (null). */
+export function getMatchScore(jobId: string, profileSnapshotId?: string | null, roundId?: string | null, projectId = storeProjectId()) {
+  const filters = ["job_id=?", "project_id=?"];
+  const params: string[] = [jobId, projectId];
   if (profileSnapshotId != null) { filters.push("profile_snapshot_id=?"); params.push(profileSnapshotId); }
   if (roundId != null) { filters.push("round_id=?"); params.push(roundId); }
   const row = db.prepare(`SELECT * FROM match_scores WHERE ${filters.join(" AND ")} ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(...params) as Record<string, unknown> | undefined;

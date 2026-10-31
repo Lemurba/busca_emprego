@@ -16,6 +16,8 @@ export { listApplications, getApplication, createApplication, selectManualApplic
 export { listAgentRuns, listAgentConfigs, listAgentConfigVersions, expireTimedOutAgentRuns, recordAgentRun, recordAgentRunForAgent, assertAgentUrlAllowed, getPublishedAgentConfig, listPublishedAgentConfigs, createAgentConfig, updateAgentConfig, agentVersionOrigin, getAgentVersionDiff, publishAgentConfigVersion, rollbackAgentConfig, proposeAgentPrompt, discardAgentDraft, deleteAgentConfig } from "./db/agents.js";
 export { listSourceConfigs, listSourceConfigsWithReadiness, setSourceReadiness, approveSourceTerms, listSearchRounds, startSearchRound, recordRoundSourceStatus, upsertSourceConfig, deleteSourceConfig } from "./db/sources.js";
 export { getBootstrap } from "./db/bootstrap.js";
+export { assertInProject, resourceProjectId } from "./db/scope.js";
+export type { ScopedResource } from "./db/scope.js";
 export type { BootstrapPayload } from "./bootstrap-payload.js";
 export { transitionJob, listWorkflowEvents, listJobHistory } from "./db/job-workflow.js";
 export { validateSourceBatch, ingestSourceItems, ingestRoundBatch, listJobOccurrences, listPossibleDuplicates, DUPLICATE_UNDO_WINDOW_MS, listRecentDuplicateDecisions, undoPossibleDuplicate, resolvePossibleDuplicate } from "./db/ingestion.js";

@@ -23,7 +23,8 @@ Este documento descreve a API implementada, incluindo versões imutáveis de age
 - Datas devem ser strings ISO 8601, preferencialmente UTC: `2026-09-30T18:30:00.000Z`.
 - Valores monetários são números em BRL por padrão; defina `currency` explicitamente se usar outra moeda.
 - O limite é 8 MB por requisição para comportar um PDF-base; o PDF em si é limitado a 5 MB.
-- Não envie `Authorization` nem `X-Project-Id`: a instalação usa o projeto fixo `busca-emprego` e a única credencial de agente é `x-radar-service-token`.
+- Não envie `Authorization` nem `X-Project-Id`: o projeto vem da instalação (`RADAR_PROJECT_ID`, padrão `busca-emprego`) e a única credencial de agente é `x-radar-service-token`.
+- Escopo de projeto: listagens, bootstrap, fila do executor (`GET /api/authorized-applications`) e o painel de automação mostram só o projeto da instalação. Rotas por id (`/api/jobs/{id}…`, `/api/resumes/{id}…`, `/api/applications/{id}…`, `/api/base-resumes/{id}…`, `/api/profiles/{id}…`, `/api/human-questions/{id}…`, `/api/agents/{id}/jobs/{jobId}…`) e ids no corpo (`job_id`, `resume_id`, `application_id`, `base_resume_id`, `profile_id`) de outro projeto respondem `404 <recurso>.not_found`, como um id inexistente. O mesmo PDF-base e a mesma vaga manual podem existir em projetos diferentes. O kill-switch, os limites e o uso diário da automação são da instalação (valem para todos os projetos: protegem a mesma pessoa).
 - Chamadas de descoberta/enriquecimento informam `agent_id` no corpo. O servidor confirma que o agente pertence ao projeto, está habilitado e possui a capacidade interna exigida.
 - O aplicativo não cria dados exemplificativos: o banco inicia vazio e só recebe vagas de agentes, rodadas ou uso real do dashboard. A anonimização legada permanece opt-in e deve ficar desabilitada em produção.
 
@@ -520,7 +521,7 @@ repete o sufixo em `details.reason`. Qualquer erro que não seja de domínio (fa
 | `400` | JSON ou corpo inválido, ou portão humano sem a confirmação digitada | `invalid_json`, `invalid_body`, `resume.approval.confirmation_required` (APROVO), `application.authorization.confirmation_required` (AUTORIZO), `decision.confirmation_required` (TENHO INTERESSE / SEM TEMPO), `application.status.invalid`, `resume.interest_required` |
 | `401` | Sessão ou token ausente | `unauthorized` |
 | `403` | Decisão humana pedida pelo token de serviço, capacidade negada, agente desabilitado, URL fora de `allowed_domains`, automação pausada | `human_session_required`, `profile.confirm.forbidden`, `agent.domain.forbidden`, `application.internal_route_required`, `AUTOMATION_DISABLED` |
-| `404` | Rota ou registro desconhecido | `not_found` (rota), `job.not_found`, `resume.not_found`, `application.not_found`, `base_resume.not_found`, `profile.not_found`, `round.not_found` |
+| `404` | Rota ou registro desconhecido, ou de outro projeto | `not_found` (rota), `job.not_found`, `resume.not_found`, `application.not_found`, `base_resume.not_found`, `profile.not_found`, `round.not_found`, `human_question.not_found` |
 | `409` | Conflito de versão, idempotência, estado ou transição | `VERSION_CONFLICT`, `ILLEGAL_TRANSITION`, `PDF_DUPLICATE`, `application.already_exists`, `profile.draft_exists`, `resume.unverified_facts`, `resume.pdf_parse_failed`, `agent.version.review_required` |
 | `413` | Conteúdo maior que o limite | `payload_too_large`, `PDF_TOO_LARGE` |
 | `422` | Schema, evidência, configuração, domínio ou precondição inválidos | `validation.<campo>`, `PRECONDITION_FAILED`, `PROFILE_SNAPSHOT_REQUIRED`, `PDF_SIGNATURE_INVALID`, `job.salary.invalid:<campos>`, `profile.draft_required` |
@@ -528,6 +529,8 @@ repete o sufixo em `details.reason`. Qualquer erro que não seja de domínio (fa
 | `500` | Erro interno | `internal_error` |
 
 O servidor MCP repete o mesmo código e status no erro da ferramenta (`{ error: { code, message, status } }`); não
-existe mais o código genérico `radar.rule_violation` para frases sem código.
+existe mais o código genérico `radar.rule_violation` para frases sem código. As mensagens vêm do dicionário único
+`ERROR_MESSAGES` (`src/errors.ts`); o MCP só troca a redação de alguns códigos para o agente. Todo código estável
+lançado em `src/` precisa de mensagem nesse dicionário (conferido por `test/error-contract.test.mjs`).
 
 Algumas rotas por ID ainda retornam `200` com `null`; a uniformização para 404 é um gate pendente. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.

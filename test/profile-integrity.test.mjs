@@ -155,7 +155,10 @@ describe("I49-09: nota de aderência presa ao snapshot certo", () => {
     assert.equal(store.getJob(job.id).match_score, board, "nota de perfil substituído não sobrescreve a do quadro");
     assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "round-score", profile_snapshot_id: second }), /PROFILE_SNAPSHOT_INVALID/u);
     assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "rodada-inexistente" }), /round\.not_found/u);
-    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "round-score", project_id: "outro-projeto" }), /round\.not_found/u, "rodada de outro projeto");
+    // TD-06: vaga de outro projeto é recusada antes; rodada de outro projeto, numa vaga do próprio projeto.
+    assert.throws(() => store.recordMatchScore({ job_id: job.id, scores, round_id: "round-score", project_id: "outro-projeto" }), /job\.not_found/u, "vaga de outro projeto");
+    const otherJob = store.upsertJob({ id: "score-job-outro", title: "Analista", company: "Acme", source: "fixture", source_url: "https://jobs.example.test/score-outro", project_id: "outro-projeto" });
+    assert.throws(() => store.recordMatchScore({ job_id: otherJob.id, scores, round_id: "round-score", project_id: "outro-projeto" }), /round\.not_found/u, "rodada de outro projeto");
 
     const stale = store.recordMatchScore({ job_id: job.id, scores: { ...scores, skills: 0 }, profile_snapshot_id: first });
     assert.equal(stale.profile_snapshot_id, first, "fica no histórico");

@@ -15,6 +15,7 @@ import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { getResumeDetail, getResumeFactChecks, listMatchScoreHistory, resolveResumeFact } from "./db.js";
+import { assertInProject, type ScopedResource } from "./db.js";
 import { assertAgentUrlAllowed, getApplication, getApplicationAuthorization, getPublishedAgentConfig, ingestJobFromAgent, listPublishedAgentConfigs, recordAgentRunForAgent, validateSourceBatch } from "./db.js";
 import { connectorRoutes } from "./connectors/routes.js";
 import { smokeTestSource } from "./connectors/runner.js";
@@ -471,7 +472,7 @@ const routes: Route[] = [
     }));
   } },
   { method: "GET", pattern: r("/api/jobs/{id}/occurrences"), handler: ({ res, params }) => ok(res, 200, listJobOccurrences(params[0]!, projectId)) },
-  { method: "GET", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params }) => ok(res, 200, getMatchScore(params[0]!)) },
+  { method: "GET", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params }) => ok(res, 200, getMatchScore(params[0]!, null, null, projectId)) },
   // F15: histórico de notas paginado (o bootstrap leva só a mais recente de cada vaga).
   { method: "GET", pattern: r("/api/jobs/{id}/scores"), handler: ({ req, res, params }) => ok(res, 200, listMatchScoreHistory(params[0]!, pageParams(req), projectId)) },
   // I49-09: a nota exige um snapshot de perfil confirmado do projeto (o ativo, se não informado).
@@ -540,26 +541,26 @@ const routes: Route[] = [
   { method: "PATCH", pattern: r("/api/resumes/{id}"), handler: ({ res, params, body }) => ok(res, 200, updateResume(params[0]!, validateBody(schemas.resumePatch, body) as never)) },
 
   // Currículos-base (upload JSON com PDF em base64; único corpo de até 8 MB)
-  { method: "GET", pattern: r("/api/base-resumes"), handler: ({ res }) => ok(res, 200, listBaseResumes()) },
-  { method: "POST", pattern: r("/api/base-resumes"), bodyLimit: UPLOAD_BODY_LIMIT, handler: async ({ res, body }) => ok(res, 201, await createBaseResumeAsync(validateBody(schemas.baseResumeUpload, body) as never)) },
+  { method: "GET", pattern: r("/api/base-resumes"), handler: ({ res }) => ok(res, 200, listBaseResumes(projectId)) },
+  { method: "POST", pattern: r("/api/base-resumes"), bodyLimit: UPLOAD_BODY_LIMIT, handler: async ({ res, body }) => ok(res, 201, await createBaseResumeAsync(validateBody(schemas.baseResumeUpload, body) as never, projectId)) },
   { method: "GET", pattern: r("/api/base-resumes/{id}/file"), handler: ({ res, params }) => {
-    const file = getBaseResumeFile(params[0]!);
+    const file = getBaseResumeFile(params[0]!, projectId);
     if (!file) throw notFound("Currículo-base não encontrado.");
     attachment(res, "application/pdf", file.file_name, file.data);
   } },
-  { method: "GET", pattern: r("/api/base-resumes/{id}/extraction"), handler: ({ res, params }) => ok(res, 200, getBaseResumeExtraction(params[0]!)) },
+  { method: "GET", pattern: r("/api/base-resumes/{id}/extraction"), handler: ({ res, params }) => ok(res, 200, getBaseResumeExtraction(params[0]!, projectId)) },
   { method: "POST", pattern: r("/api/base-resumes/{id}/create-profile"), handler: async ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 201, await createProfileFromBaseResume(params[0]!, actor, projectId)); } },
-  { method: "POST", pattern: r("/api/base-resumes/{id}/select"), handler: ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectBaseResume(params[0]!)); } },
+  { method: "POST", pattern: r("/api/base-resumes/{id}/select"), handler: ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, selectBaseResume(params[0]!, projectId)); } },
   // Excluir o PDF-base é decisão humana (isHumanOnlyRequest).
   { method: "DELETE", pattern: r("/api/base-resumes/{id}"), handler: ({ actor, res, params, body }) => {
     validateBody(schemas.empty, body);
-    if (!deleteBaseResume(params[0]!, actor)) throw notFound("Currículo-base não encontrado.");
+    if (!deleteBaseResume(params[0]!, actor, projectId)) throw notFound("Currículo-base não encontrado.");
     ok(res, 200, { deleted: true });
   } },
 
   // Candidaturas
   { method: "POST", pattern: r("/api/applications"), handler: ({ actor, res, body }) => ok(res, 201, createApplication(validateBody(schemas.applicationCreate, body) as never, actor)) },
-  { method: "GET", pattern: r("/api/authorized-applications"), handler: ({ res }) => ok(res, 200, listAuthorizedApplications()) },
+  { method: "GET", pattern: r("/api/authorized-applications"), handler: ({ res }) => ok(res, 200, listAuthorizedApplications(projectId)) },
   { method: "GET", pattern: r("/api/applications/{id}"), handler: ({ res, params }) => {
     const application = getApplication(params[0]!);
     if (!application) throw new HttpError(404, "application.not_found", "Candidatura não encontrada.");
@@ -605,7 +606,7 @@ const routes: Route[] = [
   { method: "PATCH", pattern: r("/api/applications/{id}"), handler: ({ actor, res, params, body }) => ok(res, 200, updateApplication(params[0]!, validateBody(schemas.applicationPatch, body) as never, actor)) },
 
   // #32 — kill-switch, limite diário e allowlist de ATS (mudança só pela sessão do dashboard).
-  { method: "GET", pattern: r("/api/settings/automation"), handler: ({ res }) => ok(res, 200, automationOverview()) },
+  { method: "GET", pattern: r("/api/settings/automation"), handler: ({ res }) => ok(res, 200, automationOverview(projectId)) },
   { method: "PUT", pattern: r("/api/settings/automation"), handler: ({ actor, res, body }) => ok(res, 200, updateAutomationSettings(validateBody(schemas.automationSettings, body), actor)) },
 
   // Preferências e perguntas humanas
@@ -652,6 +653,45 @@ const routes: Route[] = [
 // Coleta determinística (issue #16): empresas curadas por conector e fila de enriquecimento por LLM.
 routes.push(...connectorRoutes(projectId).map((route): Route => ({ method: route.method, pattern: r(route.path), handler: ({ actor, res, params, body }) => ok(res, route.status, route.handler({ actor, params, body })) })));
 
+/**
+ * RADAR_PROJECT_ID nas rotas por id (TD-06): vaga, currículo, candidatura, currículo-base, perfil
+ * ou pergunta humana de outro projeto responde 404 `<recurso>.not_found`, como um id inexistente.
+ * Vale para toda rota sob esses prefixos, inclusive as que ainda vierem; segmentos fixos
+ * (`/api/profiles/drafts`, `/api/resumes/generate`...) não são ids de linha e passam direto.
+ */
+const PROJECT_SCOPED_PATHS: ReadonlyArray<[RegExp, ScopedResource]> = [
+  [/^\/api\/jobs\/([^/]+)/u, "job"],
+  [/^\/api\/agents\/[^/]+\/jobs\/([^/]+)/u, "job"],
+  [/^\/api\/resumes\/([^/]+)/u, "resume"],
+  [/^\/api\/applications\/([^/]+)/u, "application"],
+  [/^\/api\/base-resumes\/([^/]+)/u, "base_resume"],
+  [/^\/api\/profiles\/([^/]+)/u, "profile"],
+  [/^\/api\/human-questions\/([^/]+)/u, "human_question"],
+];
+
+function assertPathInProject(pathname: string) {
+  for (const [pattern, kind] of PROJECT_SCOPED_PATHS) {
+    const raw = pattern.exec(pathname)?.[1];
+    if (!raw) continue;
+    let id: string;
+    try { id = decodeURIComponent(raw); } catch { throw new HttpError(400, "invalid_path", "Caminho inválido."); }
+    assertInProject(kind, id, projectId);
+  }
+}
+
+/** Ids de outro projeto no corpo (`job_id`, `resume_id`...) recebem o mesmo 404 das rotas por id. */
+const PROJECT_SCOPED_BODY_FIELDS: ReadonlyArray<[string, ScopedResource]> = [
+  ["job_id", "job"], ["resume_id", "resume"], ["application_id", "application"], ["base_resume_id", "base_resume"], ["profile_id", "profile"],
+];
+
+function assertBodyInProject(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  for (const [field, kind] of PROJECT_SCOPED_BODY_FIELDS) {
+    const value = (body as Record<string, unknown>)[field];
+    if (typeof value === "string" && value) assertInProject(kind, value, projectId);
+  }
+}
+
 function matchRoute(method: string, pathname: string): { route: Route; params: string[] } | null {
   for (const route of routes) {
     if (route.method !== method) continue;
@@ -676,8 +716,10 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string) 
     const actor = method === "POST" && pathname === "/api/logout" ? "" : authenticate(req, pathname);
     const matched = matchRoute(method, pathname);
     if (!matched) throw new HttpError(404, "not_found", "Rota não encontrada.");
+    assertPathInProject(pathname);
     assertAutomationEnabled(req, pathname);
     const body = MUTATING_METHODS.has(method) ? await readJsonBody(req, matched.route.bodyLimit ?? DEFAULT_BODY_LIMIT) : {};
+    assertBodyInProject(body);
     await matched.route.handler({ req, res, params: matched.params, body, actor });
   } catch (error) {
     if (error instanceof HttpError && error.status === 413) {

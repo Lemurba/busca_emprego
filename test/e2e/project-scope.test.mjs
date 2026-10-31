@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-project-scope-"));
 const dbPath = join(directory, "radar.sqlite");
@@ -67,6 +68,16 @@ const facts = [
 ];
 const jobBody = (slug) => ({ title: `Analista ${slug}`, company: `Empresa ${slug}`, source: "manual", source_url: `https://example.com/vagas/${slug}` });
 
+async function pdfBase64() {
+  const document = await PDFDocument.create();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  document.addPage().drawText("Experiência Backend Node.js SQL", { x: 50, y: 700, size: 12, font });
+  return Buffer.from(await document.save()).toString("base64");
+}
+const pdfUpload = { title: "Currículo", file_name: "cv.pdf", file_data: await pdfBase64() };
+/** Ids criados no projeto padrão, conferidos depois a partir do outro projeto. */
+const fromDefault = {};
+
 /** Cria e confirma um perfil com fatos pela sessão do dashboard. */
 async function confirmedProfile(server) {
   const draft = expect(await server.human("POST", "/api/profiles", { facts }), 201);
@@ -86,6 +97,10 @@ test("projeto padrão: perfil e vaga ficam em busca-emprego", async () => {
   const bootstrap = expect(await server.human("GET", "/api/bootstrap"), 200);
   assert.deepEqual(bootstrap.jobs.map((item) => item.id), [job.id]);
   assert.equal(bootstrap.activeProfile.id, profile.id);
+  fromDefault.job = job.id;
+  fromDefault.profile = profile.id;
+  fromDefault.baseResume = expect(await server.human("POST", "/api/base-resumes", pdfUpload), 201).id;
+  fromDefault.sharedJob = expect(await server.service("POST", "/api/jobs", jobBody("compartilhada")), 201).id;
 });
 
 test("outro RADAR_PROJECT_ID: sementes próprias, perfil com fatos e listagens filtradas", async () => {
@@ -110,11 +125,33 @@ test("outro RADAR_PROJECT_ID: sementes próprias, perfil com fatos e listagens f
   assert.deepEqual(profiles.map((item) => item.id), [profile.id]);
 });
 
+test("outro RADAR_PROJECT_ID: ids do projeto padrão respondem 404; mesmo PDF e mesma vaga são permitidos", async () => {
+  const server = await startServer("outro-projeto");
+  const missing = async (method, path, code, body) => assert.equal(expect(await server.service(method, path, body), 404).error, code, path);
+  await missing("GET", `/api/jobs/${fromDefault.job}`, "job.not_found");
+  await missing("GET", `/api/jobs/${fromDefault.job}/score`, "job.not_found");
+  await missing("GET", `/api/jobs/${fromDefault.job}/history`, "job.not_found");
+  await missing("GET", `/api/jobs/${fromDefault.job}/feedback`, "job.not_found");
+  await missing("GET", `/api/profiles/${fromDefault.profile}/facts`, "profile.not_found");
+  await missing("GET", `/api/base-resumes/${fromDefault.baseResume}/extraction`, "base_resume.not_found");
+  await missing("GET", `/api/base-resumes/${fromDefault.baseResume}/file`, "base_resume.not_found");
+  await missing("POST", "/api/resumes", "job.not_found", { job_id: fromDefault.job, title: "CV", content: "x" });
+  // O mesmo PDF e a mesma vaga manual entram no projeto novo (antes: PDF_DUPLICATE e job.already_exists).
+  const baseResume = expect(await server.human("POST", "/api/base-resumes", pdfUpload), 201);
+  assert.notEqual(baseResume.id, fromDefault.baseResume);
+  const shared = expect(await server.service("POST", "/api/jobs", jobBody("compartilhada")), 201);
+  assert.notEqual(shared.id, fromDefault.sharedJob);
+  assert.equal(shared.project_id, "outro-projeto");
+  const bootstrap = expect(await server.human("GET", "/api/bootstrap"), 200);
+  assert.deepEqual(bootstrap.baseResumes.map((item) => item.id), [baseResume.id]);
+  assert.deepEqual(bootstrap.automation.authorizations, []);
+});
+
 test("de volta ao projeto padrão: nada do outro projeto vaza", async () => {
   const server = await startServer(null);
   const bootstrap = expect(await server.human("GET", "/api/bootstrap"), 200);
   assert.ok(bootstrap.jobs.every((job) => job.project_id === "busca-emprego"));
-  assert.deepEqual(bootstrap.jobs.map((job) => job.company), ["Empresa padrao"]);
+  assert.deepEqual(bootstrap.jobs.map((job) => job.company).sort(), ["Empresa compartilhada", "Empresa padrao"]);
   assert.ok(bootstrap.profiles.every((profile) => profile.project_id === "busca-emprego"));
   assert.ok(bootstrap.agentConfigs.every((agent) => agent.project_id === "busca-emprego"));
   await server.stop();

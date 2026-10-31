@@ -144,7 +144,7 @@ function assertNoOpenDraft(projectId: string) {
 /** `options.source` não vem do corpo da requisição: só o import de JSON Resume cria perfis `json_resume`. */
 export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = storeProjectId(), options: { source?: string } = {}): ProfileWithFacts {
   const baseResumeId = input.base_resume_id == null || input.base_resume_id === "" ? null : String(input.base_resume_id);
-  if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new DomainError("base_resume.not_found");
+  if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=? AND project_id=?").get(baseResumeId, projectId)) throw new DomainError("base_resume.not_found");
   const source = options.source ?? "pdf";
   if (!["pdf", "json_resume"].includes(source)) throw new DomainError("profile.source.invalid");
   const context = parseObject(input.context ?? input.context_json);
@@ -171,9 +171,9 @@ export function createProfessionalProfile(input: Record<string, unknown>, actor 
  * inválido não deixa rascunho vazio para trás.
  */
 export async function createProfileFromBaseResume(baseResumeId: string, actor = "user", projectId = storeProjectId()): Promise<ProfileWithFacts & { extraction_status: string }> {
-  const base = getBaseResumeExtraction(baseResumeId);
+  const base = getBaseResumeExtraction(baseResumeId, projectId);
   assertNoOpenDraft(projectId);
-  const facts = await proposeBaseResumeFacts(baseResumeId);
+  const facts = await proposeBaseResumeFacts(baseResumeId, projectId);
   const profile = createProfessionalProfile({ base_resume_id: baseResumeId, facts }, actor, projectId);
   return { ...profile, extraction_status: base.extraction_status };
 }

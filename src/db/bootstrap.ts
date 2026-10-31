@@ -74,7 +74,7 @@ export function getBootstrap(projectId = storeProjectId()): BootstrapPayload {
     suppressedJobs,
     timezone: radarTimeZone(),
     // #32: kill-switch, limite diário, allowlist de ATS e confirmações finais pendentes.
-    automation: automationOverview(),
+    automation: automationOverview(projectId),
     stats: {
       total: jobs.length,
       suppressed: suppressedJobs.length,

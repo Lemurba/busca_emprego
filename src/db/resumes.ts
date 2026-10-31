@@ -302,7 +302,7 @@ function writerFindings(resume: Resume): string[] {
   const snapshot = atsSnapshotForResume(resume);
   // Perfil importado de JSON Resume não tem PDF-base: os fatos confirmados são a única fonte.
   if (!resume.base_resume_id) { if (!snapshot || snapshotProfileSource(snapshot) !== "json_resume") findings.push("base_resume.required"); }
-  else if (getBaseResumeExtraction(resume.base_resume_id).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
+  else if (getBaseResumeExtraction(resume.base_resume_id, resumeProjectId(resume)).extraction_status !== "extracted") findings.push("base_resume.extraction.required");
   const facts = snapshot ? snapshotFacts(snapshot) : [];
   const byId = new Map(facts.filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
   const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
@@ -370,7 +370,7 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   if (!baseId && snapshot.profile_source !== "json_resume") throw new DomainError("base_resume.required");
   if (baseId) {
     if (snapshot.profile_base_resume_id && snapshot.profile_base_resume_id !== baseId) throw new DomainError("ATS_BASE_RESUME_MISMATCH");
-    const base = getBaseResumeExtraction(baseId);
+    const base = getBaseResumeExtraction(baseId, projectId);
     if (base.extraction_status !== "extracted") throw new DomainError("BASE_RESUME_EXTRACTION_REQUIRED");
   }
   const factsUsed = Array.isArray(input.facts_used) ? [...new Set(input.facts_used.map(String))] : [];

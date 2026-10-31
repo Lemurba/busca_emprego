@@ -125,6 +125,8 @@ export type ExecutorDeps = {
   getApplication: (id: string) => Application | null;
   /** #18 — fim de um lease novo do claim (o mesmo do heartbeat). */
   leaseExpiresAt: () => string;
+  /** Projeto da instalação (RADAR_PROJECT_ID) para o painel de automação. */
+  projectId: () => string;
 };
 
 export function createExecutor(deps: ExecutorDeps) {
@@ -283,23 +285,29 @@ export function createExecutor(deps: ExecutorDeps) {
     return { id: row.id, mime: row.mime, sha256: row.sha256, data: Buffer.from(row.data) };
   }
 
-  /** Estado da automação para o painel e o CLI (sem nonce, token ou hash de token). */
-  function automationOverview(nowMs = Date.now()): AutomationOverview {
+  /**
+   * Estado da automação para o painel e o CLI (sem nonce, token ou hash de token). Autorizações e
+   * confirmações finais são do projeto (TD-06, pela vaga); o kill-switch, os limites e o uso do dia
+   * são da instalação: o limite diário protege a mesma pessoa em todos os projetos.
+   */
+  function automationOverview(projectId = deps.projectId(), nowMs = Date.now()): AutomationOverview {
     const settings = readAutomationSettings(db);
     const envEnabled = envAutomationEnabled();
     const usage = automationUsage(db, settings, nowMs);
     const authorizations = (db.prepare(`SELECT applications.id AS application_id, auth.id AS authorization_id, auth.state, auth.expires_at, auth.claimed_by, auth.claimed_at,
         auth.final_confirmation_requested_at, auth.final_confirmation_at, auth.final_confirmation_by, auth.final_evidence_id, auth.paused_at, auth.application_url,
         CASE WHEN auth.submit_token_issued_at IS NULL THEN 0 ELSE 1 END AS token_issued
-      FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id`).all() as Record<string, unknown>[])
+      FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id
+      JOIN jobs ON jobs.id = applications.job_id WHERE jobs.project_id = ?`).all(projectId) as Record<string, unknown>[])
       .map((row) => ({ ...row, state: String(row.state), token_issued: Number(row.token_issued) === 1, ats: atsFamilyFor(row.application_url, settings.ats_allowlist) }) as unknown as AuthorizationView & { token_issued: boolean });
     const finalConfirmations = (db.prepare(`SELECT applications.id AS application_id, applications.job_id, auth.final_confirmation_requested_at AS requested_at, auth.expires_at, auth.claimed_by,
         evidence.id AS evidence_id, evidence.observed_url, evidence.summary_json, evidence.created_at
       FROM applications
       JOIN application_authorizations auth ON auth.id = applications.authorization_id
+      JOIN jobs ON jobs.id = applications.job_id
       LEFT JOIN application_evidence evidence ON evidence.id = auth.final_evidence_id
-      WHERE applications.status = 'awaiting_final_confirmation' AND auth.state = 'claimed'
-      ORDER BY auth.final_confirmation_requested_at ASC`).all() as Record<string, unknown>[])
+      WHERE applications.status = 'awaiting_final_confirmation' AND auth.state = 'claimed' AND jobs.project_id = ?
+      ORDER BY auth.final_confirmation_requested_at ASC`).all(projectId) as Record<string, unknown>[])
       .map(({ summary_json, ...row }) => {
         let fields: FieldSummary[] = [];
         try { fields = validateFieldsSummary(JSON.parse(String(summary_json ?? "[]"))); } catch { fields = []; }

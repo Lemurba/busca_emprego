@@ -5,7 +5,7 @@ import { urlHash } from "../hash.js";
 import type { Application } from "../types.js";
 import { DomainError } from "../errors.js";
 import { isHttpsUrl, canonicalizeJobUrl } from "../domain.js";
-import { audit, db, tx } from "./handle.js";
+import { audit, db, storeProjectId, tx } from "./handle.js";
 import { now } from "./util.js";
 import { assertJobLivenessFresh } from "./liveness.js";
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./applications.js";
@@ -111,7 +111,8 @@ export function revokeAutoApplication(id: string, actor = "user") {
   return getApplication(id);
 }
 
-export function listAuthorizedApplications() {
+/** Fila do executor: só candidaturas autorizadas de vagas do projeto (TD-06). */
+export function listAuthorizedApplications(projectId = storeProjectId()) {
   expireAuthorizations();
   assertAutomationActive(db);
   return db.prepare(`SELECT applications.*, jobs.title AS job_title, jobs.company AS job_company,
@@ -130,7 +131,8 @@ export function listAuthorizedApplications() {
       AND resumes.status = 'approved'
       AND jobs.decision = 'interested'
       AND jobs.status IN ('resume_approved', 'ready_to_apply')
-    ORDER BY applications.auto_authorized_at ASC`).all(now());
+      AND jobs.project_id = ?
+    ORDER BY applications.auto_authorized_at ASC`).all(now(), projectId);
 }
 
 /**
@@ -393,7 +395,7 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
 // Montado por conexão: `openStore()` pode trocar o banco (testes), e o executor guarda a conexão.
 let executorCache: { db: typeof db; executor: ReturnType<typeof createExecutor> } | null = null;
 function executor() {
-  if (executorCache?.db !== db) executorCache = { db, executor: createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, getApplication, leaseExpiresAt }) };
+  if (executorCache?.db !== db) executorCache = { db, executor: createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, getApplication, leaseExpiresAt, projectId: storeProjectId }) };
   return executorCache.executor;
 }
 type Executor = ReturnType<typeof createExecutor>;

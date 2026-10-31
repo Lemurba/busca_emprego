@@ -52,7 +52,7 @@ export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record
   const agent = publishedAgentConfig(agentId, projectId);
   if (!agent?.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new DomainError("agent.jobs.enrich.forbidden");
   const current = getJob(jobId);
-  if (!current) throw new DomainError("job.not_found");
+  if (!current || current.project_id !== projectId) throw new DomainError("job.not_found");
   const entries = Object.entries(patch);
   if (!entries.length || entries.some(([key]) => !agent.editable_fields.includes(key) || !agentEditableJobFields.has(key))) throw new DomainError("agent.job_field.forbidden");
   assertAgentUrlAllowed(agent, evidenceSourceUrl);

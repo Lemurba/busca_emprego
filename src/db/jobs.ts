@@ -186,8 +186,15 @@ function validateJobFields(changed: Record<string, unknown>, current: Record<str
   return normalized;
 }
 
-function upsertJobId(source: string, identityUrl: string, title: string, company: string) {
-  return idFor(`${source}|${identityUrl}|${title}|${company}`);
+/**
+ * Id da vaga cadastrada sem id (manual ou upsert direto): leva o projeto, como a ingestão
+ * (`canonical-job|projectId|...`), para que outro RADAR_PROJECT_ID possa ter a mesma vaga. Vagas
+ * gravadas antes (id sem projeto) continuam sendo achadas pelo id antigo dentro do próprio projeto.
+ */
+function upsertJobId(projectId: string, source: string, identityUrl: string, title: string, company: string) {
+  const legacy = idFor(`${source}|${identityUrl}|${title}|${company}`);
+  const owner = db.prepare("SELECT project_id FROM jobs WHERE id=?").get(legacy) as { project_id: string } | undefined;
+  return owner?.project_id === projectId ? legacy : idFor(`job|${projectId}|${source}|${identityUrl}|${title}|${company}`);
 }
 
 export function upsertJob(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
@@ -200,11 +207,15 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
   const linkedinPostUrl = String(input.linkedin_post_url ?? "");
   const applicationUrl = String(input.application_url ?? "");
   const sourceUrl = String(input.source_url ?? "");
-  const id = input.id || upsertJobId(input.source, jobUrl || linkedinPostUrl || applicationUrl || sourceUrl, input.title, input.company);
+  const rawInput = input as unknown as Record<string, unknown>;
+  const projectId = String(rawInput.project_id ?? storeProjectId());
+  const id = input.id || upsertJobId(projectId, input.source, jobUrl || linkedinPostUrl || applicationUrl || sourceUrl, input.title, input.company);
   const timestamp = now();
   tx(() => {
     const current = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     const currentJob = current ? mapJob(current) : undefined;
+    // Vaga de outro projeto nunca é sobrescrita nem muda de projeto: para este, ela não existe.
+    if (currentJob && currentJob.project_id !== projectId) throw new DomainError("job.not_found");
     const job = { ...(currentJob ?? {}), ...input, id } as Partial<Job> & { source: string; title: string; company: string; source_url: string };
     // Ingestion never changes human workflow state (status/decision): only the workflow does.
     const values = [
@@ -217,9 +228,8 @@ export function upsertJob(input: Partial<Job> & { source: string; title: string;
     } else {
       db.prepare(`INSERT INTO jobs (id,title,company,location,latitude,longitude,country,work_model,seniority,salary_min,salary_max,currency,salary_period,salary_source,salary_source_url,salary_checked_at,salary_confidence,source,source_url,linkedin_post_url,job_url,application_url,opening_status,opening_checked_at,deadline_at,closed_at,description,benefits,requirements,responsibilities,additional_information,match_score,posted_at,decision,decision_at,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,'found',?,?)`).run(id, ...(values as any[]), timestamp, timestamp);
     }
-    const rawInput = input as unknown as Record<string, unknown>;
     db.prepare(`UPDATE jobs SET project_id=?,source_job_id=?,canonical_url=?,role_family=?,role_family_confidence=?,suppressed=COALESCE(suppressed,0) WHERE id=?`)
-      .run(String(rawInput.project_id ?? currentJob?.project_id ?? storeProjectId()), rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
+      .run(projectId, rawInput.source_job_id == null ? null : String(rawInput.source_job_id), job.source_url ? canonicalizeJobUrl(job.source_url) : "", rawInput.role_family == null ? null : String(rawInput.role_family), rawInput.role_family_confidence == null ? null : Number(rawInput.role_family_confidence), id);
     if ("requirements_json" in rawInput) db.prepare("UPDATE jobs SET requirements_json=? WHERE id=?").run((rawInput.requirements_json ?? null) as string | null, id);
     db.prepare("UPDATE jobs SET dedup_key=?,description_hash=? WHERE id=?").run(jobDedupKey(job.title, job.company, job.location), jobDescriptionHash(job.description, job.company), id);
     audit("job", id, currentJob ? "updated" : "discovered", { changed_fields: Object.keys(input) });
@@ -240,7 +250,7 @@ export function createJobFromHuman(input: Record<string, unknown>, actor = "user
   if (forbidden.length) throw new DomainError(`job.field.not_editable:${forbidden.join(",")}`);
   const job = input as Partial<Job> & { source: string; title: string; company: string; source_url: string };
   const identityUrl = String(job.job_url || job.linkedin_post_url || job.application_url || job.source_url || "");
-  const id = upsertJobId(String(job.source ?? ""), identityUrl, String(job.title ?? ""), String(job.company ?? ""));
+  const id = upsertJobId(projectId, String(job.source ?? ""), identityUrl, String(job.title ?? ""), String(job.company ?? ""));
   return tx(() => {
     assertJobNotArchived(id);
     if (getJob(id)) throw new DomainError("job.already_exists");
