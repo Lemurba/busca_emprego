@@ -20,7 +20,7 @@ delete process.env.TELEGRAM_HOME_CHANNEL;
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 const store = await importStore("core");
 after(() => {
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 });
 const { calculateScore } = await import("../src/domain.ts");

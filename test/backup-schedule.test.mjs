@@ -180,6 +180,6 @@ test("backup agendado, criptografia e PDFs em BLOB", async () => {
     assert.equal(existsSync(join(offsiteDir, "sem-chave")) ? readdirSync(join(offsiteDir, "sem-chave")).length : 0, 0);
   }
 
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 });

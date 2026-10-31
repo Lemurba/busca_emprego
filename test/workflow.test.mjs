@@ -64,7 +64,7 @@ process.env.RADAR_RUN_LEGACY_ANONYMIZATION = "true";
 const store = await importStore("workflow");
 const { renderResumeFile } = await import("../src/resume-files.ts");
 after(() => {
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 });
 

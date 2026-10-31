@@ -24,6 +24,8 @@ const [store, connectorStore, { createRadarMcpServer }] = await Promise.all([
   import("../src/connectors/store.ts"),
   import("../src/mcp-server.ts"),
 ]);
+// Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
+store.openStore();
 
 // #10: as ferramentas do MCP falam com a API HTTP do dashboard (servidor real, mesmo banco).
 const api = await startRadarServer({ dbPath: process.env.RADAR_DB_PATH });
@@ -37,7 +39,7 @@ after(async () => {
     await server.close();
   }
   await api.stop();
-  store.db.close();
+  store.closeStore();
   rmSync(directory, { recursive: true, force: true });
 });
 

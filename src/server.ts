@@ -7,10 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { addProfileFact, listJobHistory, answerHumanQuestion, answerHumanQuestionFromDashboard, archiveJob, listJobFeedback, restoreJob, unsuppressJob, undoJobDecision, answerProfileInterview, approveResume, approveSourceTerms, authorizeAutoApplication, claimAuthorizedApplication, confirmProfessionalProfile, createProfileNewVersion, deleteDraftProfile, reviewAllProfileFacts, createAgentConfig, createApplication, discardAgentDraft, getAgentVersionDiff, createBaseResumeAsync, createHumanQuestion, createJobFromAgent, createJobFromHuman, dashboardSessionStore, createProfessionalProfile, createProfileFromBaseResume, createResume, databaseReadiness, ensureResumeParseCheck, getResumeParseCheck, runResumeParseCheck, exportProfileJsonResume, exportResumeJsonResume, importJsonResumeProfile, deleteAgentConfig, deleteBaseResume, deleteSourceConfig, enrichJobFromAgent, failAuthorizedApplication, generateAtsResume, getBaseResumeExtraction, getBaseResumeFile, getBootstrap, getJob, getMatchScore, getProfile, getResume, ingestRoundBatch, listAgentConfigs, listAgentConfigVersions, listAuthorizedApplications, listBaseResumes, listFieldProvenance, listHumanQuestions, listJobOccurrences, listPossibleDuplicates, listPreferenceState, listProfileFacts, listProfiles, listDraftProfiles, listSearchRounds, listSourceConfigsWithReadiness, markHumanQuestionDelivery, proposeAgentPrompt, publishAgentConfigVersion, recordAgentRun, recordJobDecision, recordJobFeedback, recordMatchScore, recordRoundSourceStatus, resolveFieldConflict, resolvePossibleDuplicate, undoPossibleDuplicate, reviewProfileFact, reviewResume, revokeAutoApplication, rollbackAgentConfig, selectBaseResume, selectManualApplication, setPreferenceRuleState, setSourceReadiness, startSearchRound, submitAuthorizedApplication, transitionJob, updateAgentConfig, updateApplication, updateJob, updateProfessionalProfile, updateResume, upsertSourceConfig } from "./db.js";
 import { expireAuthorizations, expireTimedOutAgentRuns, heartbeatAuthorizedApplication, refreshExpiredJobs } from "./db.js";
 import { cookiePath, normalizeBasePath, stripBasePath, withBaseHref } from "./base-path.js";
-import { db, dbPath } from "./db.js";
+import { db, dbPath, openStore } from "./db.js";
 import { backupDirFor, collectOperationalMetrics } from "./db/metrics.js";
 import { registerProcess } from "./process-registry.js";
-import { projectId } from "./config.js";
 import { renderResumeFile, safeName, type ResumeFileFormat } from "./resume-files.js";
 import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
@@ -21,6 +20,10 @@ import { connectorRoutes } from "./connectors/routes.js";
 import { smokeTestSource } from "./connectors/runner.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
+
+// Bootstrap explícito (TD-24): abre o banco, aplica as migrações pendentes e as sementes do
+// projeto (RADAR_PROJECT_ID) antes de qualquer rota. Importar os módulos do núcleo não faz isso.
+const { projectId } = openStore();
 
 const port = Number(process.env.PORT ?? 8787);
 const bindHost = process.env.RADAR_BIND_HOST?.trim() || "127.0.0.1";

@@ -1,8 +1,12 @@
 # Migrações do SQLite
 
 Toda mudança de schema (tabela, coluna, índice) e toda migração de dados passa por aqui.
-`src/db.ts` não cria nem altera tabelas: ao ser importado ele chama `initDb()`
-(`src/db/migrate.ts`), que abre a conexão (`src/db/connection.ts`) e executa `migrate(db)` uma vez.
+`src/db.ts` não cria nem altera tabelas, e importá-lo não abre o banco (TD-24). Quem sobe o
+processo chama `openStore()` (`src/db/handle.ts`) uma vez: ele abre a conexão
+(`src/db/connection.ts`), executa `migrate(db)` e depois as sementes do projeto
+(`seedProject`, `src/db/seeds.ts`). Fazem isso o `src/server.ts` no bootstrap, `npm run migrate`
+(depois do `npm run build`), os scripts de `scripts/ops/` e os testes. O servidor MCP não abre o
+SQLite (#10): fala só com a API do dashboard.
 
 ## Como funciona
 
@@ -16,6 +20,11 @@ Toda mudança de schema (tabela, coluna, índice) e toda migração de dados pas
 - `0001_baseline` é o schema histórico completo (inclusive `dashboard_sessions` e as tabelas dos
   conectores, antes criadas no import de `src/connectors/store.ts`) + as migrações de dados antigas. É idempotente
   porque bancos anteriores ao versionamento também a executam (e só ganham o registro).
+- Sementes de configuração (fontes dos portais e agentes padrão) não são migração: ficam em
+  `src/db/seeds.ts` e rodam por projeto (`RADAR_PROJECT_ID`) depois de `migrate()`. O projeto
+  padrão usa os marcadores legados (`install_default_agent_presets_v1`, `activate_default_sources_v2`),
+  que bancos antigos já têm; outro projeto grava `<marcador>@<projeto>`. Nenhuma semente cria vagas,
+  perfis ou currículos.
 
 ## Ids reservados (branches em paralelo)
 

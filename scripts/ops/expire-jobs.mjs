@@ -29,9 +29,10 @@ if (!existsSync(fileURLToPath(dbModule))) {
 }
 
 try {
-  const { refreshExpiredJobs, db } = await import(dbModule.href);
+  const { refreshExpiredJobs, openStore, closeStore } = await import(dbModule.href);
+  openStore();
   const expired = refreshExpiredJobs();
-  db.close();
+  closeStore();
   if (!quiet || expired.length) console.log(JSON.stringify({ ok: true, expired: expired.length, job_ids: expired }));
 } catch (error) {
   console.error(JSON.stringify({ ok: false, error: "expiration_failed", message: error instanceof Error ? error.message : String(error) }));

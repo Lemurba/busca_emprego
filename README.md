@@ -154,6 +154,7 @@ O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e he
 | comando | o que faz |
 | --- | --- |
 | `npm run build` | compila `src/` para `dist/` e empacota `public/app.ts` |
+| `npm run migrate` | depois do build: abre o banco (`RADAR_DB_PATH` ou `-- --db CAMINHO`), aplica as migrações pendentes e as sementes do projeto (`RADAR_PROJECT_ID`); o dashboard faz o mesmo ao subir |
 | `npm test` | testes de unidade (`test/*.test.mjs`) com `node:test` direto sobre o TypeScript (`node --import tsx`), com relatório de cobertura e mínimo de 50% de linhas, 52% de branches e 42% de funções em `src/` (falha abaixo disso), e os testes Python do plugin Hermes; não precisa de `dist/` |
 | `npm run test:unit` | só os testes de unidade, sem cobertura (mais rápido) |
 | `npm run test:e2e` | faz o build e roda `test/e2e/*.test.mjs`, que sobem `dist/src/server.js` de verdade (`npm run test:e2e:dist` pula o build, como na CI) |

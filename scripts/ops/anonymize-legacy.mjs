@@ -56,9 +56,10 @@ if (!existsSync(fileURLToPath(dbModule))) {
 }
 
 try {
-  const { runLegacyAnonymization, db } = await import(dbModule.href);
+  const { runLegacyAnonymization, openStore, closeStore } = await import(dbModule.href);
+  openStore({ path: dbPath });
   const result = runLegacyAnonymization();
-  db.close();
+  closeStore();
   console.log(JSON.stringify({ ok: true, ...result }));
 } catch (error) {
   console.error(JSON.stringify({ ok: false, error: "anonymization_failed", message: error instanceof Error ? error.message : String(error) }));

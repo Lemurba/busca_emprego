@@ -9,6 +9,7 @@ import { COVERAGE_WEIGHTS, computeCoverage, extractJobKeywords } from "../src/co
 import { DEFAULT_AGENT_PRESETS } from "../src/agent-defaults.ts";
 import { openDb } from "../src/db/connection.ts";
 import { migrate } from "../src/db/migrate.ts";
+import { seedProject } from "../src/db/seeds.ts";
 import { PROMPT_UPGRADES_V1 } from "../src/db/migrations/0005_score_cobertura_eliminatorios.ts";
 import { matchScoreComponents, normalizeCriterionInputs } from "../src/db/scoring.ts";
 import { calculateMatchScore, DomainValidationError } from "../src/domain.ts";
@@ -270,6 +271,8 @@ describe("migração 0005", () => {
     const db = openDb(`${directory}/migration-0005.sqlite`);
     try {
       migrate(db);
+      // Agentes padrão vêm da semente do projeto (TD-24), não mais do baseline.
+      seedProject(db, "busca-emprego");
       const [matcherName, matcherOriginal] = PROMPT_UPGRADES_V1.find(([name]) => name === "Avaliador de compatibilidade");
       const [normalizerName] = PROMPT_UPGRADES_V1.find(([name]) => name === "Normalizador e deduplicador");
       // Simula banco anterior a #34: prompt original publicado (matcher) e um prompt editado (normalizador).

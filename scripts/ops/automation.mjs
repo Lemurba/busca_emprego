@@ -84,12 +84,13 @@ process.env.RADAR_AUTO_APPLICATION_ENABLED ??= localEnv.RADAR_AUTO_APPLICATION_E
 const store = await import("../../dist/src/db.js");
 let result;
 try {
+  store.openStore();
   const actor = `cli:${process.env.USER || "operador"}`;
   result = patch ? store.updateAutomationSettings(patch, actor) : store.automationOverview();
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 } finally {
-  try { store.db.close(); } catch { /* já fechada */ }
+  store.closeStore();
 }
 
 const summary = {

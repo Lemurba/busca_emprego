@@ -63,6 +63,9 @@ if (!existsSync(resolve(repoRoot, "dist/src/connectors/runner.js"))) {
 }
 
 const { runConnectorCollection, smokeTestConnectors } = await import("../../dist/src/connectors/runner.js");
+const { openStore } = await import("../../dist/src/db.js");
+// Bootstrap explícito: importar o núcleo não abre o banco nem roda migrações.
+openStore();
 const connectors = option("--connectors")?.split(",").map((item) => item.trim()).filter(Boolean);
 const json = args.includes("--json");
 

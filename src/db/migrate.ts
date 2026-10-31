@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { openDb, tx } from "./connection.js";
+import { tx } from "./connection.js";
 import { MIGRATIONS, type Migration } from "./migrations/index.js";
 
 const MIGRATION_ID = /^\d{4}_[a-z0-9_]+$/;
@@ -59,16 +59,4 @@ export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIG
     }
     return done;
   }, "EXCLUSIVE");
-}
-
-/** Abre a conexão e aplica as migrações pendentes: o único caminho de inicialização do banco. */
-export function initDb(path: string, migrations: readonly Migration[] = MIGRATIONS): DatabaseSync {
-  const db = openDb(path);
-  try {
-    migrate(db, migrations);
-  } catch (error) {
-    db.close();
-    throw error;
-  }
-  return db;
 }

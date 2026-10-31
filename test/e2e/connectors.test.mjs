@@ -12,6 +12,8 @@ import * as payloads from "../fixtures/connector-payloads.mjs";
 const directory = mkdtempSync(join(tmpdir(), "radar-connectors-"));
 process.env.RADAR_DB_PATH = join(directory, "test.sqlite");
 const store = await import("../../dist/src/db.js");
+// Bootstrap explícito do núcleo (TD-24): importar src/db.ts não abre o banco.
+store.openStore();
 const { assertPublicHttpsUrl } = await import("../../dist/src/domain.js");
 const sources = await import("../../dist/src/connectors/sources.js");
 const { ConnectorHttpClient, ConnectorBudgetError, ConnectorHttpError, DEFAULT_USER_AGENT } = await import("../../dist/src/connectors/http.js");

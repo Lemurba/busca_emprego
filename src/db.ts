@@ -6,11 +6,10 @@ import { deadlinePassed as isDeadlinePassed, isIsoDeadline, resolveTimeZone } fr
 import { DomainValidationError, isHttpsUrl, canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, compareTotalRejection, calculateMatchScore, applyPreferenceAdjustment, validateCoordinates, validateSalary, companyKey, normalizeComparableText } from "./domain.js";
 import { extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "./domain.js";
 import { compactProfileContext, extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256 } from "./pdf-profile.js";
-import { tx as runTx } from "./db/connection.js";
-import { initDb } from "./db/migrate.js";
+import { audit, db, tx } from "./db/handle.js";
 import { agentEditableJobFields, type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./db/agent-configs.js";
 import { jobDedupKey, jobDescriptionHash } from "./db/dedup-keys.js";
-import { idFor, insertAuditEvent, now, parseJsonArray } from "./db/util.js";
+import { idFor, now, parseJsonArray } from "./db/util.js";
 import { buildProfileJsonResume, buildResumeJsonResume, jsonResumeImportFacts } from "./db/profile-import.js";
 import { assertJobLivenessFresh, insertLivenessCheck, livenessProofAt, listJobsDueForLiveness, livenessAndRepostSummaries, recordSightingRepost, repostBucketFor, storeFingerprintAndDetectReposts } from "./db/liveness.js";
 import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./liveness/index.js";
@@ -24,20 +23,15 @@ import { computeCoverage } from "./coverage.js";
 import { expectedContacts, runResumeParseCheck as runParseCheck } from "./resume-parse-check.js";
 import { mapMatchScoreRow, normalizeCriterionInputs, readResumeParseCheck, resumeParseFindings, resumeScoringFields, storeResumeCoverage, storeResumeParseCheck } from "./db/scoring.js";
 
-export const dbPath = process.env.RADAR_DB_PATH ?? "./data/radar.sqlite";
-
-// Único ponto de inicialização: abre a conexão (pragmas em src/db/connection.ts) e aplica as
-// migrações versionadas pendentes (src/db/migrations/) uma vez, numa transação exclusiva. Nenhuma
-// tabela/coluna é criada fora de migrate(); o restante deste módulo só lê e escreve dados.
-export const db = initDb(dbPath);
+// Conexão e bootstrap (TD-24): importar este módulo não abre o banco. `openStore()`
+// (src/db/handle.ts) abre a conexão, aplica as migrações versionadas (src/db/migrations/) e as
+// sementes do projeto; server.ts, `npm run migrate`, os scripts de ops e os testes o chamam.
+export { closeStore, db, dbPath, openStore, storeProjectId } from "./db/handle.js";
 
 export function databaseReadiness() {
   const row = db.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
   return { ok: row?.quick_check === "ok", check: row?.quick_check ?? "unknown" };
 }
-
-// Schema e migrações de dados vivem em src/db/migrations/ e rodam uma única vez por
-// conexão em initDb() (acima), numa transação exclusiva. Não crie tabelas/colunas aqui.
 
 /** Persistência das sessões do dashboard no SQLite (reiniciar o serviço não desloga ninguém). */
 export function dashboardSessionStore(tokenFingerprint: string) {
@@ -54,12 +48,6 @@ export function dashboardSessionStore(tokenFingerprint: string) {
     },
   };
 }
-
-/** `tx` de src/db/connection.ts ligado à conexão do módulo (BEGIN IMMEDIATE ou SAVEPOINT aninhado). */
-function tx<T>(fn: () => T): T {
-  return runTx(db, fn);
-}
-
 
 /**
  * Anonimização legada (TD-13): apaga de forma irreversível os dados das vagas, notas de
@@ -345,7 +333,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     suppressedJobs,
     timezone: radarTimeZone(),
     // #32: kill-switch, limite diário, allowlist de ATS e confirmações finais pendentes.
-    automation: executor.automationOverview(),
+    automation: automationOverview(),
     stats: {
       total: jobs.length,
       suppressed: suppressedJobs.length,
@@ -408,10 +396,6 @@ export function refreshExpiredJobs(nowMs = Date.now()) {
     }
   }
   return expired;
-}
-
-function audit(entityType: string, entityId: string, eventType: string, payload: unknown = {}) {
-  insertAuditEvent(db, entityType, entityId, eventType, payload);
 }
 
 // ---------------------------------------------------------------------------
@@ -2816,7 +2800,7 @@ export function submitAuthorizedApplication(id: string, input: { worker_id: stri
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
     if (authorization.application_status !== "in_progress") throw new Error("application.authorization.unavailable");
     if (!evidenceRef) throw new Error("SUBMISSION_EVIDENCE_REQUIRED");
-    const hit = executor.checkFinalSubmit(id, authorization, input ?? {}, worker, timestamp);
+    const hit = executor().checkFinalSubmit(id, authorization, input ?? {}, worker, timestamp);
     if (hit) return hit;
     const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=?,submit_token_hash=NULL WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
     if (!consumed.changes) throw new Error("application.authorization.unavailable");
@@ -2849,8 +2833,20 @@ export function failAuthorizedApplication(id: string, input: { worker_id: string
 }
 
 // #32 — dry-run com segunda confirmação humana, limite diário e kill-switch (src/db/applications.ts).
-const executor = createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, getApplication, leaseExpiresAt });
-export const { requestFinalConfirmation, confirmFinalSubmission, cancelFinalConfirmation, pollFinalConfirmation, getApplicationEvidence, automationOverview, updateAutomationSettings } = executor;
+// Montado por conexão: `openStore()` pode trocar o banco (testes), e o executor guarda a conexão.
+let executorCache: { db: typeof db; executor: ReturnType<typeof createExecutor> } | null = null;
+function executor() {
+  if (executorCache?.db !== db) executorCache = { db, executor: createExecutor({ db, tx, audit, currentAuthorization, assertCurrentAuthorization, claimedAuthorizationFor, expireAuthorizations, revokeAuthorizationRows, abortApplyingJob, getApplication, leaseExpiresAt }) };
+  return executorCache.executor;
+}
+type Executor = ReturnType<typeof createExecutor>;
+export const requestFinalConfirmation: Executor["requestFinalConfirmation"] = (...args) => executor().requestFinalConfirmation(...args);
+export const confirmFinalSubmission: Executor["confirmFinalSubmission"] = (...args) => executor().confirmFinalSubmission(...args);
+export const cancelFinalConfirmation: Executor["cancelFinalConfirmation"] = (...args) => executor().cancelFinalConfirmation(...args);
+export const pollFinalConfirmation: Executor["pollFinalConfirmation"] = (...args) => executor().pollFinalConfirmation(...args);
+export const getApplicationEvidence: Executor["getApplicationEvidence"] = (...args) => executor().getApplicationEvidence(...args);
+export const automationOverview: Executor["automationOverview"] = (...args) => executor().automationOverview(...args);
+export const updateAutomationSettings: Executor["updateAutomationSettings"] = (...args) => executor().updateAutomationSettings(...args);
 
 /** Prefixo da mensagem de execução abortada por limite (#16): execução assim não é reaberta. */
 const RUN_LIMIT_PREFIX = "Interrompida pelo limite";
