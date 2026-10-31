@@ -12,7 +12,7 @@ Para uma instalação nova, siga primeiro [`ops/hermes/ONBOARDING.md`](../ops/he
 - Porta canônica 8787, escutando em `RADAR_BIND_HOST` (padrão `127.0.0.1`). Uma instalação pode trocar a porta em `.env.local`. Não publicar diretamente na internet.
 - Toda rota `/api/*` exceto health/ready exige `x-radar-service-token` ou sessão do dashboard (`docs/security.md`). Interesse, `APROVO`, candidatura, `AUTORIZO`, revogação e demais portões humanos exigem a sessão e respondem `403 human_session_required` ao token de serviço.
 - O processo roda como serviço s6 do container (`ops/hermes/radar-s6-run.sh`) com **usuário Unix dedicado** (`s6-setuidgid radar`), nunca com o usuário do Hermes, recriado a cada boot por um gateway hook do Hermes.
-- `.env.local`, o banco (`radar.sqlite`, `-wal`, `-shm`) e os backups pertencem a `radar` com modo `600` (diretórios `700`); o `hermes` não os lê. `radar-s6-run.sh` recusa subir com `.env.local` fora do modo 600 e usa `umask 077`. Pendente: o MCP ainda abre o SQLite diretamente (ver `ops/hermes/ONBOARDING.md` §5). `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
+- `.env.local`, o banco (`radar.sqlite`, `-wal`, `-shm`) e os backups pertencem a `radar` com modo `600` (diretórios `700`); o `hermes` não os lê. `radar-s6-run.sh` recusa subir com `.env.local` fora do modo 600 e usa `umask 077`. O servidor MCP não abre o SQLite (#10): roda como `hermes` e fala com a API do dashboard pelo token de serviço (ver `ops/hermes/ONBOARDING.md` §5), então o dashboard é o único processo que grava no banco. `ops/hermes/supervisord-radar.conf.example` só serve para containers que usem Supervisor.
 
 O script `ops/hermes/radar-process.sh` usa `exec`, portanto o processo Node recebe os sinais do supervisor. Não execute o Node desacoplado em background no entrypoint.
 
@@ -27,7 +27,7 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `RADAR_INTERNAL_SERVICE_TOKEN` | sim | 32 bytes aleatórios; header `x-radar-service-token`; nunca imprimir |
 | `RADAR_DASHBOARD_TOKEN` | sim | trocado por cookie de sessão em `/auth`; link via `scripts/ops/dashboard-link.mjs` |
 | `RADAR_OPERATOR_ID` | sim | pessoa responsável (auditoria) |
-| `RADAR_PROJECT_ID` | não | projeto (tenant) do servidor HTTP e do MCP; padrão `busca-emprego` |
+| `RADAR_PROJECT_ID` | não | projeto (tenant) do servidor HTTP; padrão `busca-emprego`. O MCP não o lê: usa o projeto do dashboard pela API |
 | `RADAR_DB_PATH` | sim | caminho absoluto em `/opt/data`, modo 0600 |
 | `RADAR_BACKUP_DIR` | recomendado | fora do diretório do banco; copiar para destino externo criptografado |
 | `RADAR_LOG_DIR` | não | padrão `/opt/data/logs` |
@@ -39,6 +39,16 @@ O modelo único é `ops/hermes/radar.env.example` (copiado para `.env.local`, mo
 | `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_HOME_CHANNEL` | não | vazios = herdados de `/opt/data/.env` do Hermes |
 | `RADAR_BROWSER_VIEWER_URL` | não | visualizador remoto do navegador, se existir |
 | `GEOAPIFY_API_KEY` | não implementado | o mapa usa tiles do OpenStreetMap |
+
+Servidores MCP (no `/opt/data/.env` do Hermes, repassados pelo `env` de cada `mcp_servers.radar-vagas-<papel>`; não vão no `.env.local`):
+
+| Nome | Obrigatório | Observação |
+| --- | --- | --- |
+| `RADAR_API_URL` | não | API do dashboard; padrão `http://127.0.0.1:PORT` (8787). Com `RADAR_BASE_PATH`, chame o loopback sem o prefixo ou inclua-o na URL |
+| `RADAR_INTERNAL_SERVICE_TOKEN` | sim | mesmo valor do `.env.local`; sem ele as ferramentas respondem `internal_token_not_configured` |
+| `RADAR_FORWARDED_PROTO` | não | `https` quando o dashboard roda com `RADAR_TRUST_PROXY_TLS=true` (senão a API responde 426) |
+| `RADAR_MCP_ROLE` / `RADAR_MCP_AGENT_ID` | sim / por papel | papel do processo e agente fixo (coordenador e executor exigem) |
+| `RADAR_DB_PATH` | não | não declare: o MCP não abre o banco. Só registra o heartbeat do restore (§5) quando definido e gravável |
 
 O bot token do Telegram fica só no `.env` do Hermes. Logins de portais ficam no cofre do Hermes (`hermes vault add`). `.env*` é ignorado pelo Git.
 
@@ -101,7 +111,7 @@ node scripts/ops/apply-authorized.mjs ask    --application <id> --field-ref cnh 
 
 **Limite diário:** padrão de 5 envios automáticos por dia (America/Sao_Paulo), contados no envio final; opcionalmente também por ATS. Atingido o limite (no pedido de confirmação ou no envio), a rota responde 429 `application.daily_limit_reached`, a autorização é revogada e a candidatura volta para revisão. Ajuste no painel ou com `node scripts/ops/automation.mjs limit <n>` / `ats-limit <n|none>`.
 
-**Kill-switch ("pausar e manter"):** no painel (Automação de candidaturas → Pausar) ou `node scripts/ops/automation.mjs off`. Vale na hora para o dashboard e para o servidor MCP (ambos releem o SQLite a cada verificação): autorizar, reservar, pedir/confirmar a confirmação final e enviar respondem 403 `AUTOMATION_DISABLED`. Autorizações emitidas continuam (com o TTL) e voltam a poder ser reservadas ao religar (`automation.mjs on`). Execuções já reservadas mantêm a reserva, vão para `needs_review` com a etapa "Automação pausada (kill-switch)" e perdem qualquer confirmação final; ao religar voltam ao mesmo executor, que precisa pedir nova confirmação. `fail` continua permitido durante a pausa. `RADAR_AUTO_APPLICATION_ENABLED` segue como teto: diferente de `true`, tudo fica desligado independentemente do painel.
+**Kill-switch ("pausar e manter"):** no painel (Automação de candidaturas → Pausar) ou `node scripts/ops/automation.mjs off`. Vale na hora para o dashboard e para o servidor MCP (o dashboard relê o SQLite a cada verificação e o MCP passa pela API): autorizar, reservar, pedir/confirmar a confirmação final e enviar respondem 403 `AUTOMATION_DISABLED`. Autorizações emitidas continuam (com o TTL) e voltam a poder ser reservadas ao religar (`automation.mjs on`). Execuções já reservadas mantêm a reserva, vão para `needs_review` com a etapa "Automação pausada (kill-switch)" e perdem qualquer confirmação final; ao religar voltam ao mesmo executor, que precisa pedir nova confirmação. `fail` continua permitido durante a pausa. `RADAR_AUTO_APPLICATION_ENABLED` segue como teto: diferente de `true`, tudo fica desligado independentemente do painel.
 
 Regras: sem `claim` registrado em `.radar/executor/` o envio é recusado; sem `--evidence-ref` observado no portal o envio não é confirmado; URL observada diferente da autorizada (mesma canonicalização do app) aborta a execução — nesse caso use `ask` para revisão humana; `fail` grava apenas o código do motivo (nada de conteúdo de página, token ou URL com credencial). Pergunta humana criada com `ask` pausa a candidatura e é entregue por `notify-human-questions.mjs`.
 
@@ -172,13 +182,13 @@ Para restaurar de uma cópia off-host, decifre **fora do container** (ou traga a
 
 ### PDFs dos currículos
 
-Os PDFs de currículo-base ficam em `base_resumes.file_blob` (BLOB), não mais em base64 dentro de `file_data` (TEXT, 33% maior). A migração roda sozinha na primeira abertura do banco pela versão nova (dashboard ou MCP), em uma transação, e é idempotente; a API (`GET /api/base-resumes/{id}/file`) devolve os mesmos bytes. O espaço liberado volta a ser usado pelo SQLite; os backups (`VACUUM INTO`) já saem compactados.
+Os PDFs de currículo-base ficam em `base_resumes.file_blob` (BLOB), não mais em base64 dentro de `file_data` (TEXT, 33% maior). A migração roda sozinha na primeira abertura do banco pela versão nova (o dashboard; o MCP não abre o banco), em uma transação, e é idempotente; a API (`GET /api/base-resumes/{id}/file`) devolve os mesmos bytes. O espaço liberado volta a ser usado pelo SQLite; os backups (`VACUUM INTO`) já saem compactados.
 
 ### Restore
 
 Teste restore periodicamente em caminho/ambiente isolado (o backup agendado já faz isso a cada execução). Para restaurar o banco ativo:
 
-1. Parar o processo Radar e confirmar que `/api/health` não responde. Parar também o servidor MCP `radar-vagas` do Hermes (subprocesso stdio de vida longa, aberto pelo gateway): ele segura o inode antigo e continuaria gravando no arquivo substituído, e essas gravações se perderiam.
+1. Parar o processo Radar e confirmar que `/api/health` não responde. O servidor MCP `radar-vagas` do Hermes não abre o banco (#10): sem o dashboard as ferramentas falham fechadas (`radar_api.unavailable`). Mesmo assim, não deixe um executor no meio de uma candidatura durante a troca.
 2. Identificar explicitamente o arquivo de backup e seu manifesto adjacente (`.sqlite.json`). O restore confere formato, tamanho e SHA-256; backups legados sem manifesto exigem a opção explícita `--allow-missing-manifest` e validação por outro meio.
 3. Executar:
 
@@ -197,13 +207,13 @@ O restore recusa serviço HTTP ativo e exige confirmação literal, mas isso nã
 
 ### Processos abertos sobre o banco
 
-O dashboard e o servidor MCP gravam um heartbeat (a cada 15 s) em `<db>.processes/<papel>-<pid>.json` e removem o arquivo ao sair. O restore consulta esse registro, além do health check e da varredura de `/proc`:
+O dashboard grava um heartbeat (a cada 15 s) em `<db>.processes/<papel>-<pid>.json` e remove o arquivo ao sair. O servidor MCP só grava o seu quando recebe `RADAR_DB_PATH` (instalação antiga, com o MCP como `radar`); na configuração recomendada ele roda como `hermes`, sem acesso ao diretório do banco. O restore consulta esse registro, além do health check e da varredura de `/proc`:
 
 - dashboard registrado com heartbeat recente: recusa sempre (`service_process_registered`); pare o serviço;
-- servidor MCP ativo: recusa com `mcp_process_active` e a lista de PIDs. `--force` segue mesmo assim, com o aviso `mcp_process_active_forced` no stderr e `forced_with_mcp_active: true` no resultado; tudo que esse MCP gravar depois da troca se perde, então reinicie-o imediatamente;
+- servidor MCP registrado: recusa com `mcp_process_active` e a lista de PIDs. `--force` segue mesmo assim, com o aviso `mcp_process_active_forced` no stderr e `forced_with_mcp_active: true` no resultado; como o MCP só grava pela API, o risco é um executor em curso ver o estado mudar — reinicie-o depois da troca;
 - registros órfãos (heartbeat com mais de 60 s ou PID morto no mesmo host) são ignorados e podem ser apagados.
 
-Preferência de longo prazo (fora deste runbook): o MCP deixa de abrir o SQLite e passa a falar com o dashboard por HTTP com o token interno, tornando o dashboard o único escritor; aí o restore só precisa parar um processo.
+Desde #10 o MCP fala com o dashboard por HTTP com o token interno e o dashboard é o único escritor: o restore só precisa parar um processo.
 
 ## 6. Rollback
 

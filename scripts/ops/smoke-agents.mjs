@@ -17,7 +17,8 @@
  *  10. Rodada de busca: prontidão de fonte, ingestão idempotente, conclusão.
  *  11. Endurecimento: token interno obrigatório, automação desligada por padrão.
  *  12. Ponte Telegram: entrega de pergunta humana pela capability vinculada.
- *  13. Servidor MCP oficial via stdio, um processo por papel (handshake, tools/list, tools/call).
+ *  13. Servidor MCP oficial via stdio, um processo por papel (handshake, tools/list, tools/call),
+ *      falando com a instância pela API HTTP (RADAR_API_URL + token de serviço, sem RADAR_DB_PATH).
  *
  * Uso: node scripts/ops/smoke-agents.mjs [--keep-db]
  * Requer: npm run build executado (dist/ presente).
@@ -724,10 +725,16 @@ try {
 
   // ---------- 11. MCP ----------
   section("11. servidor MCP oficial (stdio): handshake, tools/list, tools/call");
-  await t("MCP lista exatamente as ferramentas registradas e lê os 24 agentes do banco", async () => {
+  // #10: o MCP não abre o SQLite; fala com a instância isolada pela API, com o token de serviço.
+  const mcpEnv = (role) => {
+    const env = { ...process.env, RADAR_API_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: token, RADAR_FORWARDED_PROTO: "https", RADAR_MCP_ROLE: role };
+    delete env.RADAR_DB_PATH;
+    return env;
+  };
+  await t("MCP lista exatamente as ferramentas registradas e lê os 24 agentes pela API", async () => {
     const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
       cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, RADAR_DB_PATH: dbPath, RADAR_MCP_ROLE: "leitura" },
+      env: mcpEnv("leitura"),
     });
     try {
       const responses = await mcpCall(child, [
@@ -756,7 +763,7 @@ try {
     for (const [role, spec] of Object.entries(RADAR_MCP_ROLES)) {
       const child = spawn(process.execPath, ["dist/src/mcp-server.js"], {
         cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, RADAR_DB_PATH: dbPath, RADAR_MCP_ROLE: role },
+        env: mcpEnv(role),
       });
       try {
         const responses = await mcpCall(child, [

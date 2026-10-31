@@ -45,7 +45,7 @@ O portão só vale se o Hermes não conseguir virar "humano". Por isso:
 - o código do release pertence a `radar` (ou root) e não é gravável pelo `hermes`;
 - o link de sessão (`scripts/ops/dashboard-link.mjs`) é gerado pelo operador como `radar`, nunca pelo agente.
 
-**Pendente:** o servidor MCP (`src/mcp-server.ts`) ainda abre o SQLite diretamente. Enquanto ele não falar com o dashboard por HTTP com uma credencial de escopo restrito, o processo MCP precisa rodar como `radar` (comando fixo, sem shell) para ler o banco — e quem consegue abrir o banco consegue gravar nele. O MCP não expõe nenhuma ferramenta de portão humano, mas a garantia completa depende dessa migração.
+**MCP pela API (#10):** o servidor MCP (`src/mcp-server.ts`) não abre o SQLite. Cada ferramenta chama a API do dashboard (`RADAR_API_URL`) com o token de serviço, então o processo roda como `hermes`, sem acesso ao banco nem ao `.env.local`, e passa pelos mesmos portões de qualquer cliente do token: nenhuma ferramenta chama rota humana e, se chamasse, receberia 403. Rotas de agente usadas só pelo MCP (`POST /api/agents/{id}/jobs|batches|runs|jobs/{id}/enrichment`, `GET /api/applications/{id}/authorization`) aceitam somente o token de serviço. O cabeçalho `x-radar-agent-id` (agente existente no projeto) rotula o ator como `agent:<agent_id>`, que o núcleo trata como serviço: só propõe.
 
 ## Origem nas auditorias (#19)
 

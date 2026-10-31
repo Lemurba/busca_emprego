@@ -6,7 +6,8 @@
         "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
       ],
       "env": {
-        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_API_URL": "${env:RADAR_API_URL}",
+        "RADAR_INTERNAL_SERVICE_TOKEN": "${env:RADAR_INTERNAL_SERVICE_TOKEN}",
         "RADAR_ENVIRONMENT": "production",
         "RADAR_MCP_ROLE": "coordenador",
         "RADAR_MCP_AGENT_ID": "${env:RADAR_COORDINATOR_AGENT_ID}"
@@ -18,7 +19,8 @@
         "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
       ],
       "env": {
-        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_API_URL": "${env:RADAR_API_URL}",
+        "RADAR_INTERNAL_SERVICE_TOKEN": "${env:RADAR_INTERNAL_SERVICE_TOKEN}",
         "RADAR_ENVIRONMENT": "production",
         "RADAR_MCP_ROLE": "coleta"
       }
@@ -29,7 +31,8 @@
         "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
       ],
       "env": {
-        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_API_URL": "${env:RADAR_API_URL}",
+        "RADAR_INTERNAL_SERVICE_TOKEN": "${env:RADAR_INTERNAL_SERVICE_TOKEN}",
         "RADAR_ENVIRONMENT": "production",
         "RADAR_MCP_ROLE": "curriculo"
       }
@@ -40,7 +43,8 @@
         "${env:RADAR_APP_DIR}/dist/src/mcp-server.js"
       ],
       "env": {
-        "RADAR_DB_PATH": "${env:RADAR_DB_PATH}",
+        "RADAR_API_URL": "${env:RADAR_API_URL}",
+        "RADAR_INTERNAL_SERVICE_TOKEN": "${env:RADAR_INTERNAL_SERVICE_TOKEN}",
         "RADAR_ENVIRONMENT": "production",
         "RADAR_MCP_ROLE": "executor",
         "RADAR_MCP_AGENT_ID": "${env:RADAR_EXECUTOR_AGENT_ID}",

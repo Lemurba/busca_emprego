@@ -68,10 +68,19 @@ try {
       assert.deepEqual(included, [...RADAR_MCP_ROLES[role].tools].sort(), `tools.include de ${name} difere do papel ${role}`);
       assert.match(block, /trust: untrusted/u, `${name} sem trust: untrusted`);
       if (RADAR_MCP_ROLES[role].binding_required) assert.match(block, /RADAR_MCP_AGENT_ID:/u, `${name} precisa de RADAR_MCP_AGENT_ID`);
+      // #10: o MCP fala com a API (URL + token de serviço por referência), nunca com o banco.
+      assert.match(block, /RADAR_API_URL: "\$\{env:RADAR_API_URL\}"/u, `${name} sem RADAR_API_URL`);
+      assert.match(block, /RADAR_INTERNAL_SERVICE_TOKEN: "\$\{env:RADAR_INTERNAL_SERVICE_TOKEN\}"/u, `${name} sem o token de serviço`);
+      assert.doesNotMatch(block, /RADAR_DB_PATH/u, `${name} ainda aponta para o SQLite`);
     }
     assert.deepEqual(configuredRoles.sort(), ["coleta", "coordenador", "curriculo", "executor"]);
     const pluginServers = JSON.parse(readFileSync(join(repoRoot, "hermes/plugin/mcp.json"), "utf8")).mcpServers;
     assert.deepEqual(Object.keys(pluginServers).sort(), [...blocks.keys()].sort(), "hermes/plugin/mcp.json diverge do config.example.yaml");
+    for (const [name, spec] of Object.entries(pluginServers)) {
+      assert.equal(spec.env.RADAR_API_URL, "${env:RADAR_API_URL}", `${name} sem RADAR_API_URL`);
+      assert.equal(spec.env.RADAR_INTERNAL_SERVICE_TOKEN, "${env:RADAR_INTERNAL_SERVICE_TOKEN}", `${name} sem o token de serviço`);
+      assert.equal(spec.env.RADAR_DB_PATH, undefined, `${name} ainda aponta para o SQLite`);
+    }
 
     // ---- #12: ferramentas do executor só existem no servidor do executor ----
     const executorOnly = ["radar_claim_application", "radar_submit_application", "radar_fail_application"];

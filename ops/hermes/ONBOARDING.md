@@ -91,16 +91,18 @@ Acrescente ao `/opt/data/.env` (por máquina):
 
 ```sh
 RADAR_APP_DIR=/opt/data/dashboard/busca_emprego
-RADAR_DB_PATH=/opt/data/dashboard/busca_emprego/data/radar.sqlite
+# API do dashboard que os servidores MCP chamam (padrão http://127.0.0.1:PORT, PORT 8787).
+# Com RADAR_TRUST_PROXY_TLS=true no dashboard, acrescente RADAR_FORWARDED_PROTO=https.
+RADAR_API_URL=http://127.0.0.1:8787
 # IDs no dashboard (Agentes) ou por `radar_list_agents`:
 RADAR_COORDINATOR_AGENT_ID=<id do Coordenador do Radar>
 RADAR_EXECUTOR_AGENT_ID=<id do Assistente de candidatura>
-# Para as pontes do Telegram e o executor (rodam como hermes). Mesmo valor do .env.local;
+# Para os servidores MCP, as pontes do Telegram e o executor (rodam como hermes). Mesmo valor do .env.local;
 # o token de serviço recebe 403 nos portões humanos. Nunca coloque RADAR_DASHBOARD_TOKEN aqui.
 RADAR_INTERNAL_SERVICE_TOKEN=<valor>
 ```
 
-**Pendente (#10):** o servidor MCP ainda abre o SQLite diretamente em vez de falar com o dashboard por HTTP. Com o banco em modo 600 do `radar`, o subprocesso MCP precisa rodar como `radar` (comando fixo, sem shell; por exemplo uma regra `sudo` restrita a `node /opt/data/dashboard/busca_emprego/dist/src/mcp-server.js`). As ferramentas MCP não incluem nenhum portão humano.
+**Isolamento (#10):** o servidor MCP não abre o SQLite. Cada ferramenta chama a API do dashboard (`RADAR_API_URL`) com o token de serviço (`RADAR_INTERNAL_SERVICE_TOKEN`), e o subprocesso roda como `hermes`, sem acesso ao banco nem ao `.env.local`. Valem as mesmas regras de qualquer cliente do token: os portões humanos (interesse, `APROVO`, `AUTORIZO`, `ENVIAR`, confirmação de perfil, termos de fonte, publicação de agente…) respondem 403 `human_session_required`, e nenhuma ferramenta MCP chama essas rotas. A escrita vai com `x-radar-agent-id`: a auditoria grava `agent:<agent_id>`. Com o dashboard fora do ar as ferramentas falham fechadas (`radar_api.unavailable`); sem o token, `internal_token_not_configured`. Não declare `RADAR_DB_PATH` no `env` dos servidores MCP.
 
 Mescle `hermes/config.example.yaml` em `/opt/data/config.yaml` e teste cada servidor:
 
@@ -122,7 +124,7 @@ Cada processo registra só as ferramentas do papel (`tools.include` igual a `RAD
 Pontos do fragmento ("MCP Config Reference"):
 
 - `${env:VAR}` é resolvido a partir do `.env` do perfil ("Environment variable references").
-- O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_DB_PATH` está no `env` do servidor ("Security" → "MCP Credential Handling").
+- O subprocesso MCP recebe ambiente filtrado (`PATH`, `HOME`, `LANG`… mais o `env` declarado); por isso `RADAR_API_URL` e `RADAR_INTERNAL_SERVICE_TOKEN` (por referência `${env:…}`, nunca o valor) estão no `env` do servidor ("Security" → "MCP Credential Handling").
 - `tools.include` registra só as ferramentas `radar_*` listadas ("Filtering semantics"); o servidor já se limita ao papel, e o filtro é a segunda barreira.
 - `trust: untrusted`: toda chamada sem `readOnlyHint: true` pede aprovação e falha fechada em execuções desassistidas, como cron ("Server keys" → `trust`). Agendamentos que precisem gravar devem usar os scripts de `scripts/ops/` com o token interno, não o MCP.
 
