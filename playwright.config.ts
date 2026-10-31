@@ -18,6 +18,10 @@ const dashboardToken = process.env.RADAR_UI_SMOKE_TOKEN;
 // Ambientes com um Chromium pré-instalado de outra revisão (ex.: containers de dev) apontam
 // o executável aqui em vez de baixar o navegador da versão fixada do Playwright.
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
+const chromium = {
+  ...devices["Desktop Chrome"],
+  ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
+};
 
 export default defineConfig({
   testDir: "test/ui",
@@ -35,14 +39,12 @@ export default defineConfig({
     timezoneId: "America/Sao_Paulo",
     trace: "retain-on-failure"
   },
+  // O banco é um só para todas as suítes. O smoke semeia vagas e currículos sem perfil
+  // confirmado; os fluxos (ex.: revisão do perfil, #49) confirmam perfis, que mudam as
+  // checagens dos currículos, então rodam depois do smoke.
   projects: [
-    {
-      name: "chromium",
-      use: {
-        ...devices["Desktop Chrome"],
-        ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {})
-      }
-    }
+    { name: "chromium", testMatch: /smoke\.spec\.ts$/u, use: chromium },
+    { name: "chromium-fluxos", testIgnore: /smoke\.spec\.ts$/u, dependencies: ["chromium"], use: chromium }
   ],
   webServer: {
     command: "node dist/src/server.js",

@@ -5,6 +5,7 @@
  * e de importação do JSON Resume (`data-form`) continuam tratados pelo `submit` delegado no
  * #view (`handleForm`), e Usar como base/Excluir/Editar (`data-action`, `data-edit-resume`)
  * pela delegação de cliques (`handleAction`). O editor/aprovação segue no modal legado.
+ * #49: "Criar perfil a partir deste PDF" (`create-profile-from-base`) abre a revisão do rascunho.
  * Os campos dos formulários não são controlados: depois de um envio, `handleForm` limpa o
  * formulário (`form.reset()`), já que o diff do Preact preserva os mesmos elementos.
  */
@@ -32,14 +33,20 @@ function ResumeDownloadLinks({ resume }: { resume: Resume }) {
   );
 }
 
-function BaseResumeCard({ resume }: { resume: BaseResume }) {
+function BaseResumeCard({ resume, draftVersion }: { resume: BaseResume; draftVersion: number | null }) {
+  // Sem texto extraído o rascunho nasceria vazio (mesma regra de BASE_RESUME_EXTRACTION_REQUIRED).
+  const extracted = resume.extraction_status === undefined || resume.extraction_status === "extracted";
+  const hintId = `base-resume-hint-${resume.id}`;
   return (
     <article class="resume-card">
       <div class="resume-top">
         <div><h3>{resume.title}</h3><p>{resume.file_name}</p></div>
         <span class={`status-pill ${resume.is_base ? "teal" : "neutral"}`}>{resume.is_base ? "Em uso" : "Na biblioteca"}</span>
       </div>
+      {!extracted ? <p id={hintId} class="muted-text">Não foi possível ler o texto deste PDF (digitalizado como imagem?). Envie um PDF com texto selecionável ou importe um JSON Resume.</p> : null}
+      {extracted && draftVersion != null ? <p id={hintId} class="muted-text">{`Já existe o rascunho de perfil v${draftVersion}: revise-o ou descarte-o em Saúde das buscas antes de criar outro.`}</p> : null}
       <div class="button-row">
+        <button type="button" class="primary-button" data-action="create-profile-from-base" data-resume-id={resume.id} disabled={!extracted || draftVersion != null} aria-describedby={!extracted || draftVersion != null ? hintId : undefined}>Criar perfil a partir deste PDF</button>
         <a class="secondary-button" href={`api/base-resumes/${encodeURIComponent(resume.id)}/file`}>Baixar PDF</a>
         {!resume.is_base ? <button type="button" class="secondary-button" data-action="select-base-resume" data-resume-id={resume.id}>Usar como base</button> : null}
         <button type="button" class="danger-button" data-action="delete-base-resume" data-resume-id={resume.id} data-resume-title={resume.title}>Excluir</button>
@@ -102,7 +109,7 @@ export function ResumesPage({ title }: ResumesPageProps) {
         </form>
         <div class="resume-grid">
           {data.baseResumes.length
-            ? data.baseResumes.map((resume) => <BaseResumeCard key={resume.id} resume={resume} />)
+            ? data.baseResumes.map((resume) => <BaseResumeCard key={resume.id} resume={resume} draftVersion={data.draftProfiles?.[0]?.version ?? null} />)
             : <EmptyState title="Nenhum currículo-base" detail="Envie um PDF para começar a adaptar por vaga." />}
         </div>
       </section>

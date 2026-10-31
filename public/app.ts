@@ -79,7 +79,11 @@ type ParseCheck = ParseCheckSummary & { extracted_text: string; checks: Array<{ 
 type Lifecycle = "open" | "unknown" | "applied" | "lost" | "not_interested";
 
 type Resume = { id: string; job_id: string; base_resume_id: string | null; version: number; title: string; status: string; content: string; keywords: string[]; changes: string[]; updated_at: string; coverage?: Coverage | null; parse_check?: ParseCheckSummary | null; review_status?: string; review_findings?: string[]; fact_check?: { pending: number; warnings: number } };
-type BaseResume = { id: string; title: string; file_name: string; mime_type: "application/pdf"; is_base: boolean; created_at: string; updated_at: string };
+type BaseResume = { id: string; title: string; file_name: string; mime_type: "application/pdf"; is_base: boolean; created_at: string; updated_at: string; extraction_status?: string; page_count?: number };
+/** Informação do perfil profissional; `evidence_excerpt` de fato importado é o JSON Pointer ("/work/0"). */
+type ProfileFact = { id: string; type: string; value: unknown; origin: string; state: string; evidence_page: number | null; evidence_excerpt: string; confidence: number };
+/** Rascunho de perfil do bootstrap (#49): fatos, pendentes e eliminatórios ainda sem fato confirmado. */
+type DraftProfile = { id: string; version: number; status: "draft"; source: string; base_resume_id: string | null; context: Record<string, unknown>; created_at: string; facts: ProfileFact[]; pending: number; pending_without_evidence: number; missing_blockers: string[] };
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
 type AgentRun = { id: string; agent_name: string; status: string; started_at: string; finished_at: string | null; found_count: number; message: string };
@@ -88,7 +92,7 @@ type SourceConfig = { id: string; name: string; source_type: string; domain: str
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
 type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
-type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; automation?: AutomationOverview; stats: Record<string, any> };
+type Data = { jobs: Job[]; resumes: Resume[]; baseResumes: BaseResume[]; applications: Application[]; companies: Company[]; agentRuns: AgentRun[]; agentConfigs: AgentConfig[]; sourceConfigs: SourceConfig[]; enrichmentEvents: EnrichmentEvent[]; preferences: { rules: any[]; values: any[]; suggestions: any[] }; humanQuestions: any[]; profiles: any[]; draftProfiles?: DraftProfile[]; activeProfile: any | null; rounds: any[]; possibleDuplicates: any[]; matchScores: any[]; archivedJobs?: ArchivedJob[]; suppressedJobs?: SuppressedJob[]; timezone?: string; automation?: AutomationOverview; stats: Record<string, any> };
 
 /* ------------------------------------------------------------------ */
 /* Vocabulário: um único lugar traduz cada enum para a interface.      */
@@ -138,16 +142,27 @@ const questionStatusLabels: Record<string, string> = { pending: "Aguardando envi
 const versionStatusLabels: Record<string, string> = { published: "Publicada", draft: "Rascunho", superseded: "Substituída", archived: "Arquivada" };
 const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Bloqueada", configured: "Aguardando teste", pending: "Aguardando teste", degraded: "Instável" };
 const readinessTone: Record<string, string> = { ready: "teal", blocked: "red" };
-const profileStatusLabels: Record<string, string> = { confirmed: "Confirmado", draft: "Rascunho", needs_review: "Em revisão" };
+// `retired`: versão substituída por uma confirmação mais nova (confirmProfessionalProfile).
+const profileStatusLabels: Record<string, string> = { confirmed: "Confirmado", draft: "Rascunho", retired: "Substituído" };
+const profileSourceLabels: Record<string, string> = { pdf: "currículo-base em PDF", json_resume: "JSON Resume importado" };
 const factTypeLabels: Record<string, string> = {
   name: "Nome", contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link profissional", summary: "Resumo", skills: "Habilidades", skill: "Habilidade",
   experience: "Experiência", education: "Formação", languages: "Idiomas", certifications: "Certificações", projects: "Projetos", role: "Cargo", seniority: "Senioridade", location: "Localização",
-  accepted_locations: "Locais aceitos", work_models: "Modelos de trabalho aceitos", work_authorization: "Autorização de trabalho", years_experience: "Anos de experiência"
+  accepted_locations: "Locais aceitos", work_models: "Modelos de trabalho aceitos", work_authorization: "Autorização de trabalho", years_experience: "Anos de experiência",
+  // Tipos livres que agentes e a API costumam usar (QA-09).
+  full_name: "Nome completo", target_role: "Cargo-alvo", target_roles: "Cargos-alvo", certificates: "Certificados", headline: "Título profissional", contact_location: "Localização"
 };
+/** Rótulo de um tipo de fato; tipo livre desconhecido sai em português, sem a chave crua em inglês. */
+function factTypeLabel(type: string) {
+  const known = factTypeLabels[type];
+  if (known) return known;
+  const words = String(type ?? "").replace(/[_.]+/g, " ").trim();
+  return words ? `Outra informação (${words})` : "Outra informação";
+}
 /** Fatos do perfil usados pelos eliminatórios (perguntas da entrevista do Hermes). */
 const blockerFactTypes = ["accepted_locations", "work_models", "work_authorization", "years_experience"];
 const workModelLabels: Record<string, string> = { remote: "Remoto", hybrid: "Híbrido", onsite: "Presencial" };
-const originLabels: Record<string, string> = { pdf: "extraído do PDF", human: "informado por você", user: "informado por você", agent: "informado por agente", system: "calculado pelo sistema", legacy: "importado", import: "importado do JSON Resume" };
+const originLabels: Record<string, string> = { pdf: "extraído do PDF", human: "informado por você", user: "informado por você", agent: "informado por agente", derived: "proposto por agente", system: "calculado pelo sistema", legacy: "importado", import: "importado do JSON Resume" };
 /** Valor de um fato em texto: listas separadas por vírgula; objetos (fatos importados) como "chave: valor". */
 function factText(value: unknown): string {
   if (Array.isArray(value)) return value.map(factText).filter(Boolean).join(", ");
@@ -686,11 +701,13 @@ const operationsPage = preactPage(OperationsPage, () => ({
   readiness: (status: string | null | undefined) => ({ label: label(readinessLabels, status ?? "configured"), tone: readinessTone[status ?? ""] ?? "orange" }),
   questionStatusLabel: (status: string) => label(questionStatusLabels, status),
   profileStatusLabel: (status: string) => label(profileStatusLabels, status),
-  factTypeLabel: (type: string) => label(factTypeLabels, type),
+  profileSourceLabel: (source: string) => label(profileSourceLabels, source),
+  factTypeLabel,
   originLabel: (origin: string) => label(originLabels, origin),
   factDisplay,
   describeRule,
-  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type))
+  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map(factTypeLabel),
+  workModelLabels
 }));
 const jobsPage = preactPage(JobsPage, () => ({
   title: pageMeta.jobs.label,
@@ -721,7 +738,7 @@ const settingsPage = preactPage(SettingsPage, () => ({
 }));
 /** Tipos lidos pelos componentes de public/ui/ (só `import type`; nada disso vai para o bundle). */
 export type AppState = typeof state;
-export type { AgentConfig, BaseResume, Data, Job, Lifecycle, ParseCheckSummary, Resume, SortKey };
+export type { AgentConfig, BaseResume, Data, DraftProfile, Job, Lifecycle, ParseCheckSummary, ProfileFact, Resume, SortKey };
 
 function render() {
   if (!state.data) return;
@@ -835,11 +852,19 @@ const errorMessages: Record<string, string> = {
   PDF_EXTRACTION_FAILED: "Não foi possível ler o texto do PDF.",
   PDF_EXTRACTION_TIMEOUT: "A leitura do PDF demorou demais.",
   PROFILE_CONFIRMATION_REQUIRED: "Confirme o perfil profissional antes de continuar.",
-  PROFILE_FACTS_UNCONFIRMED: "Revise os fatos pendentes do perfil antes de confirmar.",
-  PROFILE_EMPTY: "O perfil ainda não tem fatos confirmados.",
+  PROFILE_FACTS_UNCONFIRMED: "Ainda há informações do perfil a revisar: confirme ou rejeite cada uma antes de confirmar o perfil.",
+  PROFILE_EMPTY: "O perfil ainda não tem nenhuma informação confirmada.",
   PROFILE_SNAPSHOT_REQUIRED: "Confirme o perfil profissional antes: a nota e o currículo usam a versão confirmada do perfil.",
   PROFILE_SNAPSHOT_INVALID: "A versão do perfil informada não existe. Atualize a página.",
-  "profile.draft_required": "Só um perfil em rascunho pode ser alterado. Atualize a página.",
+  "profile.draft_required": "Só um perfil em rascunho pode ser alterado: crie uma nova versão a partir do perfil confirmado.",
+  "profile.not_found": "Perfil não encontrado. Atualize a página.",
+  "profile.draft_exists": "Já existe um perfil em rascunho: revise-o ou descarte-o antes de criar outra versão.",
+  "profile.confirmed_required": "A nova versão parte do perfil confirmado (ativo).",
+  "profile.fact.not_found": "Essa informação não existe neste perfil. Atualize a página.",
+  "profile.fact.state.invalid": "Estado da informação do perfil inválido. Atualize a página.",
+  BASE_RESUME_EXTRACTION_REQUIRED: "O texto do currículo-base não foi extraído: envie um PDF com texto selecionável (não digitalizado como imagem).",
+  "base_resume.not_found": "Currículo-base não encontrado. Atualize a página.",
+  "base_resume.required": "Escolha um currículo-base em PDF (ou use um perfil importado de JSON Resume).",
   "profile.fact.invalid": "Informação do perfil inválida: informe o tipo e um valor; listas aceitam só textos, números ou sim/não.",
   "profile.interview.invalid": "Resposta inválida: listas aceitam só textos, números ou sim/não.",
   "profile.fact.evidence.required": "Esta informação precisa de evidência (página ou trecho) para ser confirmada.",
@@ -884,6 +909,8 @@ const errorPrefixMessages: Array<[string, string]> = [
   ["source.", "A configuração da fonte foi recusada. Revise os campos."],
   ["application.", "A candidatura não pode seguir nesta etapa."],
   ["resume.", "O currículo não pode ser alterado nesta etapa."],
+  ["profile.", "O perfil profissional não pode ser alterado assim. Atualize a página e revise."],
+  ["PROFILE_", "Confirme o perfil profissional antes de continuar."],
   ["ATS_", "O currículo ATS não passou nas verificações."],
   ["job.", "Os dados da vaga foram recusados. Revise os campos."],
   ["salary.", "A faixa salarial foi recusada. Revise valores e moeda."],
@@ -1503,6 +1530,95 @@ function jobFormBody(form: HTMLFormElement, get: (name: string) => string, editi
   return Object.fromEntries(Object.entries(body).filter(([key]) => !editing || has(key) || key === "salary_source"));
 }
 
+/* ------------------------------------------------------------------ */
+/* Perfil profissional (#49): criar, revisar, confirmar, nova versão    */
+/* ------------------------------------------------------------------ */
+
+type ProfileResponse = { id: string; version: number; facts?: ProfileFact[] };
+
+/** Leva à revisão do rascunho em "Saúde das buscas" (sem recarregar) e põe o foco no título dela. */
+function showProfileDraft() {
+  closeMobileMore();
+  if (state.page !== "operations") {
+    // pushState não dispara hashchange: a página é desenhada aqui e o Voltar do navegador continua funcionando.
+    history.pushState(null, "", hashFor("operations"));
+    state.page = "operations";
+    render();
+  }
+  const heading = document.getElementById("profile-draft-heading") ?? document.getElementById("active-profile-heading");
+  heading?.scrollIntoView({ block: "start" });
+  heading?.focus({ preventScroll: true });
+}
+
+function profilePath(profileId: string, suffix = "") {
+  return `/api/profiles/${encodeURIComponent(profileId)}${suffix}`;
+}
+
+async function createProfileFromBase(resumeId: string) {
+  const profile = await fetchJson<ProfileResponse>(`/api/base-resumes/${encodeURIComponent(resumeId)}/create-profile`, { method: "POST" });
+  await loadData();
+  toast(`Perfil v${profile.version} criado em rascunho com ${profile.facts?.length ?? 0} informações para revisar.`);
+  showProfileDraft();
+}
+
+async function reviewProfileFact(profileId: string, factId: string, factState: string) {
+  if (factState !== "confirmed" && factState !== "rejected") return;
+  await fetchJson(profilePath(profileId, `/facts/${encodeURIComponent(factId)}/review`), { method: "POST", body: JSON.stringify({ state: factState }) });
+  await loadData();
+  toast(factState === "confirmed" ? "Informação confirmada." : "Informação rejeitada.");
+  // O botão clicado some depois da revisão: o foco volta para a própria informação.
+  document.getElementById(`profile-fact-${factId}`)?.focus();
+}
+
+async function confirmPendingProfileFacts(profileId: string) {
+  const result = await fetchJson<{ confirmed: number; skipped: number }>(profilePath(profileId, "/facts/review-all"), { method: "POST", body: JSON.stringify({ state: "confirmed" }) });
+  await loadData();
+  const skipped = result.skipped ? ` ${result.skipped} sem evidência continua${result.skipped === 1 ? "" : "m"} para revisar.` : "";
+  toast(`${result.confirmed} informaç${result.confirmed === 1 ? "ão confirmada" : "ões confirmadas"}.${skipped}`);
+  document.getElementById("profile-draft-heading")?.focus();
+}
+
+async function confirmProfile(profileId: string, version: string) {
+  if (!await confirmDialog(`Confirmar o perfil v${version}?`, "As buscas, a nota de aderência e os currículos passam a usar só as informações confirmadas desta versão. A versão anterior fica no histórico.", "Confirmar perfil")) return;
+  const profile = await fetchJson<ProfileResponse>(profilePath(profileId, "/confirm"), { method: "POST" });
+  await loadData();
+  toast(`Perfil ativo v${profile.version}.`);
+  document.getElementById("active-profile-heading")?.focus();
+}
+
+async function discardProfileDraft(profileId: string, version: string) {
+  if (!await confirmDialog(`Descartar o rascunho v${version}?`, "As informações e respostas deste rascunho serão apagadas. O perfil confirmado, se houver, não muda.", "Descartar", true)) return;
+  await fetchJson(profilePath(profileId), { method: "DELETE" });
+  await loadData();
+  toast("Rascunho descartado.");
+  (document.getElementById("profile-draft-heading") ?? document.getElementById("active-profile-heading"))?.focus();
+}
+
+async function createProfileVersion(profileId: string) {
+  const profile = await fetchJson<ProfileResponse>(profilePath(profileId, "/new-version"), { method: "POST" });
+  await loadData();
+  toast(`Rascunho v${profile.version} criado a partir do perfil ativo. Revise, responda a entrevista e confirme.`);
+  showProfileDraft();
+}
+
+/** Entrevista dos eliminatórios: cada resposta preenchida vira informação sua (confirmada) no rascunho. */
+async function saveProfileInterview(form: HTMLFormElement, formData: FormData, get: (name: string) => string) {
+  const profileId = form.dataset.profileId ?? "";
+  const list = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
+  const answers: Array<[string, unknown]> = [];
+  if (get("accepted_locations")) answers.push(["accepted_locations", list(get("accepted_locations"))]);
+  const models = formData.getAll("work_models").map(String);
+  if (models.length) answers.push(["work_models", models]);
+  if (get("work_authorization_countries")) answers.push(["work_authorization", { countries: list(get("work_authorization_countries")), needs_sponsorship: formData.get("needs_sponsorship") === "on" }]);
+  if (get("years_experience")) answers.push(["years_experience", Number(get("years_experience"))]);
+  if (!answers.length) throw new Error("Preencha pelo menos uma resposta.");
+  for (const [questionKey, answer] of answers) {
+    await fetchJson(profilePath(profileId, "/interview"), { method: "POST", body: JSON.stringify({ question_key: questionKey, answer }) });
+  }
+  form.reset(); await loadData();
+  toast(answers.length === 1 ? "Resposta salva no rascunho." : `${answers.length} respostas salvas no rascunho.`);
+}
+
 async function handleForm(form: HTMLFormElement) {
   const formData = new FormData(form);
   const get = (name: string) => String(formData.get(name) ?? "").trim();
@@ -1523,8 +1639,10 @@ async function handleForm(form: HTMLFormElement) {
     try { JSON.parse(text); } catch { throw new Error("O arquivo não é um JSON válido."); }
     const profile = await fetchJson<{ version: number; facts?: unknown[] }>("/api/profiles/import/json-resume", { method: "POST", body: text });
     form.reset(); await loadData();
-    toast(`Perfil v${profile.version} criado em rascunho com ${profile.facts?.length ?? 0} informações para revisar.`); return;
+    toast(`Perfil v${profile.version} criado em rascunho com ${profile.facts?.length ?? 0} informações para revisar.`);
+    showProfileDraft(); return;
   }
+  if (form.dataset.form === "profile-interview") { await saveProfileInterview(form, formData, get); return; }
   if (form.dataset.form === "job") {
     const jobId = form.dataset.jobId;
     const body = jobFormBody(form, get, Boolean(jobId));
@@ -1893,6 +2011,13 @@ async function handleAction(target: HTMLElement) {
     case "revoke-auto": if (action.dataset.applicationId) await revokeAutomaticApplication(action.dataset.applicationId); return;
     case "application-detail": showApplicationModal(jobId); return;
     case "select-base-resume": await fetchJson(`/api/base-resumes/${encodeURIComponent(action.dataset.resumeId ?? "")}/select`, { method: "POST" }); await loadData(); toast("Currículo-base selecionado."); return;
+    case "create-profile-from-base": await createProfileFromBase(action.dataset.resumeId ?? ""); return;
+    case "goto-profile-draft": showProfileDraft(); return;
+    case "review-profile-fact": await reviewProfileFact(action.dataset.profileId ?? "", action.dataset.factId ?? "", action.dataset.state ?? ""); return;
+    case "confirm-pending-facts": await confirmPendingProfileFacts(action.dataset.profileId ?? ""); return;
+    case "confirm-profile": await confirmProfile(action.dataset.profileId ?? "", action.dataset.profileVersion ?? ""); return;
+    case "discard-profile": await discardProfileDraft(action.dataset.profileId ?? "", action.dataset.profileVersion ?? ""); return;
+    case "new-profile-version": await createProfileVersion(action.dataset.profileId ?? ""); return;
     case "delete-base-resume": {
       if (!await confirmDialog("Excluir currículo-base?", `“${action.dataset.resumeTitle ?? "Este PDF"}” será removido da biblioteca. Os currículos já adaptados continuam salvos.`, "Excluir", true)) return;
       await fetchJson(`/api/base-resumes/${encodeURIComponent(action.dataset.resumeId ?? "")}`, { method: "DELETE" }); await loadData(); toast("PDF removido da biblioteca."); return;
