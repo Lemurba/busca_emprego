@@ -92,6 +92,7 @@ function ResumeCard({ resume, job }: { resume: Resume; job: Job | undefined }) {
 export function ResumesPage({ title }: ResumesPageProps) {
   const data = appData();
   const jobs = new Map(data.jobs.map((job) => [job.id, job]));
+  const draftVersion = data.draftProfiles?.[0]?.version ?? null;
   return (
     <>
       <PageHeading title={title} subtitle="Revise o currículo adaptado a cada vaga e aprove antes de qualquer envio. A aprovação não envia nada sozinha." />
@@ -103,13 +104,14 @@ export function ResumesPage({ title }: ResumesPageProps) {
           <button class="primary-button" type="submit">Enviar PDF</button>
         </form>
         <form data-form="json-resume-import" class="base-resume-form">
-          <div class="form-field"><span>Já tem um currículo em JSON Resume?</span><small>Vira um novo perfil em rascunho; revise e confirme as informações antes de usar.</small></div>
+          {/* Mesmo "um rascunho por vez" do PDF-base: o servidor recusa com profile.draft_exists. */}
+          <div class="form-field"><span>Já tem um currículo em JSON Resume?</span><small>{draftVersion != null ? `Já existe o rascunho de perfil v${draftVersion}: revise-o ou descarte-o em Saúde das buscas antes de importar.` : "Vira um novo perfil em rascunho; revise e confirme as informações antes de usar."}</small></div>
           <div class="form-field"><label for="json-resume-file">Arquivo JSON Resume (máx. 1 MB)</label><input class="input" id="json-resume-file" name="file" type="file" accept="application/json,.json" required /></div>
           <button class="secondary-button" type="submit">Importar JSON Resume</button>
         </form>
         <div class="resume-grid">
           {data.baseResumes.length
-            ? data.baseResumes.map((resume) => <BaseResumeCard key={resume.id} resume={resume} draftVersion={data.draftProfiles?.[0]?.version ?? null} />)
+            ? data.baseResumes.map((resume) => <BaseResumeCard key={resume.id} resume={resume} draftVersion={draftVersion} />)
             : <EmptyState title="Nenhum currículo-base" detail="Envie um PDF para começar a adaptar por vaga." />}
         </div>
       </section>

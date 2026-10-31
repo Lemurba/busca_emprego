@@ -44,25 +44,34 @@ function plural(count: number, singular: string, pluralForm: string) {
 }
 
 /** Sem perfil confirmado: caminhos para criar um (PDF-base, JSON Resume) ou seguir no rascunho. */
-function ProfileOnboarding({ draft, baseResume }: { draft: { version: number } | undefined; baseResume: BaseResume | undefined }) {
-  const extracted = baseResume?.extraction_status === "extracted";
+function ProfileOnboarding({ draft, baseResume, resumes }: { draft: { version: number } | undefined; baseResume: BaseResume | undefined; resumes: BaseResume[] }) {
+  const isExtracted = (resume: BaseResume | undefined) => resume?.extraction_status === "extracted";
+  // PDF-base sem texto (digitalizado): oferece outro PDF da biblioteca que tenha texto, se houver.
+  const source = isExtracted(baseResume) ? baseResume : resumes.find(isExtracted);
+  const unreadable = Boolean(baseResume) && !source;
+  const text = draft
+    ? `O rascunho v${draft.version} espera sua revisão. Confirme o perfil para liberar as buscas, a nota e os currículos.`
+    : unreadable
+      ? "Não foi possível ler o texto do PDF-base (digitalizado como imagem?): envie um PDF com texto selecionável ou importe um JSON Resume, revise as informações e confirme."
+      : "Crie o perfil a partir do currículo-base em PDF ou de um JSON Resume, revise as informações e confirme.";
   return (
     <div class="empty-state">
       <div>
         <strong>Nenhum perfil confirmado</strong>
-        <span>{draft ? `O rascunho v${draft.version} espera sua revisão. Confirme o perfil para liberar as buscas, a nota e os currículos.` : "Crie o perfil a partir do currículo-base em PDF ou de um JSON Resume, revise as informações e confirme."}</span>
+        <span>{text}</span>
         <div class="button-row">
           {draft ? <button type="button" class="primary-button" data-action="goto-profile-draft">{`Revisar rascunho v${draft.version}`}</button> : null}
-          {!draft && baseResume && extracted ? <button type="button" class="primary-button" data-action="create-profile-from-base" data-resume-id={baseResume.id}>Criar perfil a partir do PDF-base</button> : null}
+          {!draft && source ? <button type="button" class="primary-button" data-action="create-profile-from-base" data-resume-id={source.id}>{source === baseResume ? "Criar perfil a partir do PDF-base" : `Criar perfil a partir de “${source.title}”`}</button> : null}
+          {!draft && unreadable ? <button type="button" class="primary-button" data-page="resumes">Enviar outro PDF</button> : null}
           {!draft && !baseResume ? <button type="button" class="primary-button" data-page="resumes">Enviar currículo em PDF</button> : null}
-          <button type="button" class="secondary-button" data-page="resumes">Importar JSON Resume</button>
+          {!draft ? <button type="button" class="secondary-button" data-page="resumes">Importar JSON Resume</button> : null}
         </div>
       </div>
     </div>
   );
 }
 
-function ProfilePanel({ profile, facts, draft, baseResume, props }: { profile: any; facts: Fact[]; draft: { version: number } | undefined; baseResume: BaseResume | undefined; props: OperationsPageProps }) {
+function ProfilePanel({ profile, facts, draft, baseResume, resumes, props }: { profile: any; facts: Fact[]; draft: { version: number } | undefined; baseResume: BaseResume | undefined; resumes: BaseResume[]; props: OperationsPageProps }) {
   const missing = profile ? props.missingBlockers(facts) : [];
   return (
     <section class="panel">
@@ -87,7 +96,7 @@ function ProfilePanel({ profile, facts, draft, baseResume, props }: { profile: a
             </article>
           )) : <EmptyState title="Perfil sem informações" detail="Crie uma nova versão para revisar as informações." compact />}
         </div>
-      ) : <ProfileOnboarding draft={draft} baseResume={baseResume} />}
+      ) : <ProfileOnboarding draft={draft} baseResume={baseResume} resumes={resumes} />}
       {missing.length ? <p class="muted-text">{`Eliminatórios sem resposta no perfil: ${missing.join(", ")}. ${draft ? "Responda na entrevista do rascunho abaixo" : "Para responder, crie uma nova versão do perfil e use a entrevista do rascunho"}; respostas dadas ao Hermes chegam ao rascunho como propostas e só valem depois que você as confirma. Até lá essas checagens aparecem como “não verificado”.`}</p> : null}
     </section>
   );
@@ -125,7 +134,7 @@ export function OperationsPage(props: OperationsPageProps) {
       </div>
       <AutomationPanel automation={data.automation} jobLabel={(applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || "")} formatDate={formatDate} />
       <div class="dashboard-grid equal section-spaced">
-        <ProfilePanel profile={profile} facts={facts} draft={draft} baseResume={baseResume} props={props} />
+        <ProfilePanel profile={profile} facts={facts} draft={draft} baseResume={baseResume} resumes={data.baseResumes} props={props} />
         <section class="panel">
           <div class="section-head flush"><div><h2>Perguntas para você</h2><p>Os agentes param e esperam sua resposta no Telegram.</p></div></div>
           <div class="ops-list">
@@ -141,7 +150,7 @@ export function OperationsPage(props: OperationsPageProps) {
           </div>
         </section>
       </div>
-      <ProfileDraftPanel drafts={drafts} factTypeLabel={props.factTypeLabel} originLabel={props.originLabel} profileSourceLabel={props.profileSourceLabel} factDisplay={props.factDisplay} formatDate={formatDate} workModelLabels={props.workModelLabels} />
+      <ProfileDraftPanel drafts={drafts} factTypeLabel={props.factTypeLabel} originLabel={props.originLabel} profileSourceLabel={props.profileSourceLabel} factDisplay={props.factDisplay} formatDate={formatDate} workModelLabels={props.workModelLabels} activeVersion={profile?.version ?? null} />
       <div class="dashboard-grid equal section-spaced">
         <section class="panel">
           <div class="section-head flush"><div><h2>Possíveis duplicatas</h2><p>Quando há dúvida, você decide.</p></div></div>

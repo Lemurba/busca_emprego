@@ -81,7 +81,7 @@ type Lifecycle = "open" | "unknown" | "applied" | "lost" | "not_interested";
 type Resume = { id: string; job_id: string; base_resume_id: string | null; version: number; title: string; status: string; content: string; keywords: string[]; changes: string[]; updated_at: string; coverage?: Coverage | null; parse_check?: ParseCheckSummary | null; review_status?: string; review_findings?: string[]; fact_check?: { pending: number; warnings: number } };
 type BaseResume = { id: string; title: string; file_name: string; mime_type: "application/pdf"; is_base: boolean; created_at: string; updated_at: string; extraction_status?: string; page_count?: number };
 /** Informação do perfil profissional; `evidence_excerpt` de fato importado é o JSON Pointer ("/work/0"). */
-type ProfileFact = { id: string; type: string; value: unknown; origin: string; state: string; evidence_page: number | null; evidence_excerpt: string; confidence: number };
+type ProfileFact = { id: string; type: string; value: unknown; origin: string; state: string; evidence_page: number | null; evidence_excerpt: string; confidence: number; interview_proposal?: boolean };
 /** Rascunho de perfil do bootstrap (#49): fatos, pendentes e eliminatórios ainda sem fato confirmado. */
 type DraftProfile = { id: string; version: number; status: "draft"; source: string; base_resume_id: string | null; context: Record<string, unknown>; created_at: string; facts: ProfileFact[]; pending: number; pending_without_evidence: number; missing_blockers: string[] };
 type Application = { id: string; job_id: string; resume_id: string | null; status: string; automation_mode: string; auto_authorized_at: string | null; authorized_resume_id: string | null; current_step: string; submitted_at: string | null; notes: string; updated_at: string };
@@ -859,6 +859,7 @@ const errorMessages: Record<string, string> = {
   "profile.draft_required": "Só um perfil em rascunho pode ser alterado: crie uma nova versão a partir do perfil confirmado.",
   "profile.not_found": "Perfil não encontrado. Atualize a página.",
   "profile.draft_exists": "Já existe um perfil em rascunho: revise-o ou descarte-o antes de criar outra versão.",
+  "profile.draft_stale": "Este rascunho é mais antigo que o perfil ativo: descarte-o e crie uma nova versão a partir do perfil ativo.",
   "profile.confirmed_required": "A nova versão parte do perfil confirmado (ativo).",
   "profile.fact.not_found": "Essa informação não existe neste perfil. Atualize a página.",
   "profile.fact.state.invalid": "Estado da informação do perfil inválido. Atualize a página.",
@@ -1606,14 +1607,32 @@ async function saveProfileInterview(form: HTMLFormElement, formData: FormData, g
   const profileId = form.dataset.profileId ?? "";
   const list = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
   const answers: Array<[string, unknown]> = [];
-  if (get("accepted_locations")) answers.push(["accepted_locations", list(get("accepted_locations"))]);
+  // Validação antes de enviar: lista só com vírgulas viraria [] e o servidor recusaria sem dizer qual campo.
+  if (get("accepted_locations")) {
+    const locations = list(get("accepted_locations"));
+    if (!locations.length) throw new Error("Locais aceitos: informe pelo menos um local (separe por vírgula).");
+    answers.push(["accepted_locations", locations]);
+  }
   const models = formData.getAll("work_models").map(String);
   if (models.length) answers.push(["work_models", models]);
-  if (get("work_authorization_countries")) answers.push(["work_authorization", { countries: list(get("work_authorization_countries")), needs_sponsorship: formData.get("needs_sponsorship") === "on" }]);
+  const needsSponsorship = formData.get("needs_sponsorship") === "on";
+  if (get("work_authorization_countries") || needsSponsorship) {
+    const countries = list(get("work_authorization_countries"));
+    if (!countries.length) throw new Error("Países onde pode trabalhar: informe pelo menos um país (o patrocínio de visto vale para esses países).");
+    answers.push(["work_authorization", { countries, needs_sponsorship: needsSponsorship }]);
+  }
   if (get("years_experience")) answers.push(["years_experience", Number(get("years_experience"))]);
   if (!answers.length) throw new Error("Preencha pelo menos uma resposta.");
-  for (const [questionKey, answer] of answers) {
-    await fetchJson(profilePath(profileId, "/interview"), { method: "POST", body: JSON.stringify({ question_key: questionKey, answer }) });
+  let saved = 0;
+  try {
+    for (const [questionKey, answer] of answers) {
+      await fetchJson(profilePath(profileId, "/interview"), { method: "POST", body: JSON.stringify({ question_key: questionKey, answer }) });
+      saved += 1;
+    }
+  } catch (error) {
+    // Uma resposta por requisição: as anteriores já ficaram salvas, então o aviso diz quantas.
+    if (saved) { await loadData(); throw new Error(`${saved === 1 ? "1 resposta salva" : `${saved} respostas salvas`}; ${factTypeLabel(answers[saved]![0])} recusada: ${error instanceof Error ? error.message : String(error)}`); }
+    throw error;
   }
   form.reset(); await loadData();
   toast(answers.length === 1 ? "Resposta salva no rascunho." : `${answers.length} respostas salvas no rascunho.`);

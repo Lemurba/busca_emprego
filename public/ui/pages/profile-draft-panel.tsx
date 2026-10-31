@@ -22,7 +22,12 @@ export type ProfileDraftPanelProps = {
   factDisplay: (fact: ProfileFact) => string;
   formatDate: (value: string | null | undefined) => string;
   workModelLabels: Record<string, string>;
+  /** Versão do perfil ativo: rascunho mais velho que ela não pode ser confirmado (`profile.draft_stale`). */
+  activeVersion: number | null;
 };
+
+/** Eliminatórios cobertos pela entrevista (BLOCKER_FACT_TYPES em src/blockers.ts). */
+const INTERVIEW_TYPES = ["accepted_locations", "work_models", "work_authorization", "years_experience"];
 
 const PENDING_STATES = ["proposed", "needs_review"];
 const stateMeta: Record<string, { label: string; tone: string }> = {
@@ -40,13 +45,26 @@ function hasEvidence(fact: ProfileFact) {
   return fact.origin === "user" || fact.evidence_page != null || Boolean(String(fact.evidence_excerpt ?? "").trim());
 }
 
+/** Entra em "Confirmar todos": com evidência e sem ser resposta repassada por agente (mesma regra do servidor). */
+function bulkConfirmable(fact: ProfileFact) {
+  return hasEvidence(fact) && !fact.interview_proposal;
+}
+
+/** De onde o rascunho veio; sem PDF-base e sem import, as informações foram declaradas (manual/agente). */
+function draftOrigin(draft: DraftProfile, props: ProfileDraftPanelProps) {
+  return draft.source === "pdf" && !draft.base_resume_id ? "informações declaradas, sem PDF-base" : props.profileSourceLabel(draft.source);
+}
+
 /** De onde a informação saiu: JSON Pointer do import, página e trecho do PDF, ou declaração sua. */
 function Evidence({ fact }: { fact: ProfileFact }) {
   const excerpt = String(fact.evidence_excerpt ?? "").trim();
   if (fact.origin === "import" && excerpt.startsWith("/")) return <span>Trecho do JSON Resume: <code>{excerpt}</code></span>;
   if (fact.origin === "user") return <span>Declaração sua</span>;
+  if (fact.interview_proposal) return <span>{`Resposta repassada por agente: “${excerpt.length > 180 ? `${excerpt.slice(0, 180)}…` : excerpt}”. Confirme uma a uma (fica fora de “Confirmar todos”) ou responda você mesmo na entrevista abaixo.`}</span>;
   const parts = [fact.evidence_page != null ? `página ${fact.evidence_page}` : "", excerpt ? `“${excerpt.length > 180 ? `${excerpt.slice(0, 180)}…` : excerpt}”` : ""].filter(Boolean);
-  return <span>{parts.length ? `Evidência: ${parts.join(" · ")}` : "Sem evidência: só pode ser rejeitada ou respondida na entrevista abaixo."}</span>;
+  if (parts.length) return <span>{`Evidência: ${parts.join(" · ")}`}</span>;
+  // Só a resposta da entrevista a um eliminatório substitui a proposta (rejeitada no servidor).
+  return <span>{INTERVIEW_TYPES.includes(fact.type) ? "Sem evidência: rejeite-a ou responda na entrevista abaixo (sua resposta a substitui)." : "Sem evidência: só pode ser rejeitada."}</span>;
 }
 
 function FactRow({ fact, profileId, props }: { fact: ProfileFact; profileId: string; props: ProfileDraftPanelProps }) {
@@ -128,11 +146,16 @@ export function ProfileDraftPanel(props: ProfileDraftPanelProps) {
   const draft = drafts.find((item) => item.id === selectedId) ?? drafts[0]!;
   const others = drafts.filter((item) => item.id !== draft.id);
   const pending = draft.facts.filter((fact) => PENDING_STATES.includes(fact.state));
-  const pendingWithEvidence = pending.filter(hasEvidence).length;
+  const pendingWithEvidence = pending.filter(bulkConfirmable).length;
+  const withoutEvidence = pending.filter((fact) => !hasEvidence(fact)).length;
+  const relayed = pending.filter((fact) => fact.interview_proposal).length;
+  const stale = props.activeVersion != null && props.activeVersion > draft.version;
   const confirmedCount = draft.facts.filter((fact) => fact.state === "confirmed").length;
   const hasContext = Object.keys(draft.context ?? {}).length > 0;
   // Mesmas regras de confirmProfessionalProfile: sem pendentes e com algo confirmado.
-  const blockReason = pending.length
+  const blockReason = stale
+    ? `Este rascunho (v${draft.version}) é mais antigo que o perfil ativo v${props.activeVersion}: confirmá-lo desfaria a versão nova. Descarte-o e crie uma nova versão a partir do perfil ativo.`
+    : pending.length
     ? `Faltam ${plural(pending.length, "informação", "informações")} para revisar: confirme ou rejeite cada uma antes de confirmar o perfil.`
     : !confirmedCount && !hasContext ? "Confirme pelo menos uma informação antes de confirmar o perfil." : "";
   return (
@@ -140,7 +163,7 @@ export function ProfileDraftPanel(props: ProfileDraftPanelProps) {
       <div class="section-head flush">
         <div>
           <h2 id="profile-draft-heading" tabIndex={-1}>{`Perfil em rascunho (v${draft.version})`}</h2>
-          <p>{`Criado a partir de ${props.profileSourceLabel(draft.source)} em ${props.formatDate(draft.created_at)}. Só informações confirmadas entram nas buscas, na nota e nos currículos.`}</p>
+          <p>{`${draft.source === "pdf" && !draft.base_resume_id ? "Criado sem PDF-base (informações declaradas)" : `Criado a partir de ${props.profileSourceLabel(draft.source)}`} em ${props.formatDate(draft.created_at)}. Só informações confirmadas entram nas buscas, na nota e nos currículos.`}</p>
         </div>
         <span class={`status-pill ${pending.length ? "orange" : "teal"}`}>{pending.length ? `${plural(pending.length, "pendente", "pendentes")}` : "Revisado"}</span>
       </div>
@@ -152,8 +175,11 @@ export function ProfileDraftPanel(props: ProfileDraftPanelProps) {
         <button type="button" class="danger-button" data-action="discard-profile" data-profile-id={draft.id} data-profile-version={String(draft.version)}>Descartar rascunho</button>
       </div>
       {blockReason ? <p id="profile-confirm-reason" class="muted-text">{blockReason}</p> : null}
-      {pending.length > pendingWithEvidence ? (
-        <p class="muted-text">{`${plural(pending.length - pendingWithEvidence, "informação não tem", "informações não têm")} evidência e fica fora de “Confirmar todos”: rejeite ou responda na entrevista.`}</p>
+      {withoutEvidence ? (
+        <p class="muted-text">{`${plural(withoutEvidence, "informação não tem evidência e fica", "informações não têm evidência e ficam")} fora de “Confirmar todos”: rejeite; se for um eliminatório, você também pode responder na entrevista.`}</p>
+      ) : null}
+      {relayed ? (
+        <p class="muted-text">{`${plural(relayed, "resposta repassada por agente fica", "respostas repassadas por agente ficam")} fora de “Confirmar todos”: confirme ou rejeite uma a uma.`}</p>
       ) : null}
       <div class="ops-list">
         {draft.facts.length
@@ -167,7 +193,7 @@ export function ProfileDraftPanel(props: ProfileDraftPanelProps) {
           <div class="ops-list">
             {others.map((other) => (
               <article key={other.id} class="ops-item">
-                <div><strong>{`Rascunho v${other.version}`}</strong><span>{`${props.profileSourceLabel(other.source)} · ${plural(other.pending, "pendente", "pendentes")} · ${props.formatDate(other.created_at)}`}</span></div>
+                <div><strong>{`Rascunho v${other.version}`}</strong><span>{`${draftOrigin(other, props)} · ${plural(other.pending, "pendente", "pendentes")} · ${props.formatDate(other.created_at)}`}</span></div>
                 <div class="button-row">
                   <button type="button" class="secondary-button" onClick={() => { setSelectedId(other.id); setTimeout(() => document.getElementById("profile-draft-heading")?.focus(), 0); }}>{`Revisar v${other.version}`}</button>
                   <button type="button" class="danger-button" data-action="discard-profile" data-profile-id={other.id} data-profile-version={String(other.version)}>Descartar</button>
