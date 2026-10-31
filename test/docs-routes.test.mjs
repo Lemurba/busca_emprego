@@ -30,7 +30,7 @@ function registeredRoutes() {
   return routes;
 }
 
-const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
 /**
  * A rota conta como documentada quando alguma linha do documento (linha de tabela ou parágrafo)
@@ -39,7 +39,7 @@ const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
  * "`GET` / `POST /api/...`", "`GET /api/...` / `PUT`" e "PUT/DELETE /api/...".
  */
 function documented(lines, { method, path }) {
-  const bounded = new RegExp(`${escape(normalize(path))}(?![A-Za-z0-9/_{-])`, "u");
+  const bounded = new RegExp(`${escapeRegExp(normalize(path))}(?![A-Za-z0-9/_{-])`, "u");
   const verb = new RegExp(`(?<![A-Za-z])${method}(?![A-Za-z])`, "u");
   return lines.some((line) => bounded.test(line) && verb.test(line));
 }
