@@ -1269,7 +1269,9 @@ const versionOriginLabels: Record<string, string> = { human: "editada por você"
 
 async function showAgentHistory(agentId: string) {
   const versions = await fetchJson<Array<{ id: string; version: number; status: string; checksum: string; created_at: string; published_at?: string | null; origin?: string }>>(`/api/agents/${encodeURIComponent(agentId)}/versions`);
-  openModal("Versões do agente", "Restaurar uma versão cria uma nova versão publicada; nada é apagado.", `<div class="version-list">${versions.map((version) => `<article class="ops-item"><div><strong>Versão ${version.version}</strong><span>${escapeHtml(formatDate(version.created_at))}${version.origin ? ` · ${escapeHtml(label(versionOriginLabels, version.origin))}` : ""}</span></div><div class="button-row"><span class="status-pill ${version.status === "published" ? "teal" : "neutral"}">${escapeHtml(label(versionStatusLabels, version.status))}</span>${version.status === "draft" ? `<button class="secondary-button" data-publish-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Revisar e publicar</button>` : version.status !== "published" && version.published_at ? `<button class="secondary-button" data-rollback-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Restaurar</button>` : ""}</div></article>`).join("") || `<p>Nenhuma versão registrada.</p>`}</div>`);
+  // Só o rascunho atual é publicável (o servidor recusa os superados com agent.version.stale).
+  const currentDraftId = currentData().agentConfigs.find((agent) => agent.id === agentId)?.draft_version_id ?? null;
+  openModal("Versões do agente", "Restaurar uma versão cria uma nova versão publicada; nada é apagado.", `<div class="version-list">${versions.map((version) => `<article class="ops-item"><div><strong>Versão ${version.version}</strong><span>${escapeHtml(formatDate(version.created_at))}${version.origin ? ` · ${escapeHtml(label(versionOriginLabels, version.origin))}` : ""}</span></div><div class="button-row"><span class="status-pill ${version.status === "published" ? "teal" : "neutral"}">${escapeHtml(label(versionStatusLabels, version.status))}</span>${version.status === "draft" && version.id === currentDraftId ? `<button class="secondary-button" data-publish-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Revisar e publicar</button>` : version.status !== "published" && version.published_at ? `<button class="secondary-button" data-rollback-agent="${escapeHtml(agentId)}" data-version-id="${escapeHtml(version.id)}">Restaurar</button>` : ""}</div></article>`).join("") || `<p>Nenhuma versão registrada.</p>`}</div>`);
 }
 
 function showJobDetail(id: string) {
@@ -2016,7 +2018,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("logout-button")?.addEventListener("click", async () => { if (await confirmDialog("Sair do painel?", "Para voltar, você vai precisar de um novo link de acesso enviado pelo Hermes.", "Sair")) void logout(); });
   document.getElementById("auth-retry")?.addEventListener("click", () => loadData());
   view().addEventListener("click", (event) => { void handleViewClick(event).catch((error) => toast(error instanceof Error ? error.message : "Falha na operação", true)); });
-  modalRoot().addEventListener("input", () => { state.modalDirty = true; });
+  // A caixa "Revisei as mudanças" da revisão de publicação não é edição: fechar não pede descarte.
+  modalRoot().addEventListener("input", (event) => { if (!(event.target as Element | null)?.closest?.("[data-publish-reviewed]")) state.modalDirty = true; });
   modalRoot().addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     if (target === modalRoot() || target.closest("[data-close-modal]")) { void requestCloseModal(); return; }

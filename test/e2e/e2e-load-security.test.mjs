@@ -87,6 +87,15 @@ try {
         assert.equal(response.status, 403, `${method} ${path} must be disabled by default`);
         assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
       }
+      // Responder/pular pelo painel retomaria a execução: com a automação desligada, recusado.
+      // Seguir manualmente continua valendo (chega à busca da pergunta, que não existe aqui).
+      for (const action of ["answer", "skip"]) {
+        const response = await fetch(`${disabledBase}/api/human-questions/qualquer/respond`, { method: "POST", headers: { ...headers, cookie: disabledCookie }, body: JSON.stringify({ action, answer: "Sim" }) });
+        assert.equal(response.status, 403, `respond ${action} must be disabled`);
+        assert.equal((await response.json()).error, "AUTOMATION_DISABLED");
+      }
+      const manual = await fetch(`${disabledBase}/api/human-questions/qualquer/respond`, { method: "POST", headers: { ...headers, cookie: disabledCookie }, body: JSON.stringify({ action: "manual" }) });
+      assert.equal(manual.status, 404);
       // #32: autorizar é decisão humana — o token de serviço é recusado antes do gate.
       const authorize = await fetch(`${disabledBase}/api/applications/missing/authorize-auto`, { method: "POST", headers: authHeaders, body: "{}" });
       assert.equal(authorize.status, 403);

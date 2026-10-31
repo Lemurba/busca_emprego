@@ -109,7 +109,7 @@ export function OperationsPage(props: OperationsPageProps) {
                   <div><strong>{question.question}</strong><span>{`${jobId ? jobName(jobId) : "Candidatura removida"} · ${props.questionStatusLabel(question.status)}`}</span></div>
                   <div class="button-row">
                     {failed ? <span class="status-pill red">Não chegou ao Telegram</span> : null}
-                    <button type="button" class={failed ? "primary-button" : "secondary-button"} data-answer-question={question.id}>Responder aqui</button>
+                    <button type="button" class={failed ? "primary-button" : "secondary-button"} data-answer-question={question.id} aria-label={`Responder aqui: ${question.question}`}>Responder aqui</button>
                   </div>
                 </article>
               );
@@ -139,7 +139,7 @@ export function OperationsPage(props: OperationsPageProps) {
                 {recentDuplicates.map((duplicate) => (
                   <article key={duplicate.id} class="ops-item">
                     <div><strong>{jobName(duplicate.job_id)}</strong><span>{`${duplicateDecisionLabels[duplicate.status] ?? duplicate.status} com ${jobName(duplicate.candidate_job_id)} · desfazer até ${formatDate(duplicate.undo_until)}`}</span></div>
-                    <button type="button" class="secondary-button" data-undo-duplicate={duplicate.id}>Desfazer</button>
+                    <button type="button" class="secondary-button" data-undo-duplicate={duplicate.id} aria-label={`Desfazer a decisão sobre ${jobName(duplicate.job_id)}`}>Desfazer</button>
                   </article>
                 ))}
               </div>

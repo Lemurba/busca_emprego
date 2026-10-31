@@ -28,11 +28,16 @@ const reasonLabels: Record<string, string> = {
   "connector.timeout": "Tempo limite da rodada"
 };
 
+// Só links HTTP(S) viram <a>: outro esquema (ex.: javascript:) aparece como texto.
+const safeHttpUrl = (value: string) => /^https?:\/\//iu.test(value) ? value : null;
+
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 export function EnrichmentQueuePanel({ fetchJson, formatDate, toast, confirm }: EnrichmentQueueDeps) {
   const [items, setItems] = useState<EnrichmentItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Item com pedido em curso: os botões dele ficam desabilitados (sem POST duplicado).
+  const [pendingId, setPendingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -47,10 +52,16 @@ export function EnrichmentQueuePanel({ fetchJson, formatDate, toast, confirm }: 
 
   const resolve = (item: EnrichmentItem, status: "done" | "dismissed") => {
     void (async () => {
+      if (pendingId) return;
       if (status === "dismissed" && !await confirm("Descartar da fila?", `“${item.title}” sai da fila e o agente não tentará completá-la. A vaga continua no painel.`, "Descartar", true)) return;
-      await fetchJson(`/api/connectors/enrichment-queue/${encodeURIComponent(item.id)}`, { method: "POST", body: JSON.stringify({ status }) });
-      await refresh();
-      toast(status === "done" ? "Item marcado como resolvido." : "Item descartado da fila.");
+      setPendingId(item.id);
+      try {
+        await fetchJson(`/api/connectors/enrichment-queue/${encodeURIComponent(item.id)}`, { method: "POST", body: JSON.stringify({ status }) });
+        await refresh();
+        toast(status === "done" ? "Item marcado como resolvido." : "Item descartado da fila.");
+      } finally {
+        setPendingId(null);
+      }
     })().catch((error) => toast(errorMessage(error, "Falha na operação"), true));
   };
 
@@ -59,19 +70,23 @@ export function EnrichmentQueuePanel({ fetchJson, formatDate, toast, confirm }: 
   else if (items) {
     body = items.length ? (
       <div class="ops-list">
-        {items.map((item) => (
+        {items.map((item) => {
+          const url = safeHttpUrl(item.job_url);
+          const busy = pendingId === item.id;
+          return (
           <article key={item.id} class="ops-item" data-enrichment-item={item.id}>
             <div>
               <strong>{item.title}</strong>
               <span>{`${item.company} · ${item.source_id} · ${reasonLabels[item.reason] ?? item.reason} · na fila desde ${formatDate(item.created_at)}`}</span>
             </div>
             <div class="button-row">
-              {item.job_id ? <button type="button" class="text-button" data-detail={item.job_id}>Ver vaga</button> : <a class="text-button" href={item.job_url} target="_blank" rel="noopener noreferrer">Abrir anúncio ↗</a>}
-              <button type="button" class="secondary-button" onClick={(event) => { event.stopPropagation(); resolve(item, "dismissed"); }}>Descartar</button>
-              <button type="button" class="secondary-button" onClick={(event) => { event.stopPropagation(); resolve(item, "done"); }}>Resolvido</button>
+              {item.job_id ? <button type="button" class="text-button" data-detail={item.job_id} aria-label={`Ver vaga “${item.title}”`}>Ver vaga</button> : url ? <a class="text-button" href={url} target="_blank" rel="noopener noreferrer" aria-label={`Abrir anúncio “${item.title}” (nova aba)`}>Abrir anúncio ↗</a> : <span class="muted-text">Link do anúncio inválido</span>}
+              <button type="button" class="secondary-button" disabled={busy} aria-busy={busy ? "true" : undefined} aria-label={`Descartar “${item.title}” da fila`} onClick={(event) => { event.stopPropagation(); resolve(item, "dismissed"); }}>Descartar</button>
+              <button type="button" class="secondary-button" disabled={busy} aria-busy={busy ? "true" : undefined} aria-label={`Marcar “${item.title}” como resolvido`} onClick={(event) => { event.stopPropagation(); resolve(item, "done"); }}>Resolvido</button>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
     ) : <p class="muted-text">Nenhuma vaga esperando enriquecimento.</p>;
   }

@@ -238,8 +238,11 @@ export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigReco
 
 export function listAgentConfigVersions(agentId: string, projectId = "busca-emprego") {
   if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new Error("agent.not_found");
+  // Versão com proposta registrada (`prompt_proposed`) é do coordenador, qualquer que seja o ator.
+  const proposed = new Set((db.prepare("SELECT payload FROM audit_events WHERE entity_type='agent_config' AND entity_id=? AND event_type='prompt_proposed'").all(agentId) as { payload: string }[])
+    .map((row) => String((JSON.parse(row.payload) as Record<string, unknown>).version_id ?? "")));
   return (db.prepare("SELECT id,agent_id,version,status,checksum,created_by,created_at,published_by,published_at FROM agent_config_versions WHERE agent_id=? ORDER BY version DESC").all(agentId) as Record<string, unknown>[])
-    .map((row) => ({ ...row, version: Number(row.version), origin: agentVersionOrigin(String(row.created_by)) }));
+    .map((row) => ({ ...row, version: Number(row.version), origin: proposed.has(String(row.id)) ? "coordinator" : agentVersionOrigin(String(row.created_by)) }));
 }
 
 export function listFieldProvenance(jobId: string) {
@@ -1198,21 +1201,21 @@ export function listRecentDuplicateDecisions(projectId = "busca-emprego", refere
 }
 
 /** Desfaz a decisão (mesclar, distintas ou dispensar) dentro do prazo: a suspeita volta para a fila. */
-export function undoPossibleDuplicate(id: string, actor = "user", reference = Date.now()) {
-  const row = db.prepare("SELECT status,reviewed_at FROM possible_duplicates WHERE id=?").get(id) as { status: string; reviewed_at: string | null } | undefined;
+export function undoPossibleDuplicate(id: string, actor = "user", reference = Date.now(), projectId = "busca-emprego") {
+  const row = db.prepare("SELECT status,reviewed_at FROM possible_duplicates WHERE id=? AND project_id=?").get(id, projectId) as { status: string; reviewed_at: string | null } | undefined;
   if (!row) throw new Error("possible_duplicate.not_found");
   if (row.status === "pending") throw new Error("possible_duplicate.not_resolved");
   if (!row.reviewed_at || reference - Date.parse(row.reviewed_at) > DUPLICATE_UNDO_WINDOW_MS) throw new Error("possible_duplicate.undo_expired");
-  const result = db.prepare("UPDATE possible_duplicates SET status='pending',reviewed_at=NULL,reviewed_by=NULL WHERE id=? AND status=?").run(id, row.status);
+  const result = db.prepare("UPDATE possible_duplicates SET status='pending',reviewed_at=NULL,reviewed_by=NULL WHERE id=? AND project_id=? AND status=?").run(id, projectId, row.status);
   if (!result.changes) throw new Error("possible_duplicate.not_resolved");
   audit("possible_duplicate", id, "undone", { previous_status: row.status, actor });
   return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
 }
 
-export function resolvePossibleDuplicate(id: string, status: "merged" | "distinct" | "dismissed", actor = "user") {
+export function resolvePossibleDuplicate(id: string, status: "merged" | "distinct" | "dismissed", actor = "user", projectId = "busca-emprego") {
   if (!["merged", "distinct", "dismissed"].includes(status)) throw new Error("possible_duplicate.status.invalid");
   const timestamp = now();
-  const result = db.prepare("UPDATE possible_duplicates SET status=?,reviewed_at=?,reviewed_by=? WHERE id=? AND status='pending'").run(status, timestamp, actor, id);
+  const result = db.prepare("UPDATE possible_duplicates SET status=?,reviewed_at=?,reviewed_by=? WHERE id=? AND project_id=? AND status='pending'").run(status, timestamp, actor, id, projectId);
   if (!result.changes) throw new Error("possible_duplicate.not_found");
   audit("possible_duplicate", id, "resolved", { status, actor });
   return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
@@ -2656,16 +2659,24 @@ export function expireTimedOutAgentRuns(reference = Date.now()) {
  * Início além da concorrência é recusado sem gravar; execução que estoura custo, tokens ou
  * tempo é gravada como `failed` (abortada, com o motivo) e o chamador recebe o erro.
  */
-export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }) {
+export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; status: AgentRun["status"] }, options: { enforceLimits?: boolean } = {}) {
   // A random id never collides between runs started in the same millisecond; an explicit id
   // updates that run (status/finish) instead of replacing the row and losing its start.
   const id = input.id || randomUUID();
   const timestamp = now();
-  if (input.agent_id) expireTimedOutAgentRuns();
   const existing = input.id ? db.prepare("SELECT status,message,config_snapshot,config_version_id,agent_id FROM agent_runs WHERE id=?").get(input.id) as { status: string; message: string; config_snapshot: string | null; config_version_id: string | null; agent_id: string | null } | undefined : undefined;
-  if (existing?.status === "failed" && String(existing.message ?? "").startsWith(RUN_LIMIT_PREFIX)) {
-    throw new Error(String(existing.message).includes("tempo limite") ? "agent.run.timeout" : "agent.run.aborted");
+  // Atualização sem agent_id continua sendo do agente da execução: os limites valem do mesmo jeito.
+  const agentId = input.agent_id ?? existing?.agent_id ?? null;
+  // A rodada determinística dos conectores aplica os próprios limites (e para com stop_reason);
+  // ela só registra o resultado aqui, sem os limites de execução de LLM.
+  const enforceLimits = options.enforceLimits !== false;
+  if (agentId && enforceLimits) expireTimedOutAgentRuns();
+  const current = input.id && agentId && enforceLimits ? db.prepare("SELECT status,message FROM agent_runs WHERE id=?").get(input.id) as { status: string; message: string } | undefined : existing;
+  if (current?.status === "failed" && String(current.message ?? "").startsWith(RUN_LIMIT_PREFIX)) {
+    throw new Error(String(current.message).includes("tempo limite") ? "agent.run.timeout" : "agent.run.aborted");
   }
+  // Execução encerrada não volta a `running`: reabrir driblaria a concorrência e o tempo limite.
+  if (current && current.status !== "running" && input.status === "running") throw new Error("agent.run.not_reopenable");
   let versionId = input.config_version_id ?? null;
   let snapshot = input.config_snapshot ?? null;
   // Uma execução em curso continua com a versão com que começou (republicar não muda os limites dela).
@@ -2673,26 +2684,27 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     snapshot = JSON.parse(existing.config_snapshot);
     versionId = versionId ?? existing.config_version_id;
   }
-  if (input.agent_id && (!versionId || !snapshot)) {
-    const agent = listAgentConfigs().find((item) => item.id === input.agent_id);
+  if (agentId && (!versionId || !snapshot)) {
+    const agent = listAgentConfigs().find((item) => item.id === agentId);
     if (!agent?.published_version_id) throw new Error("agent.published_version.required");
     const version = db.prepare("SELECT id,config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { id: string; config_json: string } | undefined;
     if (!version) throw new Error("agent.published_version.required");
     versionId = version.id;
     snapshot = JSON.parse(version.config_json);
   }
-  const limits = input.agent_id && snapshot ? agentRunLimits(snapshot) : null;
-  if (limits && !existing && input.status === "running") {
-    const running = Number((db.prepare("SELECT COUNT(*) AS total FROM agent_runs WHERE agent_id=? AND status='running'").get(input.agent_id!) as { total: number }).total);
+  const limits = enforceLimits && agentId && snapshot ? agentRunLimits(snapshot) : null;
+  if (limits && current?.status !== "running" && input.status === "running") {
+    const running = Number((db.prepare("SELECT COUNT(*) AS total FROM agent_runs WHERE agent_id=? AND status='running' AND id<>?").get(agentId!, id) as { total: number }).total);
     if (running >= limits.concurrency) {
-      audit("agent_run", id, "rejected", { limit: "concurrency", agent_id: input.agent_id, running, concurrency: limits.concurrency });
+      audit("agent_run", id, "rejected", { limit: "concurrency", agent_id: agentId, running, concurrency: limits.concurrency });
       throw new Error("agent.run.concurrency_exceeded");
     }
   }
   // Execução nova não começa no futuro (fugiria do tempo limite); início inválido vira agora.
   const startedAt = input.started_at && Date.parse(input.started_at) <= Date.now() ? input.started_at : timestamp;
   let status = input.status;
-  let message = input.message ?? "";
+  // O prefixo de interrupção por limite é do servidor: mensagem do agente não se passa por ele.
+  let message = String(input.message ?? "").startsWith(RUN_LIMIT_PREFIX) ? `Agente: ${input.message}` : input.message ?? "";
   let violation: { code: string; detail: string } | null = null;
   if (limits) {
     if (limits.maxCost != null && input.cost != null && input.cost > limits.maxCost) violation = { code: "agent.run.max_cost_exceeded", detail: `custo ${input.cost} acima do máximo de ${limits.maxCost} por execução` };
@@ -2709,9 +2721,9 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
       config_snapshot=COALESCE(excluded.config_snapshot,agent_runs.config_snapshot),model_effective=COALESCE(excluded.model_effective,agent_runs.model_effective),
       input_tokens=COALESCE(excluded.input_tokens,agent_runs.input_tokens),output_tokens=COALESCE(excluded.output_tokens,agent_runs.output_tokens),
       cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, status, startedAt, input.finished_at ?? (status === "running" ? null : timestamp), input.found_count ?? 0, message, input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
-  audit("agent_run", id, "status", { status, found_count: input.found_count ?? 0, agent_id: input.agent_id ?? null, config_version_id: versionId });
+  audit("agent_run", id, "status", { status, found_count: input.found_count ?? 0, agent_id: agentId, config_version_id: versionId });
   if (violation) {
-    audit("agent_run", id, "limit_exceeded", { limit: violation.code, agent_id: input.agent_id ?? null, detail: violation.detail });
+    audit("agent_run", id, "limit_exceeded", { limit: violation.code, agent_id: agentId, detail: violation.detail });
     throw new Error(violation.code);
   }
   return listAgentRuns().find((run) => run.id === id) ?? null;
@@ -3180,8 +3192,17 @@ export function updateAgentConfig(id: string, input: Record<string, unknown>, ac
   const merged = { ...current, ...input } as unknown as Record<string, unknown>;
   const values = validateAgentConfigInput(merged);
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
-  const versionId = insertAgentVersion(db, id, nextVersion, "draft", values, actor);
-  db.prepare("UPDATE agent_configs SET draft_version_id=?,updated_at=? WHERE id=? AND project_id=?").run(versionId, now(), id, projectId);
+  // Cada rascunho parte da versão publicada: o anterior ainda pendente fica superado (`retired`),
+  // para não sobrar rascunho fora do card que alguém publique sem ver o mais novo.
+  const versionId = tx(() => {
+    const created = insertAgentVersion(db, id, nextVersion, "draft", values, actor);
+    if (current.draft_version_id) {
+      const superseded = db.prepare("UPDATE agent_config_versions SET status='retired' WHERE id=? AND agent_id=? AND status='draft'").run(current.draft_version_id, id);
+      if (superseded.changes) audit("agent_config", id, "draft_superseded", { actor, version_id: current.draft_version_id, superseded_by: created });
+    }
+    db.prepare("UPDATE agent_configs SET draft_version_id=?,updated_at=? WHERE id=? AND project_id=?").run(created, now(), id, projectId);
+    return created;
+  });
   if (input.enabled === false) db.prepare("UPDATE agent_configs SET enabled=0 WHERE id=? AND project_id=?").run(id, projectId);
   audit("agent_config", id, "draft_created", { actor, version: nextVersion, version_id: versionId, changed_fields: Object.keys(input) });
   return listAgentConfigs(projectId).find((agent) => agent.id === id) ?? null;
@@ -3216,12 +3237,12 @@ export function getAgentVersionDiff(agentId: string, versionId: string, projectI
     .filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(after[field] ?? null))
     .map((field) => ({ field, before: before[field] ?? null, after: after[field] ?? null }));
   const createdBy = String(version.created_by);
-  const origin = agentVersionOrigin(createdBy);
   // A justificativa da proposta fica na auditoria (`prompt_proposed`), ligada à versão criada.
-  const proposal = origin === "coordinator"
-    ? (db.prepare("SELECT payload FROM audit_events WHERE entity_type='agent_config' AND entity_id=? AND event_type='prompt_proposed' ORDER BY id DESC").all(agentId) as { payload: string }[])
-      .map((row) => JSON.parse(row.payload) as Record<string, unknown>).find((payload) => payload.version_id === versionId) ?? null
-    : null;
+  // Uma versão com proposta registrada é do coordenador, venha pelo MCP ou pela rota HTTP
+  // (que grava o ator `service:<nome>` do token).
+  const proposal = (db.prepare("SELECT payload FROM audit_events WHERE entity_type='agent_config' AND entity_id=? AND event_type='prompt_proposed' ORDER BY id DESC").all(agentId) as { payload: string }[])
+    .map((row) => JSON.parse(row.payload) as Record<string, unknown>).find((payload) => payload.version_id === versionId) ?? null;
+  const origin = proposal ? "coordinator" : agentVersionOrigin(createdBy);
   return {
     agent_id: agentId, version_id: versionId, version: Number(version.version), status: String(version.status), checksum: String(version.checksum),
     created_by: createdBy, created_at: String(version.created_at), origin, proposal_reason: proposal?.reason == null ? null : String(proposal.reason),
@@ -3236,10 +3257,18 @@ export function getAgentVersionDiff(agentId: string, versionId: string, projectI
  * ou do token de serviço) só é publicado com esse checksum, isto é, depois de o diff ser visto.
  */
 export function publishAgentConfigVersion(agentId: string, versionId: string, actor: string, projectId = "busca-emprego", reviewedChecksum?: string) {
+  return publishAgentVersion(agentId, versionId, actor, projectId, reviewedChecksum, false);
+}
+
+/** `restoring`: o rollback publica a cópia que acabou de criar, sem tocar no rascunho pendente. */
+function publishAgentVersion(agentId: string, versionId: string, actor: string, projectId: string, reviewedChecksum: string | undefined, restoring: boolean) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
   if (!agent || !version) throw new Error("agent.version.not_found");
   if (version.status !== "draft") throw new Error("agent.version.not_draft");
+  // Só o rascunho atual é publicável: se chegou outro (edição ou proposta) depois da revisão,
+  // publicar o antigo esconderia o mais novo sem que ninguém o revisasse.
+  if (!restoring && agent.draft_version_id !== versionId) throw new Error("agent.version.stale");
   if (reviewedChecksum ? reviewedChecksum !== version.checksum : agentVersionOrigin(String(version.created_by)) !== "human") throw new Error("agent.version.review_required");
   const snapshot = JSON.parse(String(version.config_json)) as Record<string, unknown>;
   const values = validateAgentConfigInput(snapshot);
@@ -3247,8 +3276,8 @@ export function publishAgentConfigVersion(agentId: string, versionId: string, ac
   tx(() => {
     db.prepare("UPDATE agent_config_versions SET status='retired' WHERE agent_id=? AND status='published'").run(agentId);
     db.prepare("UPDATE agent_config_versions SET status='published',published_by=?,published_at=? WHERE id=?").run(actor, timestamp, versionId);
-    db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,model_id=?,reasoning_effort=?,max_input_tokens=?,max_output_tokens=?,max_cost_per_run=?,fallback_policy=?,structured_output_required=?,version=?,published_version_id=?,draft_version_id=NULL,updated_at=? WHERE id=? AND project_id=?`)
-      .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, values.modelId, values.reasoningEffort, values.maxInputTokens, values.maxOutputTokens, values.maxCostPerRun, values.fallbackPolicy, values.structuredOutputRequired ? 1 : 0, Number(version.version), versionId, timestamp, agentId, projectId);
+    db.prepare(`UPDATE agent_configs SET name=?,description=?,role_type=?,enabled=?,source_ids=?,allowed_domains=?,tool_scopes=?,browser_enabled=?,can_create_jobs=?,can_edit_jobs=?,editable_fields=?,concurrency=?,timeout_seconds=?,prompt=?,memory_enabled=?,hermes_prompt_optimization=?,model_id=?,reasoning_effort=?,max_input_tokens=?,max_output_tokens=?,max_cost_per_run=?,fallback_policy=?,structured_output_required=?,version=?,published_version_id=?,draft_version_id=CASE WHEN draft_version_id=? THEN NULL ELSE draft_version_id END,updated_at=? WHERE id=? AND project_id=?`)
+      .run(values.name, values.description, values.roleType, values.enabled, JSON.stringify(values.sourceIds), JSON.stringify(values.allowedDomains), JSON.stringify(values.toolScopes), values.browserEnabled ? 1 : 0, values.canCreate ? 1 : 0, values.canEdit ? 1 : 0, JSON.stringify(values.editableFields), values.concurrency, values.timeoutSeconds, values.prompt, values.memoryEnabled ? 1 : 0, values.hermesPromptOptimization ? 1 : 0, values.modelId, values.reasoningEffort, values.maxInputTokens, values.maxOutputTokens, values.maxCostPerRun, values.fallbackPolicy, values.structuredOutputRequired ? 1 : 0, Number(version.version), versionId, versionId, timestamp, agentId, projectId);
   });
   audit("agent_config", agentId, "published", { actor, version: Number(version.version), version_id: versionId });
   return listAgentConfigs(projectId).find((item) => item.id === agentId) ?? null;
@@ -3265,7 +3294,7 @@ export function rollbackAgentConfig(agentId: string, targetVersionId: string, ac
   const versionId = insertAgentVersion(db, agentId, nextVersion, "draft", values, actor);
   // O alvo é uma versão já existente no histórico, escolhida pelo humano na lista de versões.
   const checksum = (db.prepare("SELECT checksum FROM agent_config_versions WHERE id=?").get(versionId) as { checksum: string }).checksum;
-  const result = publishAgentConfigVersion(agentId, versionId, actor, projectId, checksum);
+  const result = publishAgentVersion(agentId, versionId, actor, projectId, checksum, true);
   audit("agent_config", agentId, "rolled_back", { actor, target_version_id: targetVersionId, target_version: target.version, published_as: nextVersion });
   return result;
 }

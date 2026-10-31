@@ -398,8 +398,8 @@ const routes: Route[] = [
   // Duplicidades
   { method: "GET", pattern: r("/api/possible-duplicates"), handler: ({ res }) => ok(res, 200, listPossibleDuplicates(projectId)) },
   // Desfazer a decisão dentro do prazo (DUPLICATE_UNDO_WINDOW_MS): só a sessão do dashboard.
-  { method: "POST", pattern: r("/api/possible-duplicates/{id}/undo"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, undoPossibleDuplicate(params[0]!, actor)); } },
-  { method: "POST", pattern: r("/api/possible-duplicates/{id}/resolve"), handler: ({ actor, res, params, body }) => ok(res, 200, resolvePossibleDuplicate(params[0]!, String(validateBody(schemas.duplicateResolve, body).status ?? "") as "merged" | "distinct" | "dismissed", actor)) },
+  { method: "POST", pattern: r("/api/possible-duplicates/{id}/undo"), handler: ({ actor, res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, undoPossibleDuplicate(params[0]!, actor, Date.now(), projectId)); } },
+  { method: "POST", pattern: r("/api/possible-duplicates/{id}/resolve"), handler: ({ actor, res, params, body }) => ok(res, 200, resolvePossibleDuplicate(params[0]!, String(validateBody(schemas.duplicateResolve, body).status ?? "") as "merged" | "distinct" | "dismissed", actor, projectId)) },
 
   // Currículos adaptados
   { method: "POST", pattern: r("/api/resumes"), handler: ({ actor, res, body }) => ok(res, 201, createResume(validateBody(schemas.resumeCreate, body) as never, actor)) },
@@ -504,7 +504,13 @@ const routes: Route[] = [
     ok(res, 200, markHumanQuestionDelivery(params[0]!, Boolean(input.delivered), input.message_ref == null ? undefined : String(input.message_ref), input.error == null ? undefined : String(input.error)));
   } },
   // Resposta pelo painel (inclusive de pergunta com entrega falha no Telegram): só a sessão do dashboard.
-  { method: "POST", pattern: r("/api/human-questions/{id}/respond"), handler: ({ actor, res, params, body }) => ok(res, 200, answerHumanQuestionFromDashboard(params[0]!, validateBody(schemas.humanDashboardAnswer, body), actor)) },
+  { method: "POST", pattern: r("/api/human-questions/{id}/respond"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.humanDashboardAnswer, body);
+    // Responder/pular retoma a execução; com a automação desligada nada a retomaria. Seguir
+    // manualmente e parar continuam valendo (só reduzem o que a automação faz).
+    if ((input.action ?? "answer") !== "manual" && input.action !== "stop" && process.env.RADAR_AUTO_APPLICATION_ENABLED !== "true") throw new HttpError(403, "AUTOMATION_DISABLED", "A candidatura automatizada está desligada nesta instalação.");
+    return ok(res, 200, answerHumanQuestionFromDashboard(params[0]!, input, actor));
+  } },
   { method: "POST", pattern: r("/api/human-questions/{id}/answer"), handler: ({ res, params, body }) => ok(res, 200, answerHumanQuestion(params[0]!, validateBody(schemas.humanAnswer, body))) },
 
   // Eventos de agentes

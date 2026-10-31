@@ -230,3 +230,88 @@ test("possível duplicata: decisão pode ser desfeita dentro do prazo e só nele
   assert.deepEqual(store.listRecentDuplicateDecisions("busca-emprego", later), []);
   assert.equal(codeOf(() => store.undoPossibleDuplicate("nao-existe", "human:dashboard")), "possible_duplicate.not_found");
 });
+
+test("#16: limites valem em atualização sem agent_id, execução não reabre e prefixo de limite é do servidor", () => {
+  const agent = enrichmentAgent("Agente sem brechas", { concurrency: 1, timeout_seconds: 60, max_cost_per_run: 0.5 });
+  store.recordAgentRun({ id: "gap-a", agent_id: agent.id, agent_name: agent.name, status: "running" });
+  // Atualização pelo caminho HTTP agent.status (sem agent_id) continua sob os limites do agente.
+  assert.equal(codeOf(() => store.recordAgentRun({ id: "gap-a", agent_name: agent.name, status: "completed", cost: 99 })), "agent.run.max_cost_exceeded");
+  assert.equal(store.db.prepare("SELECT status FROM agent_runs WHERE id='gap-a'").get().status, "failed");
+
+  // Reabrir execução encerrada driblaria a concorrência: recusado.
+  store.recordAgentRun({ id: "gap-b", agent_id: agent.id, agent_name: agent.name, status: "running" });
+  store.recordAgentRun({ id: "gap-b", agent_id: agent.id, agent_name: agent.name, status: "completed", cost: 0.1 });
+  store.recordAgentRun({ id: "gap-c", agent_id: agent.id, agent_name: agent.name, status: "running" });
+  assert.equal(codeOf(() => store.recordAgentRun({ id: "gap-b", agent_id: agent.id, agent_name: agent.name, status: "running" })), "agent.run.not_reopenable");
+  assert.equal(codeOf(() => store.recordAgentRun({ id: "gap-d", agent_id: agent.id, agent_name: agent.name, status: "running" })), "agent.run.concurrency_exceeded");
+  // Gravar como `failed` e depois `running` também não abre caminho.
+  store.recordAgentRun({ id: "gap-e", agent_id: agent.id, agent_name: agent.name, status: "failed" });
+  assert.equal(codeOf(() => store.recordAgentRun({ id: "gap-e", agent_id: agent.id, agent_name: agent.name, status: "running" })), "agent.run.not_reopenable");
+  assert.equal(Number(store.db.prepare("SELECT COUNT(*) AS total FROM agent_runs WHERE agent_id=? AND status='running'").get(agent.id).total), 1);
+  // Varredura do tempo limite também roda quando a atualização não traz agent_id.
+  store.db.prepare("UPDATE agent_runs SET started_at=? WHERE id='gap-c'").run(new Date(Date.now() - 61_000).toISOString());
+  assert.equal(codeOf(() => store.recordAgentRun({ id: "gap-c", agent_name: agent.name, status: "completed" })), "agent.run.timeout");
+
+  // Mensagem do agente com o prefixo reservado não se passa por interrupção do servidor.
+  const spoofed = store.recordAgentRun({ id: "gap-f", agent_id: agent.id, agent_name: agent.name, status: "failed", message: "Interrompida pelo limite: falso" });
+  assert.match(spoofed.message, /^Agente: /u);
+  assert.equal(codeOf(() => store.recordAgentRun({ id: "gap-f", agent_id: agent.id, agent_name: agent.name, status: "failed", message: "fim" })), null);
+
+  // A rodada determinística dos conectores registra o resultado sem os limites de LLM.
+  const round = store.recordAgentRun({ agent_id: agent.id, agent_name: "Coleta determinística (conectores)", status: "completed", cost: 5, latency_ms: 120_000, model_effective: "none" }, { enforceLimits: false });
+  assert.equal(round.status, "completed");
+});
+
+test("publicação: só o rascunho atual é publicável e a proposta HTTP do coordenador mantém a origem", () => {
+  const agent = enrichmentAgent("Agente com propostas", { hermes_prompt_optimization: true });
+  const human = store.updateAgentConfig(agent.id, { description: "Editado por você." }, "human:dashboard");
+  const reviewed = store.getAgentVersionDiff(agent.id, human.draft_version_id);
+  // Proposta chega (pela rota HTTP, ator do token) enquanto a revisão está aberta.
+  const proposal = store.proposeAgentPrompt(agent.id, { prompt: "Completar vagas citando a fonte.", reason: "Melhorar a rastreabilidade do resultado." }, "busca-emprego", "service:internal");
+  assert.notEqual(proposal.draft_version_id, human.draft_version_id);
+  assert.equal(codeOf(() => store.publishAgentConfigVersion(agent.id, human.draft_version_id, "human:dashboard", undefined, reviewed.checksum)), "agent.version.not_draft");
+  const versions = store.listAgentConfigVersions(agent.id);
+  assert.equal(versions.find((version) => version.id === human.draft_version_id).status, "retired");
+  assert.equal(versions.filter((version) => version.status === "draft").length, 1);
+  assert.equal(versions.find((version) => version.id === proposal.draft_version_id).origin, "coordinator");
+  const diff = store.getAgentVersionDiff(agent.id, proposal.draft_version_id);
+  assert.equal(diff.origin, "coordinator");
+  assert.equal(diff.proposal_reason, "Melhorar a rastreabilidade do resultado.");
+  // Restaurar não toca no rascunho pendente; publicar a proposta revisada o fecha.
+  store.rollbackAgentConfig(agent.id, diff.published.version_id, "human:dashboard");
+  assert.equal(store.listAgentConfigs().find((item) => item.id === agent.id).draft_version_id, proposal.draft_version_id);
+  assert.equal(codeOf(() => store.publishAgentConfigVersion(agent.id, proposal.draft_version_id, "human:dashboard")), "agent.version.review_required");
+  const published = store.publishAgentConfigVersion(agent.id, proposal.draft_version_id, "human:dashboard", undefined, diff.checksum);
+  assert.equal(published.prompt, "Completar vagas citando a fonte.");
+  assert.equal(published.draft_version_id, null);
+});
+
+test("publicação: rascunho que deixou de ser o atual sem ser superado é recusado como stale", () => {
+  const agent = enrichmentAgent("Agente com rascunho solto");
+  const first = store.updateAgentConfig(agent.id, { description: "Primeiro." }, "human:dashboard");
+  const second = store.updateAgentConfig(agent.id, { description: "Segundo." }, "human:dashboard");
+  // Simula um rascunho antigo que ficou `draft` (dados de antes da regra de superação).
+  store.db.prepare("UPDATE agent_config_versions SET status='draft' WHERE id=?").run(first.draft_version_id);
+  assert.equal(codeOf(() => store.publishAgentConfigVersion(agent.id, first.draft_version_id, "human:dashboard")), "agent.version.stale");
+  assert.equal(store.listAgentConfigs().find((item) => item.id === agent.id).draft_version_id, second.draft_version_id);
+});
+
+test("fila e duplicatas: identidade na fonte, só links HTTP(S) e decisões presas ao projeto", () => {
+  // A ocorrência guarda a identidade na fonte; a URL do item na fila pode diferir da observada.
+  const job = store.upsertJob({ id: "job-fila-id", title: "Analista de Dados", company: "Exemplo", source: "lever", source_url: "https://jobs.example.test/fila/abc" });
+  store.db.prepare("INSERT INTO job_occurrences (id,project_id,job_id,round_id,source_id,source_job_id,source_url_original,canonical_url,payload_hash,observed_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    .run("occ-fila-id", "busca-emprego", job.id, null, "lever", "abc", "https://jobs.example.test/fila/abc", "https://jobs.example.test/fila/abc", "hash", new Date().toISOString());
+  const itemId = connectorStore.queueLlmEnrichment({ projectId: "busca-emprego", sourceId: "lever", sourceJobId: "abc", jobUrl: "https://jobs.example.test/outra-url", title: job.title, company: job.company, roundId: "rodada", reason: "connector.enrichment.limit" });
+  assert.equal(connectorStore.listLlmEnrichmentQueue().find((item) => item.id === itemId).job_id, job.id);
+  connectorStore.resolveLlmEnrichment(itemId, "dismissed", "busca-emprego", "human:dashboard");
+  assert.equal(connectorStore.queueLlmEnrichment({ projectId: "busca-emprego", sourceId: "lever", sourceJobId: "js", jobUrl: "javascript:alert(1)", title: "X", company: "Y", roundId: "rodada", reason: "connector.enrichment.limit" }), null);
+  assert.deepEqual(connectorStore.listLlmEnrichmentQueue(), []);
+
+  const first = store.upsertJob({ id: "dup-p-a", title: "Analista", company: "Dup", source: "fixture", source_url: "https://jobs.example.test/dup-p-a" });
+  const second = store.upsertJob({ id: "dup-p-b", title: "Analista", company: "Dup", source: "fixture", source_url: "https://jobs.example.test/dup-p-b" });
+  store.db.prepare("INSERT INTO possible_duplicates (id,project_id,job_id,candidate_job_id,similarity,reasons_json,created_at) VALUES (?,?,?,?,?,?,?)").run("dup-outro", "outro-projeto", first.id, second.id, 0.9, "[]", new Date().toISOString());
+  assert.equal(codeOf(() => store.resolvePossibleDuplicate("dup-outro", "merged", "human:dashboard")), "possible_duplicate.not_found");
+  store.resolvePossibleDuplicate("dup-outro", "merged", "human:dashboard", "outro-projeto");
+  assert.equal(codeOf(() => store.undoPossibleDuplicate("dup-outro", "human:dashboard")), "possible_duplicate.not_found");
+  assert.equal(store.undoPossibleDuplicate("dup-outro", "human:dashboard", Date.now(), "outro-projeto").status, "pending");
+});
