@@ -19,6 +19,7 @@ import { getBaseResumeExtraction } from "./base-resumes.js";
 import { mapResume } from "./mappers.js";
 import { revokeAuthorizationRows } from "./authorizations.js";
 import { DomainError } from "../errors.js";
+import type { ResumeDetail, ResumeSummary } from "../bootstrap-payload.js";
 
 /** Projeto do currículo: o da vaga dele (resumes não tem coluna própria). */
 function resumeProjectId(resume: Resume): string {
@@ -196,6 +197,19 @@ function currentFactChecks(resume: Resume): FactCheckRow[] {
 
 export function resumeFactSummary(resume: Resume) {
   return summarizeFactChecks(currentFactChecks(resume));
+}
+
+/** Currículo completo com o resumo da checagem de fatos (GET /api/resumes/{id}); só do projeto. */
+export function getResumeDetail(id: string, projectId = storeProjectId()): ResumeDetail {
+  const resume = getResume(id);
+  if (!resume || resumeProjectId(resume) !== projectId) throw new DomainError("resume.not_found");
+  return { ...resume, fact_check: resumeFactSummary(resume) };
+}
+
+/** F15: currículo para o bootstrap, sem o conteúdo (vem por getResumeDetail ao abrir o editor). */
+export function resumeSummary(resume: Resume): ResumeSummary {
+  const { content, ...rest } = resume;
+  return { ...rest, content_length: content.length, fact_check: resumeFactSummary(resume) };
 }
 
 export function getResumeFactChecks(id: string): FactCheckReport {

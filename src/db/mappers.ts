@@ -1,5 +1,6 @@
 // Conversão de linhas do SQLite nos tipos do domínio (src/types.ts). Sem acesso ao banco.
 import type { AgentConfig, Application, BaseResume, Job, Resume, SourceConfigRecord } from "../types.js";
+import type { ProfessionalProfile, ProfileFact } from "../bootstrap-payload.js";
 import { parseJsonArray } from "./util.js";
 import { parseJobRequirementsColumn } from "../blockers.js";
 import { resumeScoringFields } from "./scoring.js";
@@ -62,14 +63,14 @@ export function mapSourceConfig(row: Record<string, unknown>): SourceConfigRecor
   return { ...row, enabled: Number(row.enabled) === 1 } as unknown as SourceConfigRecord;
 }
 
-export function mapProfileFact(row: Record<string, unknown>): any {
+export function mapProfileFact(row: Record<string, unknown>): ProfileFact {
   let value: unknown = row.value_json;
   try { value = JSON.parse(String(row.value_json)); } catch { /* preserve malformed legacy value */ }
-  return { ...row, value, confidence: Number(row.confidence ?? 0), evidence_page: row.evidence_page == null ? null : Number(row.evidence_page) };
+  return { ...row, value, confidence: Number(row.confidence ?? 0), evidence_page: row.evidence_page == null ? null : Number(row.evidence_page) } as ProfileFact;
 }
 
-export function mapProfile(row: Record<string, unknown>): any {
+export function mapProfile(row: Record<string, unknown>): ProfessionalProfile {
   let context: Record<string, unknown> = {};
   try { context = JSON.parse(String(row.context_json ?? "{}")) as Record<string, unknown>; } catch { /* safe empty context */ }
-  return { ...row, version: Number(row.version), context };
+  return { ...row, version: Number(row.version), context } as unknown as ProfessionalProfile;
 }

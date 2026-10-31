@@ -9,6 +9,7 @@
  * #49: revisão do perfil em rascunho (`ProfileDraftPanel`) e CTAs de onboarding do perfil.
  */
 import type { BaseResume, Data, ProfileFact } from "../../app.js";
+import type { ActiveProfile, PreferenceRule } from "../../../src/bootstrap-payload.js";
 import { appData } from "../app-state.js";
 import { AutomationPanel } from "../components/automation-panel.js";
 import { EmptyState } from "../components/empty-state.js";
@@ -37,7 +38,7 @@ export type OperationsPageProps = {
   factTypeLabel: (type: string) => string;
   originLabel: (origin: string) => string;
   factDisplay: (fact: Fact) => string;
-  describeRule: (rule: any) => string;
+  describeRule: (rule: Pick<PreferenceRule, "match_json">) => string;
   /** Eliminatórios ainda sem fato confirmado no perfil (rótulos já traduzidos). */
   missingBlockers: (facts: Fact[]) => string[];
   /** Cliente da API do app.ts, usado pelo painel de métricas (F17). */
@@ -80,7 +81,7 @@ function ProfileOnboarding({ draft, baseResume, resumes }: { draft: { version: n
   );
 }
 
-function ProfilePanel({ profile, facts, draft, baseResume, resumes, props }: { profile: any; facts: Fact[]; draft: { version: number } | undefined; baseResume: BaseResume | undefined; resumes: BaseResume[]; props: OperationsPageProps }) {
+function ProfilePanel({ profile, facts, draft, baseResume, resumes, props }: { profile: ActiveProfile | null; facts: Fact[]; draft: { version: number } | undefined; baseResume: BaseResume | undefined; resumes: BaseResume[]; props: OperationsPageProps }) {
   const missing = profile ? props.missingBlockers(facts) : [];
   return (
     <section class="panel">

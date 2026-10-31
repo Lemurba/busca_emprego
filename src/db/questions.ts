@@ -6,6 +6,7 @@ import { assertCurrentAuthorization, currentAuthorization, leaseExpiresAt, revok
 import { getApplication } from "./application-store.js";
 import { getResume } from "./resumes.js";
 import { DomainError } from "../errors.js";
+import type { HumanQuestion } from "../bootstrap-payload.js";
 
 export function createHumanQuestion(applicationId: string, input: Record<string, unknown>) {
   const application = getApplication(applicationId);
@@ -130,9 +131,9 @@ function recordHumanAnswer(row: Record<string, unknown>, input: Record<string, u
 }
 
 /** Perguntas das vagas do projeto (TD-06); com `applicationId`, só as dessa candidatura. */
-export function listHumanQuestions(applicationId?: string, projectId = storeProjectId()) {
+export function listHumanQuestions(applicationId?: string, projectId = storeProjectId()): HumanQuestion[] {
   const rows = applicationId
     ? db.prepare("SELECT q.* FROM human_questions q JOIN jobs j ON j.id=q.job_id WHERE q.application_id=? AND j.project_id=? ORDER BY q.asked_at DESC").all(applicationId, projectId)
     : db.prepare("SELECT q.* FROM human_questions q JOIN jobs j ON j.id=q.job_id WHERE j.project_id=? ORDER BY q.asked_at DESC").all(projectId);
-  return (rows as Record<string, unknown>[]).map((row) => ({ ...row, required: Number(row.required ?? 1) === 1, choices: parseJsonArray(row.choices_json) }));
+  return (rows as Record<string, unknown>[]).map((row) => ({ ...row, required: Number(row.required ?? 1) === 1, choices: parseJsonArray(row.choices_json) }) as unknown as HumanQuestion);
 }

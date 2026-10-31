@@ -4,21 +4,10 @@
 // delegadas no #view por `data-*`, e app.ts injeta os utilitários.
 import { atsFamilyFor } from "../src/ats-domains.js";
 
-export type FieldSummary = { label: string; value: string };
-export type AuthorizationView = {
-  application_id: string; authorization_id: string; state: string; expires_at: string | null; claimed_by: string | null;
-  final_confirmation_requested_at: string | null; final_confirmation_at: string | null; paused_at: string | null; ats: string | null;
-};
-export type FinalConfirmationView = {
-  application_id: string; job_id: string; requested_at: string | null; expires_at: string | null; claimed_by: string | null;
-  evidence_id: string | null; observed_url: string | null; fields_summary: FieldSummary[]; created_at: string | null;
-};
-export type AutomationOverview = {
-  env_enabled: boolean; enabled: boolean; effective: boolean; daily_limit: number; per_ats_limit: number | null; ats_allowlist: string[];
-  updated_at: string | null; updated_by: string | null; remaining_today: number; active_runs: number; issued_authorizations: number;
-  usage: { date: string; time_zone: string; total: number; by_ats: Record<string, number> };
-  authorizations: AuthorizationView[]; final_confirmations: FinalConfirmationView[];
-};
+// Tipos da visão `automation` do bootstrap: contrato compartilhado com o servidor (TD-14).
+import type { AutomationOverview } from "../src/bootstrap-payload.js";
+
+export type { AuthorizationView, AutomationOverview, FieldSummary, FinalConfirmationView } from "../src/bootstrap-payload.js";
 
 export type ActionDeps = {
   escapeHtml: (value: unknown) => string;

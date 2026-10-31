@@ -9,6 +9,7 @@ import { assertJobNotArchived, getJob, listSuppressedJobs } from "./jobs.js";
 import { mapJob } from "./mappers.js";
 import { withdrawPendingAuthorizations } from "./authorizations.js";
 import { DomainError } from "../errors.js";
+import type { PreferenceState } from "../bootstrap-payload.js";
 
 type SuppressionRule = { id: string; match_json: string };
 
@@ -149,7 +150,7 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   });
 }
 
-export function listPreferenceState(projectId = storeProjectId()) {
+export function listPreferenceState(projectId = storeProjectId()): PreferenceState {
   const rules = (db.prepare("SELECT * FROM preference_rules WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[])
     .map((row) => ({ ...row, source_feedback_ids: parseJsonArray(row.source_feedback_ids), match_json: JSON.parse(String(row.match_json)) }));
   // Contagem viva (o que de fato está oculto agora); suppressed_count guarda o total histórico.
@@ -161,7 +162,7 @@ export function listPreferenceState(projectId = storeProjectId()) {
   const suggestions = db.prepare(`SELECT detail_key, COUNT(DISTINCT job_id) AS evidence_count
     FROM job_feedback_events WHERE project_id=? AND mode='partial' AND undone_at IS NULL AND created_at>=?
     GROUP BY detail_key HAVING COUNT(DISTINCT job_id)>=3`).all(projectId, cutoff);
-  return { rules, values, suggestions };
+  return { rules, values, suggestions } as unknown as PreferenceState;
 }
 
 export function setPreferenceRuleState(id: string, state: string) {

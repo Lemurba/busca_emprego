@@ -16,6 +16,7 @@ import { applySuppression, positiveSignalFacets } from "./preferences.js";
 import { mapJob } from "./mappers.js";
 import { revokeAuthorizationRows, withdrawPendingAuthorizations } from "./authorizations.js";
 import { DomainError } from "../errors.js";
+import type { ArchivedJob, EnrichmentEvent } from "../bootstrap-payload.js";
 
 /**
  * Vagas visíveis: sem as excluídas (arquivadas) e sem as ocultadas por regra "Não tenho interesse".
@@ -39,8 +40,8 @@ export function listSuppressedJobs(projectId = storeProjectId()) {
 }
 
 /** Todas as vagas excluídas do projeto: a lista de Configurações é o único caminho para restaurá-las. */
-export function listArchivedJobs(projectId = storeProjectId()) {
-  return db.prepare("SELECT id,title,company,location,source,archived_at,archived_reason FROM jobs WHERE archived_at IS NOT NULL AND project_id=? ORDER BY archived_at DESC").all(projectId);
+export function listArchivedJobs(projectId = storeProjectId()): ArchivedJob[] {
+  return db.prepare("SELECT id,title,company,location,source,archived_at,archived_reason FROM jobs WHERE archived_at IS NOT NULL AND project_id=? ORDER BY archived_at DESC").all(projectId) as unknown as ArchivedJob[];
 }
 
 export function listFieldProvenance(jobId: string) {
@@ -53,10 +54,10 @@ export function listFieldProvenance(jobId: string) {
   return { evidence, conflicts };
 }
 
-export function listJobEnrichmentEvents(jobId?: string, projectId = storeProjectId()) {
-  return jobId
+export function listJobEnrichmentEvents(jobId?: string, projectId = storeProjectId()): EnrichmentEvent[] {
+  return (jobId
     ? db.prepare("SELECT * FROM job_enrichment_events WHERE job_id=? ORDER BY created_at DESC").all(jobId)
-    : db.prepare("SELECT e.* FROM job_enrichment_events e JOIN jobs j ON j.id=e.job_id WHERE j.project_id=? ORDER BY e.created_at DESC LIMIT 200").all(projectId);
+    : db.prepare("SELECT e.* FROM job_enrichment_events e JOIN jobs j ON j.id=e.job_id WHERE j.project_id=? ORDER BY e.created_at DESC LIMIT 200").all(projectId)) as unknown as EnrichmentEvent[];
 }
 
 export function listCompanies(projectId = storeProjectId(), jobs: Job[] = listJobs({ projectId })): CompanySummary[] {

@@ -7,6 +7,7 @@ import type { Application } from "../types.js";
 import { type AutomationSettings, automationUsage, envAutomationEnabled, readAutomationSettings, validateAutomationPatch, writeAutomationSettings } from "./settings.js";
 import { idFor, now } from "./util.js";
 import { DomainError } from "../errors.js";
+import type { AuthorizationView, AutomationOverview, FieldSummary, FinalConfirmationView } from "../bootstrap-payload.js";
 
 /**
  * Executor autorizado (#32): envio só em ATS de empresa, dry-run com segunda confirmação
@@ -49,7 +50,7 @@ const FIELD_VALUE_MAX = 500;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PAUSED_STEP = "Automação pausada (kill-switch)";
 
-export type FieldSummary = { label: string; value: string };
+export type { FieldSummary };
 
 // --- Verificações sem estado (recebem a conexão) ------------------------------------------
 
@@ -283,7 +284,7 @@ export function createExecutor(deps: ExecutorDeps) {
   }
 
   /** Estado da automação para o painel e o CLI (sem nonce, token ou hash de token). */
-  function automationOverview(nowMs = Date.now()) {
+  function automationOverview(nowMs = Date.now()): AutomationOverview {
     const settings = readAutomationSettings(db);
     const envEnabled = envAutomationEnabled();
     const usage = automationUsage(db, settings, nowMs);
@@ -291,7 +292,7 @@ export function createExecutor(deps: ExecutorDeps) {
         auth.final_confirmation_requested_at, auth.final_confirmation_at, auth.final_confirmation_by, auth.final_evidence_id, auth.paused_at, auth.application_url,
         CASE WHEN auth.submit_token_issued_at IS NULL THEN 0 ELSE 1 END AS token_issued
       FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id`).all() as Record<string, unknown>[])
-      .map((row) => ({ ...row, state: String(row.state), token_issued: Number(row.token_issued) === 1, ats: atsFamilyFor(row.application_url, settings.ats_allowlist) }));
+      .map((row) => ({ ...row, state: String(row.state), token_issued: Number(row.token_issued) === 1, ats: atsFamilyFor(row.application_url, settings.ats_allowlist) }) as unknown as AuthorizationView & { token_issued: boolean });
     const finalConfirmations = (db.prepare(`SELECT applications.id AS application_id, applications.job_id, auth.final_confirmation_requested_at AS requested_at, auth.expires_at, auth.claimed_by,
         evidence.id AS evidence_id, evidence.observed_url, evidence.summary_json, evidence.created_at
       FROM applications
@@ -302,7 +303,7 @@ export function createExecutor(deps: ExecutorDeps) {
       .map(({ summary_json, ...row }) => {
         let fields: FieldSummary[] = [];
         try { fields = validateFieldsSummary(JSON.parse(String(summary_json ?? "[]"))); } catch { fields = []; }
-        return { ...row, fields_summary: fields };
+        return { ...row, fields_summary: fields } as unknown as FinalConfirmationView;
       });
     const activeRuns = authorizations.filter((item) => item.state === "claimed").length;
     const issued = authorizations.filter((item) => item.state === "issued").length;

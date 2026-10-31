@@ -68,18 +68,19 @@ Resposta `200`:
 
 ### `GET /api/bootstrap`
 
-Carrega em uma chamada os dados usados pelo dashboard. Não recebe corpo.
+Carrega em uma chamada os dados usados pelo dashboard. Não recebe corpo. O contrato tipado (`BootstrapPayload`) fica em `src/bootstrap-payload.ts` e é o mesmo tipo que o painel usa (TD-14).
 
 Resposta `200` contém:
 
 | Campo | Tipo | Conteúdo |
 | --- | --- | --- |
 | `jobs` | `Job[]` + campos calculados | Vagas ordenadas por match; consulte os campos de vaga abaixo |
-| `resumes` | `Resume[]` | Currículos ATS |
+| `resumes` | resumo de `Resume`[] | Currículos ATS **sem** `content` (F15): cada um traz `content_length` e `fact_check`; o texto vem de `GET /api/resumes/{id}` |
 | `baseResumes` | metadados de PDF | Biblioteca local; os bytes do PDF não são incluídos |
 | `applications` | `Application[]` | Registros de candidatura |
 | `companies` | `Company[]` | Contagem de vagas, salário mínimo médio registrado, locais e fontes por empresa |
 | `agentRuns` | `AgentRun[]` | Até 20 execuções mais recentes |
+| `matchScores` | nota[] | Só a nota **mais recente** de cada vaga, com `components` explicados (F15); o histórico vem de `GET /api/jobs/{id}/scores` |
 | `activeProfile` | perfil \| `null` | Perfil confirmado com `facts` e `snapshot` |
 | `draftProfiles` | perfil[] | Rascunhos de perfil (#49), mais recente primeiro, cada um com `facts`, `pending` (informações `proposed`/`needs_review`, que bloqueiam a confirmação), `pending_without_evidence` (ficam fora do `review-all`) e `missing_blockers` (eliminatórios sem informação confirmada) |
 | `stats` | objeto | Contagens e agregados descritos a seguir |
@@ -96,7 +97,12 @@ Campos calculados que aparecem dentro de cada elemento de `jobs`:
 
 `stats` contém `total`, `strongMatches`, `awaitingReview`, `selected`, `applications`, `openVacancies`, `unknownVacancies`, `applied`, `lost`, `notInterested`, `averageSalary`, `statuses`, `sources` e `locations`. Os primeiros campos são números; `averageSalary` pode ser `null`; `statuses`, `sources` e `locations` são mapas de rótulo para contagem.
 
-Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, não descrição/evidência integral. O detalhe completo é carregado sob demanda por `GET /api/jobs/{id}` para reduzir payload e exposição desnecessária.
+Para produção, o bootstrap do Kanban deve retornar um `job_summary` compacto, não descrição/evidência integral. O detalhe completo é carregado sob demanda por `GET /api/jobs/{id}` para reduzir payload e exposição desnecessária. Currículos e notas já seguem essa regra (F15):
+
+| Rota | Uso |
+| --- | --- |
+| `GET /api/resumes/{id}` | Currículo completo (com `content` e `fact_check`) do projeto aberto; inexistente ou de outro projeto → `404 resume.not_found`. O editor e a aprovação do painel leem daqui |
+| `GET /api/jobs/{id}/scores?limit=&offset=` | Histórico de notas da vaga, mais recente primeiro: `{ items, total, limit, offset }`, cada item com `profile_snapshot_id` e `round_id`. `limit` de 1 a 100 (padrão 20), `offset` ≥ 0; fora disso → `400 invalid_query`. Vaga inexistente → `404 job.not_found` |
 
 ### `GET /api/metrics`
 

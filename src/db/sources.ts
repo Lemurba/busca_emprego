@@ -70,7 +70,8 @@ export function listSearchRounds(projectId = storeProjectId()): any[] {
 
 export function startSearchRound(input: Record<string, unknown> = {}, projectId = storeProjectId(), actor = "user") {
   const profile = getActiveProfile(projectId);
-  if (!profile?.snapshot) throw new DomainError("PROFILE_CONFIRMATION_REQUIRED");
+  const snapshot = profile?.snapshot;
+  if (!snapshot) throw new DomainError("PROFILE_CONFIRMATION_REQUIRED");
   const configuredSources = listSourceConfigs(projectId).filter((source) => source.enabled);
   const requested = Array.isArray(input.source_ids) ? input.source_ids.map(String) : configuredSources.map((source) => source.id);
   const sources = configuredSources.filter((source) => requested.includes(source.id));
@@ -92,17 +93,17 @@ export function startSearchRound(input: Record<string, unknown> = {}, projectId 
       concurrency: published.concurrency, timeout_seconds: published.timeout_seconds
     }];
   });
-  const id = String(input.run_id ?? idFor(`round|${projectId}|${profile.snapshot.id}|${Date.now()}|${Math.random()}`));
+  const id = String(input.run_id ?? idFor(`round|${projectId}|${snapshot.id}|${Date.now()}|${Math.random()}`));
   const timestamp = now();
-  const configSnapshot = { agents, batch_size: 25, max_concurrency: 20, max_per_domain: 1, timeout_seconds: 120, profile_snapshot_id: profile.snapshot.id };
+  const configSnapshot = { agents, batch_size: 25, max_concurrency: 20, max_per_domain: 1, timeout_seconds: 120, profile_snapshot_id: snapshot.id };
   tx(() => {
     db.prepare(`INSERT INTO search_rounds (id,project_id,status,profile_snapshot_id,config_snapshot,source_ids,counters_json,started_at)
-      VALUES (?,?, 'running',?,?,?,?,?)`).run(id, projectId, profile.snapshot.id, JSON.stringify(configSnapshot), JSON.stringify(readySources.map((source) => source.id)), "{}", timestamp);
+      VALUES (?,?, 'running',?,?,?,?,?)`).run(id, projectId, snapshot.id, JSON.stringify(configSnapshot), JSON.stringify(readySources.map((source) => source.id)), "{}", timestamp);
     const insertSource = db.prepare(`INSERT INTO round_sources (round_id,source_id,status,readiness_snapshot,started_at)
       VALUES (?,?,?,?,?)`);
     for (const item of ready) insertSource.run(id, item.source.id, "ready", JSON.stringify({ status: item.status, reason: item.reason, domain: item.source.domain }), timestamp);
   });
-  audit("search_round", id, "started", { actor, project_id: projectId, profile_snapshot_id: profile.snapshot.id, source_ids: readySources.map((source) => source.id) });
+  audit("search_round", id, "started", { actor, project_id: projectId, profile_snapshot_id: snapshot.id, source_ids: readySources.map((source) => source.id) });
   return getRound(id, projectId);
 }
 

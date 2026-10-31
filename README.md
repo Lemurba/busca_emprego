@@ -101,6 +101,8 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | `GET` | `/api/metrics` | Idade do último backup, tamanho do banco, filas e última rodada (painel "Saúde da instalação") |
 | `GET` | `/auth?token=...` | Trocar `RADAR_DASHBOARD_TOKEN` pelo cookie de sessão do dashboard |
 | `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, métricas e metadados dos PDFs |
+| `GET` | `/api/resumes/{id}` | Currículo completo (o bootstrap leva só o resumo, sem o conteúdo) |
+| `GET` | `/api/jobs/{id}/scores` | Histórico de notas da vaga, paginado (`limit`, `offset`) |
 | `POST` | `/api/agent-events` | Registrar vaga descoberta/atualizada ou estado do agente |
 | `POST` | `/api/jobs/{id}/decision` | Registrar decisão explícita do usuário |
 | `POST` | `/api/jobs/{id}/feedback` | Registrar rejeição total/parcial com motivo obrigatório |

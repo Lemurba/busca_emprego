@@ -9,6 +9,7 @@ import { getJob } from "./jobs.js";
 import { getLatestProfileSnapshot } from "./profiles.js";
 import { json } from "./ingestion.js";
 import { DomainError } from "../errors.js";
+import type { MatchScore, Page } from "../bootstrap-payload.js";
 
 /**
  * I49-09: a nota de aderência sempre se refere a um snapshot de perfil confirmado do projeto.
@@ -74,4 +75,24 @@ export function getMatchScore(jobId: string, profileSnapshotId?: string | null, 
   const row = db.prepare(`SELECT * FROM match_scores WHERE ${filters.join(" AND ")} ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(...params) as Record<string, unknown> | undefined;
   if (!row) return null;
   return { ...mapMatchScoreRow(row), profile_snapshot_id: row.profile_snapshot_id || null, round_id: row.round_id || null };
+}
+
+const MATCH_SCORE_COLUMNS = "job_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at";
+
+/** F15: só a nota mais recente de cada vaga do projeto (o bootstrap não leva o histórico). */
+export function listLatestMatchScores(projectId = storeProjectId()): MatchScore[] {
+  const rows = db.prepare(`SELECT ${MATCH_SCORE_COLUMNS} FROM match_scores m WHERE m.project_id=? AND m.rowid=(
+      SELECT l.rowid FROM match_scores l WHERE l.job_id=m.job_id AND l.project_id=m.project_id ORDER BY l.created_at DESC, l.rowid DESC LIMIT 1)
+    ORDER BY m.created_at DESC`).all(projectId) as Record<string, unknown>[];
+  return rows.map((row) => mapMatchScoreRow(row) as unknown as MatchScore);
+}
+
+/** Histórico de notas da vaga, mais recente primeiro, em páginas (GET /api/jobs/{id}/scores). */
+export function listMatchScoreHistory(jobId: string, page: { limit: number; offset: number }, projectId = storeProjectId()): Page<MatchScore & { profile_snapshot_id: string | null; round_id: string | null }> {
+  if (!db.prepare("SELECT 1 FROM jobs WHERE id=? AND project_id=?").get(jobId, projectId)) throw new DomainError("job.not_found");
+  const total = Number((db.prepare("SELECT COUNT(*) AS total FROM match_scores WHERE job_id=? AND project_id=?").get(jobId, projectId) as { total: number }).total);
+  const rows = db.prepare(`SELECT ${MATCH_SCORE_COLUMNS},profile_snapshot_id,round_id FROM match_scores WHERE job_id=? AND project_id=? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`)
+    .all(jobId, projectId, page.limit, page.offset) as Record<string, unknown>[];
+  const items = rows.map((row) => ({ ...(mapMatchScoreRow(row) as unknown as MatchScore), profile_snapshot_id: String(row.profile_snapshot_id ?? "") || null, round_id: String(row.round_id ?? "") || null }));
+  return { items, total, limit: page.limit, offset: page.offset };
 }

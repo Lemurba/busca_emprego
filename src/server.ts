@@ -14,7 +14,7 @@ import { renderResumeFile, safeName, type ResumeFileFormat } from "./resume-file
 import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
-import { getResumeFactChecks, resolveResumeFact } from "./db.js";
+import { getResumeDetail, getResumeFactChecks, listMatchScoreHistory, resolveResumeFact } from "./db.js";
 import { assertAgentUrlAllowed, getApplication, getApplicationAuthorization, getPublishedAgentConfig, ingestJobFromAgent, listPublishedAgentConfigs, recordAgentRunForAgent, validateSourceBatch } from "./db.js";
 import { connectorRoutes } from "./connectors/routes.js";
 import { smokeTestSource } from "./connectors/runner.js";
@@ -277,6 +277,22 @@ type Route = { method: string; pattern: RegExp; handler: (ctx: Ctx) => unknown |
 const ok = (res: ServerResponse, status: number, body: unknown) => sendJson(res, status, body);
 const notFound = (what = "Recurso não encontrado.") => new HttpError(404, "not_found", what);
 
+/**
+ * Página de uma listagem (F15): `?limit=` (1–100, padrão 20) e `?offset=` (≥ 0, padrão 0).
+ * Valor que não é inteiro nessa faixa → 400 `invalid_query` (nunca uma página silenciosamente outra).
+ */
+function pageParams(req: IncomingMessage, defaultLimit = 20): { limit: number; offset: number } {
+  const query = new URL(req.url ?? "/", "http://radar.invalid").searchParams;
+  const read = (name: string, fallback: number, min: number, max: number) => {
+    const raw = query.get(name);
+    if (raw === null || raw === "") return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/u.test(raw) || value < min || value > max) throw new HttpError(400, "invalid_query", `Parâmetro ${name} inválido: use um inteiro entre ${min} e ${max}.`);
+    return value;
+  };
+  return { limit: read("limit", defaultLimit, 1, 100), offset: read("offset", 0, 0, 1_000_000) };
+}
+
 function attachment(res: ServerResponse, mimeType: string, fileName: string, data: Buffer | Uint8Array) {
   const filename = encodeURIComponent(fileName).replace(/[!'()*]/g, (character) => "%" + character.charCodeAt(0).toString(16).toUpperCase());
   res.writeHead(200, { "content-type": mimeType, "content-disposition": `attachment; filename*=UTF-8''${filename}`, "content-length": data.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -456,6 +472,8 @@ const routes: Route[] = [
   } },
   { method: "GET", pattern: r("/api/jobs/{id}/occurrences"), handler: ({ res, params }) => ok(res, 200, listJobOccurrences(params[0]!, projectId)) },
   { method: "GET", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params }) => ok(res, 200, getMatchScore(params[0]!)) },
+  // F15: histórico de notas paginado (o bootstrap leva só a mais recente de cada vaga).
+  { method: "GET", pattern: r("/api/jobs/{id}/scores"), handler: ({ req, res, params }) => ok(res, 200, listMatchScoreHistory(params[0]!, pageParams(req), projectId)) },
   // I49-09: a nota exige um snapshot de perfil confirmado do projeto (o ativo, se não informado).
   { method: "POST", pattern: r("/api/jobs/{id}/score"), handler: ({ res, params, body }) => ok(res, 200, recordMatchScore({ ...validateBody(schemas.matchScore, body), job_id: params[0]!, project_id: projectId })) },
   { method: "GET", pattern: r("/api/jobs/{id}/provenance"), handler: ({ res, params }) => ok(res, 200, listFieldProvenance(params[0]!)) },
@@ -502,6 +520,8 @@ const routes: Route[] = [
     attachment(res, "application/json; charset=utf-8", `${safeName(resume.title)}-v${resume.version}.json`, Buffer.from(JSON.stringify(document, null, 2), "utf8"));
   } },
   // Teste de leitura do PDF (gera, extrai e compara); revisão e aprovação garantem um resultado atual.
+  // F15: currículo completo (conteúdo incluso) para o editor e a aprovação; o bootstrap leva o resumo.
+  { method: "GET", pattern: r("/api/resumes/{id}"), handler: ({ res, params }) => ok(res, 200, getResumeDetail(params[0]!, projectId)) },
   { method: "GET", pattern: r("/api/resumes/{id}/parse-check"), handler: ({ res, params }) => ok(res, 200, { parse_check: getResumeParseCheck(params[0]!) }) },
   { method: "POST", pattern: r("/api/resumes/{id}/parse-check"), handler: async ({ res, params, body }) => { validateBody(schemas.empty, body); ok(res, 200, { parse_check: await runResumeParseCheck(params[0]!) }); } },
   { method: "POST", pattern: r("/api/resumes/{id}/approve"), handler: async ({ actor, res, params, body }) => {

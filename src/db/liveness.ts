@@ -3,6 +3,7 @@ import type { LivenessResult } from "../liveness/types.js";
 import { descriptionFingerprint, findReposts, fingerprintText, repostBucket, type RepostCandidate } from "../repost.js";
 import { idFor, now } from "./util.js";
 import { DomainError } from "../errors.js";
+import type { LivenessCheck } from "../bootstrap-payload.js";
 
 // Persistência da verificação de vaga aberta e da repostagem (#33), recebendo a conexão por
 // parâmetro (sem import circular com src/db.ts). O fechamento da vaga em si continua no
@@ -111,7 +112,7 @@ export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; open
 
 /** Última verificação e repostagens por vaga, para enriquecer o bootstrap numa única leitura. */
 export function livenessAndRepostSummaries(db: DatabaseSync) {
-  const summaries = new Map<string, { repost_count: number; first_seen_at: string | null; repost_dates: string[]; last_liveness_check: Record<string, unknown> | null }>();
+  const summaries = new Map<string, { repost_count: number; first_seen_at: string | null; repost_dates: string[]; last_liveness_check: LivenessCheck | null }>();
   const entry = (jobId: string) => {
     let value = summaries.get(jobId);
     if (!value) { value = { repost_count: 0, first_seen_at: null, repost_dates: [], last_liveness_check: null }; summaries.set(jobId, value); }
@@ -128,7 +129,7 @@ export function livenessAndRepostSummaries(db: DatabaseSync) {
   const latest = db.prepare(`SELECT c.job_id, c.checked_at, c.status, c.method, c.confidence FROM job_liveness_checks c
     WHERE c.id = (SELECT c2.id FROM job_liveness_checks c2 WHERE c2.job_id = c.job_id ORDER BY c2.checked_at DESC, c2.rowid DESC LIMIT 1)`).all() as Array<Record<string, unknown>>;
   for (const row of latest) {
-    entry(String(row.job_id)).last_liveness_check = { checked_at: row.checked_at, status: row.status, method: row.method, confidence: Number(row.confidence) };
+    entry(String(row.job_id)).last_liveness_check = { checked_at: String(row.checked_at), status: row.status as LivenessCheck["status"], method: String(row.method), confidence: Number(row.confidence) };
   }
   return summaries;
 }

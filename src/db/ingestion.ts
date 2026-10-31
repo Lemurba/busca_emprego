@@ -13,6 +13,7 @@ import { applySuppression } from "./preferences.js";
 import { getRound } from "./sources.js";
 import { mapJob } from "./mappers.js";
 import { DomainError } from "../errors.js";
+import type { DuplicateDecision, PossibleDuplicate } from "../bootstrap-payload.js";
 
 export function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -321,8 +322,8 @@ export function listJobOccurrences(jobId?: string, projectId = storeProjectId())
   return jobId ? db.prepare("SELECT * FROM job_occurrences WHERE project_id=? AND job_id=? ORDER BY observed_at DESC").all(projectId, jobId) : db.prepare("SELECT * FROM job_occurrences WHERE project_id=? ORDER BY observed_at DESC").all(projectId);
 }
 
-export function listPossibleDuplicates(projectId = storeProjectId(), status = "pending") {
-  return db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status=? ORDER BY created_at DESC").all(projectId, status);
+export function listPossibleDuplicates(projectId = storeProjectId(), status = "pending"): PossibleDuplicate[] {
+  return db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status=? ORDER BY created_at DESC").all(projectId, status) as unknown as PossibleDuplicate[];
 }
 
 /**
@@ -333,10 +334,10 @@ export function listPossibleDuplicates(projectId = storeProjectId(), status = "p
 export const DUPLICATE_UNDO_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Decisões dentro do prazo de desfazer, com o limite de cada uma (`undo_until`). */
-export function listRecentDuplicateDecisions(projectId = storeProjectId(), reference = Date.now()) {
+export function listRecentDuplicateDecisions(projectId = storeProjectId(), reference = Date.now()): DuplicateDecision[] {
   const since = new Date(reference - DUPLICATE_UNDO_WINDOW_MS).toISOString();
   return (db.prepare("SELECT * FROM possible_duplicates WHERE project_id=? AND status<>'pending' AND reviewed_at>=? ORDER BY reviewed_at DESC LIMIT 50").all(projectId, since) as Record<string, unknown>[])
-    .map((row) => ({ ...row, undo_until: new Date(Date.parse(String(row.reviewed_at)) + DUPLICATE_UNDO_WINDOW_MS).toISOString() }));
+    .map((row) => ({ ...row, undo_until: new Date(Date.parse(String(row.reviewed_at)) + DUPLICATE_UNDO_WINDOW_MS).toISOString() }) as unknown as DuplicateDecision);
 }
 
 /** Desfaz a decisão (mesclar, distintas ou dispensar) dentro do prazo: a suspeita volta para a fila. */

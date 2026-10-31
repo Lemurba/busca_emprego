@@ -1,9 +1,11 @@
 // Payload do GET /api/bootstrap: leitura pura do estado do painel (a expiração roda no timer).
+// O contrato (BootstrapPayload) é compartilhado com o painel em src/bootstrap-payload.ts.
 import type { Application } from "../types.js";
+import type { BootstrapJob, BootstrapPayload } from "../bootstrap-payload.js";
 import { db, storeProjectId } from "./handle.js";
 import { livenessProofAt, livenessAndRepostSummaries } from "./liveness.js";
 import { evaluateBlockers } from "../blockers.js";
-import { mapMatchScoreRow } from "./scoring.js";
+import { listLatestMatchScores } from "./match-scores.js";
 import { automationOverview } from "./authorizations.js";
 import { deadlinePassed, listArchivedJobs, listCompanies, listJobEnrichmentEvents, listJobs, listSuppressedJobs, radarTimeZone } from "./jobs.js";
 import { getActiveProfile, listDraftProfiles, listProfiles } from "./profiles.js";
@@ -13,12 +15,12 @@ import { listBaseResumes } from "./base-resumes.js";
 import { listHumanQuestions } from "./questions.js";
 import { listPossibleDuplicates, listRecentDuplicateDecisions } from "./ingestion.js";
 import { listPreferenceState } from "./preferences.js";
-import { listResumes, resumeFactSummary } from "./resumes.js";
+import { listResumes, resumeSummary } from "./resumes.js";
 import { listSearchRounds, listSourceConfigsWithReadiness } from "./sources.js";
 
 // Leitura pura: a expiração roda no job periódico (timer do servidor e scripts/ops/expire-jobs.mjs),
 // e `lifecycle` abaixo já mostra como perdida a vaga com prazo vencido antes do próximo tick.
-export function getBootstrap(projectId = storeProjectId()) {
+export function getBootstrap(projectId = storeProjectId()): BootstrapPayload {
   const applications = listApplications(projectId);
   const applicationByJob = new Map<string, Application>();
   for (const application of applications) {
@@ -31,7 +33,7 @@ export function getBootstrap(projectId = storeProjectId()) {
   // QA-12: sem nota registrada (e sem nota legada), a vaga é "não avaliada", não "0%".
   const scoredJobs = new Set((db.prepare("SELECT DISTINCT job_id FROM match_scores WHERE project_id=?").all(projectId) as { job_id: string }[]).map((row) => row.job_id));
   const visibleJobs = listJobs({ projectId });
-  const jobs = visibleJobs.map((job) => {
+  const jobs = visibleJobs.map((job): BootstrapJob => {
     const application = applicationByJob.get(job.id);
     const closedByDeadline = deadlinePassed(job.deadline_at, currentTime);
     const isClosed = job.opening_status === "closed" || Boolean(job.closed_at) || closedByDeadline || job.status === "expired";
@@ -47,8 +49,9 @@ export function getBootstrap(projectId = storeProjectId()) {
   const suppressedJobs = listSuppressedJobs(projectId);
   return {
     jobs,
-    // Rascunhos substituídos por uma nova geração ATS ficam só no histórico.
-    resumes: listResumes(projectId).filter((resume) => resume.status !== "superseded").map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
+    // Rascunhos substituídos por uma nova geração ATS ficam só no histórico. F15: sem o conteúdo
+    // (o editor e a aprovação buscam GET /api/resumes/{id}).
+    resumes: listResumes(projectId).filter((resume) => resume.status !== "superseded").map(resumeSummary),
     baseResumes: listBaseResumes(projectId),
     applications,
     preferences: listPreferenceState(projectId),
@@ -60,7 +63,8 @@ export function getBootstrap(projectId = storeProjectId()) {
     rounds: listSearchRounds(projectId),
     possibleDuplicates: listPossibleDuplicates(projectId),
     recentDuplicateDecisions: listRecentDuplicateDecisions(projectId),
-    matchScores: (db.prepare("SELECT job_id,score_base,coverage_percent,band,preference_adjustment,score_final,criteria_json,criteria_basis_json,evidence_json,strengths_json,gaps_json,created_at FROM match_scores WHERE project_id=? ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[]).map(mapMatchScoreRow),
+    // F15: só a nota mais recente de cada vaga; o histórico é GET /api/jobs/{id}/scores.
+    matchScores: listLatestMatchScores(projectId),
     companies: listCompanies(projectId, visibleJobs),
     agentRuns: listAgentRuns(projectId),
     agentConfigs: listAgentConfigs(projectId),
