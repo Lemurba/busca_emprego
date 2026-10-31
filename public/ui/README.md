@@ -11,8 +11,8 @@ registro de páginas de `render()`.
   `preact.render`. Ao voltar para uma página legada, a árvore Preact é desmontada.
 - `app-state.ts` — leitura tipada do `state` de `app.ts` (`appState()`, `appData()`).
   Só leitura: mudanças continuam nas funções de `app.ts`, que chamam `render()`.
-- `components/` — peças reaproveitáveis equivalentes aos helpers em string
-  (`PageHeading` ↔ `pageHeading()`, `EmptyState` ↔ `.empty-state`, `MetricCard` ↔ `metric()`).
+- `components/` — peças reaproveitáveis das páginas (`PageHeading` com o #page-heading
+  focável, `EmptyState` ↔ `.empty-state`, `MetricCard` para os indicadores do topo).
   `automation-panel.tsx` é a marcação do painel de automação (#32); as ações dele
   (kill-switch, ENVIAR, cancelar) continuam em `public/automation-panel.ts`.
 - `pages/` — uma página por arquivo (`agents-page.tsx` foi a primeira).

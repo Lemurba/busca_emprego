@@ -1,6 +1,6 @@
 import type { ComponentChildren } from "preact";
 
-/** Equivalente JSX de `pageHeading()` do app.ts (mesmas classes e o mesmo #page-heading focável). */
+/** Cabeçalho de página: título no #page-heading focável (recebe o foco ao trocar de página), subtítulo e ações. */
 export function PageHeading({ title, subtitle, actions }: { title: string; subtitle: string; actions?: ComponentChildren }) {
   return (
     <div class="page-heading">

@@ -1,6 +1,6 @@
 /**
- * Peças dos gráficos clicáveis (Visão geral e Análises), equivalentes JSX de `chartBars()` e
- * `visualFilterSummary()` do app.ts.
+ * Peças dos gráficos clicáveis (Visão geral e Análises): barras e o resumo do filtro visual
+ * ativo.
  *
  * Os cliques continuam delegados no #view: cada barra leva `data-chart-filter-*`
  * (`activateChartFilter` em app.ts) e o resumo do filtro usa `data-clear-chart-filter` /
