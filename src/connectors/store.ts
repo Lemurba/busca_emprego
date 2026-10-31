@@ -6,7 +6,7 @@ import { db } from "../db.js";
 import { connectorById, CONNECTORS } from "./sources.js";
 
 // As tabelas connector_companies e connector_enrichment_queue são criadas pela migração
-// 0001_baseline (src/db/migrations/), aplicada quando src/db.ts abre o banco.
+// 0001_baseline (src/db/migrations/), aplicada por openStore() (src/db/handle.ts) no bootstrap.
 
 export interface ConnectorCompany {
   id: string;

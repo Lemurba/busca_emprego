@@ -35,7 +35,7 @@ import { idFor, now } from "./util.js";
  * Pedir a confirmação, confirmar (ENVIAR), consultar (poll) e religar reiniciam o lease, para que
  * o worker não perca a reserva logo depois de uma espera longa do usuário.
  *
- * Este módulo não importa src/db.ts (import circular): db.ts monta o executor com
+ * Este módulo não importa os módulos com estado (import circular): src/db/authorizations.ts monta o executor com
  * `createExecutor(deps)` passando a conexão e as funções internas que ele reaproveita.
  */
 

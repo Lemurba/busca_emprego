@@ -148,7 +148,7 @@ const questionStatusLabels: Record<string, string> = { pending: "Aguardando envi
 const versionStatusLabels: Record<string, string> = { published: "Publicada", draft: "Rascunho", retired: "Substituída", superseded: "Substituída", archived: "Arquivada" };
 const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Bloqueada", configured: "Aguardando teste", pending: "Aguardando teste", degraded: "Instável", not_ready: "Não pronta", paused: "Pausada" };
 const readinessTone: Record<string, string> = { ready: "teal", blocked: "red", not_ready: "red", paused: "neutral" };
-/** Motivos da prontidão calculada (sourceReadiness em src/db.ts); texto livre do teste passa como está. */
+/** Motivos da prontidão calculada (sourceReadiness em src/db/sources.ts); texto livre do teste passa como está. */
 const readinessReasonLabels: Record<string, string> = {
   "source.disabled": "Fonte pausada: fica fora das buscas.",
   "source.authentication.required": "Falta a referência de acesso (segredo no Hermes ou perfil do navegador).",

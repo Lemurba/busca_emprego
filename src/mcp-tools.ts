@@ -1,4 +1,4 @@
-// Sem dependências: scripts podem importar a lista sem abrir o banco (db.ts abre o SQLite ao carregar).
+// Sem dependências: scripts podem importar a lista sem abrir o banco (o MCP nunca abre o SQLite: fala com a API).
 /** Todos os nomes que o servidor sabe registrar; cada processo registra só os do seu papel. */
 export const RADAR_MCP_TOOLS = [
   "radar_list_agents", "radar_list_sources", "radar_get_job", "radar_discover_job", "radar_ingest_batch", "radar_enrich_job",

@@ -4,7 +4,7 @@ import { idFor, now } from "./util.js";
 
 // Persistência da checagem de fatos do currículo (#31). Sem import de src/db.ts: recebe a
 // conexão, como src/db/agent-configs.ts. A orquestração (perfil N+1, edição do conteúdo) fica
-// em src/db.ts, que já tem as regras de currículo e de perfil.
+// em src/db/resumes.ts, que já tem as regras de currículo e de perfil.
 
 export type FactCheckStatus = "pending" | "confirmed" | "corrected" | "removed" | "warning" | "covered";
 

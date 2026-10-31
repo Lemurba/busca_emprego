@@ -5,7 +5,7 @@ import { idFor, now } from "./util.js";
 
 // Persistência da verificação de vaga aberta e da repostagem (#33), recebendo a conexão por
 // parâmetro (sem import circular com src/db.ts). O fechamento da vaga em si continua no
-// caminho único de src/db.ts (closeJobFromSource), chamado por recordLivenessCheck.
+// caminho único de src/db/jobs.ts (closeJobFromSource), chamado por recordLivenessCheck.
 
 /** Validade da verificação exigida para AUTORIZO. */
 export const LIVENESS_FRESH_MS = 24 * 3_600_000;

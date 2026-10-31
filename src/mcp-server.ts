@@ -331,7 +331,7 @@ function urlHash(url: string) {
   return createHash("sha256").update(canonicalizeJobUrl(url)).digest("hex");
 }
 
-/** Mesma regra de domínio de `assertAgentUrlAllowed` (src/db.ts): host igual ou subdomínio. */
+/** Mesma regra de domínio de `assertAgentUrlAllowed` (src/db/agents.ts): host igual ou subdomínio. */
 function requireAllowedDomain(agent: PublishedAgent, url: string) {
   const hostname = new URL(canonicalizeJobUrl(url)).hostname.toLowerCase();
   if (!agent.allowed_domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) {
