@@ -1,4 +1,4 @@
-/** Equivalente JSX de `metric()` do app.ts (cartão de indicador do topo das páginas). */
+/** Cartão de indicador do topo das páginas (rótulo, valor, nota, ícone e tom). */
 export function MetricCard({ text, value, note, icon, tone = "teal", highlight = false }: {
   text: string; value: string | number; note: string; icon: string; tone?: string; highlight?: boolean;
 }) {

@@ -121,7 +121,7 @@ try {
     let cursor = 0;
     let failures = 0;
     let firstJobId = "";
-    await Promise.all(Array.from({ length: workers }, async (_, worker) => {
+    await Promise.all(Array.from({ length: workers }, async () => {
       while (true) {
         const index = cursor++;
         if (index >= total) return;

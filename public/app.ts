@@ -328,7 +328,7 @@ function monthlyRange(job: Job) {
 
 function dominantCurrency(jobs: Job[]) {
   const counts = new Map<string, number>();
-  jobs.filter((job) => monthlyRange(job)).forEach((job) => counts.set(job.currency || "BRL", (counts.get(job.currency || "BRL") ?? 0) + 1));
+  jobs.filter((job) => monthlyRange(job)).forEach((job) => { counts.set(job.currency || "BRL", (counts.get(job.currency || "BRL") ?? 0) + 1); });
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "BRL";
 }
 
@@ -523,27 +523,10 @@ function visualFilteredJobs(data: Data) {
   return data.jobs.filter((job) => String(job[field]) === filter.value);
 }
 
-function visualFilterSummary(data: Data, showJobsLink = true) {
-  const filter = state.visualFilter;
-  if (!filter) return "";
-  const count = visualFilteredJobs(data).length;
-  return `<div class="chart-filter-summary" role="status"><span>Filtro: <strong>${escapeHtml(filter.label)}</strong> · ${count} de ${data.jobs.length} vaga${data.jobs.length === 1 ? "" : "s"}</span><span class="button-row">${showJobsLink && state.page !== "jobs" ? `<button type="button" class="text-button" data-page="jobs">Ver vagas filtradas →</button>` : ""}<button type="button" class="text-button" data-clear-chart-filter>Limpar filtro</button></span></div>`;
-}
-
-function pageHeading(title: string, subtitle: string, actions = "") {
-  return `<div class="page-heading"><div><h1 id="page-heading" tabindex="-1">${escapeHtml(title)}</h1><p class="subtitle">${escapeHtml(subtitle)}</p></div>${actions ? `<div class="button-row">${actions}</div>` : ""}</div>`;
-}
-
-function metric(text: string, value: string | number, note: string, icon: string, tone = "teal", highlight = false) {
-  return `<article class="metric-card ${highlight ? "highlight" : ""}"><div class="metric-top"><span>${escapeHtml(text)}</span><span class="metric-icon tone-${tone}" aria-hidden="true">${icon}</span></div><strong class="metric-value">${escapeHtml(value)}</strong><div class="metric-note">${escapeHtml(note)}</div></article>`;
-}
-
 function resumeDownloadLinks(resume: Resume) {
   const base = `api/resumes/${encodeURIComponent(resume.id)}/files`;
   return `<a class="secondary-button" href="${base}/pdf">Baixar PDF</a><a class="secondary-button" href="${base}/docx">Baixar DOCX</a><a class="secondary-button" href="${base}/json" title="Formato padrão aberto (jsonresume.org)">JSON Resume</a>`;
 }
-
-const ADD_JOB_BUTTON = `<button class="primary-button" data-action="add-job"><span aria-hidden="true">+</span> Nova vaga</button>`;
 
 /* ------------------------------------------------------------------ */
 /* Kanban                                                              */
@@ -690,7 +673,8 @@ const operationsPage = preactPage(OperationsPage, () => ({
   originLabel: (origin: string) => label(originLabels, origin),
   factDisplay,
   describeRule,
-  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type))
+  missingBlockers: (facts: Array<{ type: string; state: string }>) => missingBlockerFacts(facts).map((type) => label(factTypeLabels, type)),
+  fetchJson
 }));
 const jobsPage = preactPage(JobsPage, () => ({
   title: pageMeta.jobs.label,
@@ -966,7 +950,7 @@ function setSyncLabel(text: string, tone: "ok" | "busy" | "error") {
 async function loadData(showToast = false) {
   setSyncLabel("Sincronizando…", "busy");
   // Um “Desfazer” antigo deixa de valer quando os dados mudam.
-  document.querySelectorAll("#toast-root .toast-action").forEach((button) => button.closest(".toast")?.remove());
+  document.querySelectorAll("#toast-root .toast-action").forEach((button) => { button.closest(".toast")?.remove(); });
   const firstLoad = !state.data;
   try {
     const scrollY = window.scrollY;
@@ -998,7 +982,7 @@ function toast(message: string, error = false, action?: { label: string; run: ()
   element.appendChild(text);
   if (action) {
     // Só o “Desfazer” mais recente fica disponível: evita desfazer a ação errada.
-    root.querySelectorAll(".toast-action").forEach((button) => button.closest(".toast")?.remove());
+    root.querySelectorAll(".toast-action").forEach((button) => { button.closest(".toast")?.remove(); });
     const actionButton = document.createElement("button");
     actionButton.type = "button";
     actionButton.className = "toast-action";
@@ -1589,7 +1573,7 @@ async function handleForm(form: HTMLFormElement) {
 async function markApplied(jobId: string) {
   const data = currentData();
   const existing = data.applications.find((item) => item.job_id === jobId);
-  if (!existing || existing.automation_mode !== "manual") throw new Error("Escolha primeiro o fluxo manual e aprove o currículo desta vaga.");
+  if (existing?.automation_mode !== "manual") throw new Error("Escolha primeiro o fluxo manual e aprove o currículo desta vaga.");
   await mutate(`/api/applications/${encodeURIComponent(existing.id)}`, "PATCH", { status: "submitted", submitted_at: new Date().toISOString(), current_step: "Candidatura registrada manualmente" }, "Candidatura registrada com a data de hoje.");
   closeModal();
 }
@@ -1860,7 +1844,7 @@ async function handleViewClick(event: MouseEvent) {
   if (sort) { state.sort = sort; refreshJobsPage(); document.querySelector<HTMLElement>(`[data-sort="${sort}"]`)?.focus(); return; }
   if (target.closest("[data-show-more-jobs]")) { state.jobsLimit += 50; refreshJobsPage(); return; }
   const mapJob = target.closest<HTMLElement>("[data-map-job]")?.dataset.mapJob;
-  if (mapJob) { focusMapJob(mapJob); view().querySelectorAll(".map-job").forEach((item) => item.classList.toggle("selected", (item as HTMLElement).dataset.mapJob === mapJob)); return; }
+  if (mapJob) { focusMapJob(mapJob); view().querySelectorAll(".map-job").forEach((item) => { item.classList.toggle("selected", (item as HTMLElement).dataset.mapJob === mapJob); }); return; }
   const detail = target.closest<HTMLElement>("[data-detail]")?.dataset.detail;
   if (detail) { showJobDetail(detail); return; }
   const card = target.closest<HTMLElement>("[data-detail-id]");
@@ -1979,7 +1963,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindAppState(() => state);
   setTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
   document.getElementById("theme-toggle")?.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
-  document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => element.addEventListener("click", () => navigate(element.dataset.page ?? "overview")));
+  document.querySelectorAll<HTMLElement>("[data-page]").forEach((element) => { element.addEventListener("click", () => navigate(element.dataset.page ?? "overview")); });
   document.querySelector<HTMLElement>("[data-mobile-more]")?.addEventListener("click", () => {
     const open = !document.body.classList.contains("mobile-more-open");
     document.body.classList.toggle("mobile-more-open", open);
@@ -1988,7 +1972,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelector<HTMLElement>("[data-mobile-more]")?.setAttribute("aria-expanded", String(open));
     if (open) document.querySelector<HTMLElement>(".mobile-more-grid button")?.focus();
   });
-  document.querySelectorAll<HTMLElement>("[data-close-mobile-more]").forEach((element) => element.addEventListener("click", closeMobileMore));
+  document.querySelectorAll<HTMLElement>("[data-close-mobile-more]").forEach((element) => { element.addEventListener("click", closeMobileMore); });
   document.getElementById("refresh-button")?.addEventListener("click", (event) => void runBusy(event.currentTarget as HTMLElement, () => loadData(true)));
   document.getElementById("logout-button")?.addEventListener("click", async () => { if (await confirmDialog("Sair do painel?", "Para voltar, você vai precisar de um novo link de acesso enviado pelo Hermes.", "Sair")) void logout(); });
   document.getElementById("auth-retry")?.addEventListener("click", () => loadData());

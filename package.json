@@ -8,13 +8,15 @@
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs && esbuild public/app.ts --bundle --minify --jsx=automatic --jsx-import-source=preact --outfile=dist/public/app.js",
-    "test": "node --import tsx --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"test/*.test.mjs\" && npm run test:py",
+    "test": "node --import tsx --test --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-lines=50 --test-coverage-branches=52 --test-coverage-functions=42 \"test/*.test.mjs\" && npm run test:py",
     "test:unit": "node --import tsx --test \"test/*.test.mjs\"",
-    "test:e2e": "npm run build && node --test \"test/e2e/*.test.mjs\"",
+    "test:e2e": "npm run build && npm run test:e2e:dist",
+    "test:e2e:dist": "node --test \"test/e2e/*.test.mjs\"",
     "test:py": "python3 -m unittest discover -s hermes/native-plugin",
+    "lint:py": "ruff check hermes/native-plugin && mypy --config-file hermes/native-plugin/pyproject.toml hermes/native-plugin",
     "test:ui": "npm run build && playwright test",
     "test:all": "npm test && npm run test:e2e",
-    "lint": "biome lint .",
+    "lint": "biome lint --error-on-warnings .",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck:web && tsc -p tsconfig.ui.json",
     "start": "node dist/src/server.js",
     "dev": "npm run build && node dist/src/server.js",
@@ -26,17 +28,16 @@
     "@playwright/test": "1.56.1",
     "@types/node": "^24.3.0",
     "esbuild": "^0.25.9",
-    "playwright-core": "1.56.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "docx": "^9.7.1",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "docx": "9.7.1",
     "leaflet": "1.9.4",
-    "pdf-lib": "^1.17.1",
+    "pdf-lib": "1.17.1",
     "pdfjs-dist": "6.3.289",
     "preact": "10.29.8",
-    "zod": "^4.6.5"
+    "zod": "4.6.7"
   }
 }

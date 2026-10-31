@@ -57,7 +57,7 @@ function filterJobs(jobs: Job[], props: JobsPageProps) {
   return filtered.sort(sorters[sort]);
 }
 
-/** Resumo do filtro visual (equivale a `visualFilterSummary(data, false)` de app.ts). */
+/** Resumo do filtro visual ativo na página de vagas. */
 function VisualFilterSummary({ count, total }: { count: number; total: number }) {
   const filter = appState().visualFilter;
   if (!filter) return null;

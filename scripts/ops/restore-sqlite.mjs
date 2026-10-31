@@ -7,8 +7,8 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { readEnvLocal, resolveDbPath } from "./lib/env-local.mjs";
 
 function usage(exitCode = 0) {
   console.log(`Uso: node scripts/ops/restore-sqlite.mjs --from BACKUP --confirm RESTORE [--db CAMINHO] [--health-url URL] [--force]\n\n` +
@@ -17,7 +17,9 @@ function usage(exitCode = 0) {
     `dist/src/server.js usando este banco, consulta o registro de processos abertos <db>.processes/\n` +
     `(heartbeat do dashboard e do servidor MCP), confere o manifesto adjacente, cria uma cópia pre-restore\n` +
     `e troca o banco de forma atômica (sidecars -wal/-shm removidos antes do rename, com fsync).\n` +
-    `Um lock exclusivo <db>.restore.lock impede restaurações concorrentes.\n\n` +
+    `Um lock exclusivo <db>.restore.lock impede restaurações concorrentes.\n` +
+    `Sem --db: RADAR_DB_PATH do ambiente (relativo ao diretório atual) ou do $RADAR_APP_DIR/.env.local\n` +
+    `(relativo ao app); sem nenhum, <app>/data/radar.sqlite.\n\n` +
     `--force                     permite restaurar sobre um banco atual que falha no quick_check\n` +
     `                            (cenário de desastre); a cópia pre-restore vira cópia bruta, best effort.\n` +
     `                            Também ignora, com aviso, um servidor MCP ativo: as gravações que ele\n` +
@@ -33,30 +35,16 @@ function option(name, fallback) {
   return process.argv[index + 1];
 }
 
-function readLocalEnv() {
-  const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const vars = {};
-  try {
-    for (const raw of readFileSync(join(appDir, ".env.local"), "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#")) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch {}
-  return vars;
-}
-
 if (process.argv.includes("--help") || process.argv.includes("-h")) usage();
 
 const fromValue = option("--from");
 if (!fromValue || option("--confirm") !== "RESTORE") usage(2);
 const force = process.argv.includes("--force");
-const localEnv = readLocalEnv();
+const localEnv = readEnvLocal();
 const port = process.env.PORT ?? localEnv.PORT ?? "8787";
 const sourcePath = resolve(fromValue);
-const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));
+// TD-20: mesmo banco que o serviço e o backup usam, não ./data relativo ao diretório atual.
+const { dbPath } = resolveDbPath(option("--db", undefined), localEnv);
 const healthUrl = option("--health-url", process.env.RADAR_HEALTH_URL ?? `http://127.0.0.1:${port}/api/health`);
 const lockPath = `${dbPath}.restore.lock`;
 

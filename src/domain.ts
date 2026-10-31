@@ -470,7 +470,7 @@ export function calculateMatchScore(scores: Readonly<Record<MatchCriterionKey, n
   const expected = Object.keys(MATCH_CRITERION_WEIGHTS) as MatchCriterionKey[];
   const actual = Object.keys(scores);
   const extras = actual.filter((key) => !(key in MATCH_CRITERION_WEIGHTS));
-  const missing = expected.filter((key) => !Object.prototype.hasOwnProperty.call(scores, key));
+  const missing = expected.filter((key) => !Object.hasOwn(scores, key));
   if (missing.length || extras.length) {
     throw new DomainValidationError(
       `São exigidos exatamente os seis critérios; ausentes: ${missing.join(", ") || "nenhum"}; extras: ${extras.join(", ") || "nenhum"}`,

@@ -9,13 +9,13 @@
 // Configuração: ambiente do processo e, para chaves ausentes, $RADAR_APP_DIR/.env.local (lido sem
 // `source`, só as chaves abaixo). Saída: uma linha JSON; código 1 se qualquer etapa falhar.
 
-import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { offsiteCopy } from "./offsite-backup.mjs";
 import { restoreTest } from "./restore-test.mjs";
 import { parseRetention, rotateDirectory } from "./rotate-backups.mjs";
+import { appDirFromEnv, readEnvLocal } from "./lib/env-local.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const KEYS = [
@@ -24,22 +24,8 @@ const KEYS = [
   "RADAR_OFFSITE_KEEP_DAILY", "RADAR_OFFSITE_KEEP_WEEKLY", "RADAR_OFFSITE_KEEP_MONTHLY"
 ];
 
-function readLocalEnv(appDir) {
-  const vars = {};
-  try {
-    for (const raw of readFileSync(join(appDir, ".env.local"), "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#") || !KEYS.includes(match[1])) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch {}
-  return vars;
-}
-
-const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : resolve(scriptsDir, "../..");
-const localEnv = readLocalEnv(appDir);
+const appDir = appDirFromEnv();
+const localEnv = readEnvLocal(appDir, { keys: KEYS });
 const setting = (key) => (process.env[key] ?? "") || (localEnv[key] ?? "");
 
 const summary = { ok: false, steps: {} };

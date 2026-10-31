@@ -1,0 +1,45 @@
+# Atualizações de dependências (TD-17). PRs semanais e agrupados para não inundar a fila;
+# versões continuam exatas no package.json/requirements e cada PR passa pela CI inteira.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build(deps)
+    groups:
+      # Playwright e @axe-core/playwright andam juntos (o Chromium do CI depende da versão).
+      playwright:
+        patterns: ["@playwright/*", "playwright*", "@axe-core/*"]
+      dev-tooling:
+        dependency-type: development
+        exclude-patterns: ["@playwright/*", "playwright*", "@axe-core/*"]
+        update-types: [minor, patch]
+      runtime-patches:
+        dependency-type: production
+        update-types: [patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci(deps)
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /hermes/native-plugin
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: build(deps)
+    groups:
+      python-tooling:
+        patterns: ["*"]

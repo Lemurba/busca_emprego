@@ -417,6 +417,48 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("Saúde das buscas: painel Saúde da instalação mostra GET /api/metrics e Atualizar busca de novo", async ({ page }) => {
+    const errors = watchConsole(page);
+    await login(page);
+    const metrics = await pageApi(page, "GET", "api/metrics");
+    const reads: string[] = [];
+    page.on("request", (request) => { if (request.method() === "GET" && request.url().endsWith("/api/metrics")) reads.push(request.url()); });
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="ops-metrics-title"]');
+    await expect(panel.getByRole("heading", { name: "Saúde da instalação" })).toBeVisible();
+    await expect(panel).toContainText("Último backup");
+    // Banco do smoke recém-criado, sem diretório de backup: "Nenhum backup" (status missing).
+    await expect(panel).toContainText(metrics.backup.status === "missing" ? "Nenhum backup" : "Último backup");
+    await expect(panel).toContainText("Banco de dados");
+    await expect(panel).toContainText(`${metrics.queues.human_questions_open} pergunta(s) aberta(s)`);
+    await expect(panel).toContainText(metrics.last_round ? "Iniciada em" : "Nenhuma rodada registrada.");
+    await expect.poll(() => reads.length).toBe(1);
+    await panel.getByRole("button", { name: "Atualizar" }).click();
+    await expect.poll(() => reads.length).toBe(2);
+    await expect(panel.getByRole("button", { name: "Atualizar" })).toBeEnabled();
+    expect(errors, "erros de console").toEqual([]);
+  });
+
+  test("Saúde das buscas: falha ao atualizar mantém as métricas e Sincronizar relê /api/metrics", async ({ page }) => {
+    await login(page);
+    const reads: string[] = [];
+    page.on("request", (request) => { if (request.method() === "GET" && request.url().endsWith("/api/metrics")) reads.push(request.url()); });
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="ops-metrics-title"]');
+    await expect(panel).toContainText("Banco de dados");
+    await expect.poll(() => reads.length).toBe(1);
+    // "Sincronizar" do cabeçalho recarrega o bootstrap: o painel busca as métricas de novo.
+    await page.locator("#refresh-button").click();
+    await expect.poll(() => reads.length).toBe(2);
+    await page.route("**/api/metrics", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "falha" }) }));
+    await panel.getByRole("button", { name: "Atualizar" }).click();
+    const status = panel.getByRole("status");
+    await expect(status).toContainText("Não foi possível atualizar");
+    await expect(panel).toContainText("Banco de dados");
+    await expect(panel).toContainText("pergunta(s) aberta(s)");
+    await expect(panel.getByRole("button", { name: "Atualizar" })).toBeEnabled();
+  });
+
   test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);

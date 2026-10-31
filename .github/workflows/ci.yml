@@ -19,11 +19,17 @@ jobs:
     # local) não instala navegador no ubuntu-latest (26.04).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Mesma matriz do build-and-test (TD-17): o bundle e o servidor também rodam no mínimo
+    # de `engines`. Custa um download extra do Chromium (~1 min) por PR.
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22.16", "24"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - name: Instalar Chromium do Playwright
@@ -34,11 +40,29 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: playwright-report
+          name: playwright-report-node-${{ matrix.node-version }}
           path: |
             playwright-report/
             test-results/
           retention-days: 7
+
+  # Plugin nativo do Hermes (Python): lint (ruff) e tipos (mypy). Os testes unitários dele
+  # rodam no `npm test` do build-and-test.
+  python-plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: hermes/native-plugin/requirements-dev.txt
+      - run: python -m pip install -r hermes/native-plugin/requirements-dev.txt
+      - name: Ruff (lint)
+        run: ruff check hermes/native-plugin
+      - name: Mypy (tipos)
+        run: mypy --config-file hermes/native-plugin/pyproject.toml hermes/native-plugin
 
   build-and-test:
     runs-on: ubuntu-latest
@@ -58,16 +82,18 @@ jobs:
       - run: npm ci
       - name: Auditar dependências de produção
         run: npm audit --omit=dev --audit-level=high
-      - name: Lint (Biome)
+      - name: Lint (Biome; warnings também falham)
         run: npm run lint
       - name: Typecheck (src/ e public/)
         run: npm run typecheck
       - run: npm run build
       # Testes de unidade (node:test + tsx, sem dist/), cobertura e plugin Python.
       # Inclui test/ops*.test.mjs (backup/restore SQLite) e test/migrations.test.mjs.
+      # Cobertura mínima de src/ (linhas/branches/funções) definida no próprio script.
       - run: npm test
+      # O build já rodou acima: test:e2e:dist não compila de novo (test:e2e = build + este).
       - name: Testes ponta a ponta (servidor real em dist/)
-        run: npm run test:e2e
+        run: npm run test:e2e:dist
       - name: Smoke dos agentes (instância isolada)
         run: node scripts/ops/smoke-agents.mjs
       - name: Validar CLIs operacionais

@@ -102,7 +102,7 @@ export async function startFakeRadarApi({ token, allowedUsers = [], canonicalize
     if (req.method === "POST" && segments[0] === "api" && segments[1] === "applications" && segments.length === 4) {
       const app = applications.get(segments[2]);
       if (segments[3] === "claim") {
-        if (!app || app.authorization !== "issued" || body.nonce !== app.nonce) return send(res, 409, { error: "application.authorization.unavailable" });
+        if (app?.authorization !== "issued" || body.nonce !== app.nonce) return send(res, 409, { error: "application.authorization.unavailable" });
         Object.assign(app, { authorization: "claimed", status: "in_progress", claimed_by: String(body.worker_id) });
         return send(res, 200, app);
       }

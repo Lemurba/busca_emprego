@@ -87,6 +87,7 @@ O contrato detalhado, com campos e exemplos, está em [`docs/agent-api.md`](docs
 | --- | --- | --- |
 | `GET` | `/api/health` | Verificar se o processo responde |
 | `GET` | `/api/ready` | Verificar banco, ambiente e operador |
+| `GET` | `/api/metrics` | Idade do último backup, tamanho do banco, filas e última rodada (painel "Saúde da instalação") |
 | `GET` | `/auth?token=...` | Trocar `RADAR_DASHBOARD_TOKEN` pelo cookie de sessão do dashboard |
 | `GET` | `/api/bootstrap` | Carregar vagas, currículos, candidaturas, métricas e metadados dos PDFs |
 | `POST` | `/api/agent-events` | Registrar vaga descoberta/atualizada ou estado do agente |
@@ -141,10 +142,11 @@ O projeto inclui CI, proxy TLS, identificação do operador, backup/restore e he
 | comando | o que faz |
 | --- | --- |
 | `npm run build` | compila `src/` para `dist/` e empacota `public/app.ts` |
-| `npm test` | testes de unidade (`test/*.test.mjs`) com `node:test` direto sobre o TypeScript (`node --import tsx`), com relatório de cobertura, e os testes Python do plugin Hermes; não precisa de `dist/` |
+| `npm test` | testes de unidade (`test/*.test.mjs`) com `node:test` direto sobre o TypeScript (`node --import tsx`), com relatório de cobertura e mínimo de 50% de linhas, 52% de branches e 42% de funções em `src/` (falha abaixo disso), e os testes Python do plugin Hermes; não precisa de `dist/` |
 | `npm run test:unit` | só os testes de unidade, sem cobertura (mais rápido) |
-| `npm run test:e2e` | faz o build e roda `test/e2e/*.test.mjs`, que sobem `dist/src/server.js` de verdade |
-| `npm run lint` | Biome (regras recomendadas, sem formatador) |
+| `npm run test:e2e` | faz o build e roda `test/e2e/*.test.mjs`, que sobem `dist/src/server.js` de verdade (`npm run test:e2e:dist` pula o build, como na CI) |
+| `npm run lint` | Biome (regras recomendadas, sem formatador); warnings também falham |
+| `npm run lint:py` | ruff e mypy no plugin nativo (`hermes/native-plugin`; instale com `pip install -r hermes/native-plugin/requirements-dev.txt`) |
 | `npm run typecheck` | `tsc --noEmit` em `src/` e em `public/` (`tsconfig.web.json`) |
 
 Cada arquivo de teste usa o próprio SQLite temporário: `openTempStore()` de `test/helpers/temp-db.mjs` define `RADAR_DB_PATH`, importa uma instância nova de `src/db.ts` e devolve `cleanup` para `after()`. Um teste novo em `test/*.test.mjs` entra automaticamente em `npm test`; não é preciso editar o `package.json`.

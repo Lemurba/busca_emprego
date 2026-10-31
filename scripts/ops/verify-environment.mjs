@@ -3,10 +3,10 @@
 // em rede privada literal) e autenticação (C3): /api/bootstrap precisa responder
 // 401 sem credenciais e 200 com o token de serviço.
 
-import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { readEnvLocal } from "./lib/env-local.mjs";
 
 function usage(exitCode = 0) {
   console.log(`Uso: node scripts/ops/verify-environment.mjs [--url URL] [--environment NOME]\n\n` +
@@ -21,21 +21,6 @@ function option(name, fallback) {
   const value = process.argv[index + 1];
   if (!value || value.startsWith("--")) usage(2);
   return value;
-}
-
-function readLocalEnv() {
-  const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const vars = {};
-  try {
-    for (const raw of readFileSync(join(appDir, ".env.local"), "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#")) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch {}
-  return vars;
 }
 
 function ipv4Octets(address) {
@@ -90,7 +75,7 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(proc
 async function main() {
   if (process.argv.includes("--help") || process.argv.includes("-h")) usage();
 
-  const localEnv = readLocalEnv();
+  const localEnv = readEnvLocal();
   const port = process.env.PORT ?? localEnv.PORT ?? "8787";
   const baseUrl = option("--url", process.env.RADAR_PUBLIC_URL ?? `http://127.0.0.1:${port}/`);
   const expectedEnvironment = option("--environment", process.env.RADAR_ENVIRONMENT ?? "production");
