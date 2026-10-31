@@ -439,6 +439,26 @@ test.describe("smoke de UI", () => {
     expect(errors, "erros de console").toEqual([]);
   });
 
+  test("Saúde das buscas: falha ao atualizar mantém as métricas e Sincronizar relê /api/metrics", async ({ page }) => {
+    await login(page);
+    const reads: string[] = [];
+    page.on("request", (request) => { if (request.method() === "GET" && request.url().endsWith("/api/metrics")) reads.push(request.url()); });
+    await page.goto("#/saude");
+    const panel = page.locator('#view section[aria-labelledby="ops-metrics-title"]');
+    await expect(panel).toContainText("Banco de dados");
+    await expect.poll(() => reads.length).toBe(1);
+    // "Sincronizar" do cabeçalho recarrega o bootstrap: o painel busca as métricas de novo.
+    await page.locator("#refresh-button").click();
+    await expect.poll(() => reads.length).toBe(2);
+    await page.route("**/api/metrics", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "falha" }) }));
+    await panel.getByRole("button", { name: "Atualizar" }).click();
+    const status = panel.getByRole("status");
+    await expect(status).toContainText("Não foi possível atualizar");
+    await expect(panel).toContainText("Banco de dados");
+    await expect(panel).toContainText("pergunta(s) aberta(s)");
+    await expect(panel.getByRole("button", { name: "Atualizar" })).toBeEnabled();
+  });
+
   test("Saúde das buscas: pausar o kill-switch pede confirmação e chama PUT /api/settings/automation", async ({ page }) => {
     const errors = watchConsole(page);
     await login(page);

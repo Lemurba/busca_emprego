@@ -14,6 +14,13 @@ import type { DatabaseSync } from "node:sqlite";
 /** O backup agendado roda a cada 24 h; com folga para atraso do cron, mais de 36 h é atraso. */
 export const BACKUP_STALE_AFTER_HOURS = 36;
 
+/**
+ * Folga para relógios levemente adiantados. Um nome com data além disso (relógio errado ou
+ * arquivo copiado à mão, ex. radar-2099-…) não conta como "último backup": senão esconderia
+ * para sempre um backup real atrasado ou ausente.
+ */
+const BACKUP_FUTURE_TOLERANCE_MS = 5 * 60_000;
+
 const BACKUP_NAME = /^radar-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.sqlite$/u;
 
 /** Mesmas perguntas "abertas" da página de operação: ainda esperam resposta do humano. */
@@ -62,7 +69,8 @@ export function backupMetrics(directory: string, nowMs = Date.now()): BackupMetr
     const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
     return { ...base, status: missing ? "missing" : "unavailable", latest_at: null, age_seconds: null, count: 0 };
   }
-  const dates = names.map(backupDate).filter((date): date is Date => date !== null).sort((a, b) => b.getTime() - a.getTime());
+  const dates = names.map(backupDate)
+    .filter((date): date is Date => date !== null && date.getTime() <= nowMs + BACKUP_FUTURE_TOLERANCE_MS).sort((a, b) => b.getTime() - a.getTime());
   const latest = dates[0];
   if (!latest) return { ...base, status: "missing", latest_at: null, age_seconds: null, count: 0 };
   const ageSeconds = Math.max(0, Math.floor((nowMs - latest.getTime()) / 1000));

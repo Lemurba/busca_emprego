@@ -43,6 +43,27 @@ test("idade do backup: só conta nomes gerados pelo backup-sqlite e marca atraso
   assert.equal(fresh.age_seconds, 2 * 3600);
 });
 
+test("idade do backup: nome com data no futuro não esconde backup atrasado", () => {
+  const nowMs = Date.parse("2026-10-31T12:00:00.000Z");
+  const dir = join(directory, "backups-futuro");
+  mkdirSync(dir);
+  writeFileSync(join(dir, backupName(new Date(nowMs - hours(40)))), "");
+  writeFileSync(join(dir, "radar-2099-01-01T00-00-00-000Z.sqlite"), "");
+  const stale = backupMetrics(dir, nowMs);
+  assert.equal(stale.status, "stale");
+  assert.equal(stale.latest_at, new Date(nowMs - hours(40)).toISOString());
+  assert.equal(stale.count, 1);
+  // Relógio do backup poucos minutos adiantado ainda vale (idade 0).
+  writeFileSync(join(dir, backupName(new Date(nowMs + 60_000))), "");
+  const skewed = backupMetrics(dir, nowMs);
+  assert.equal(skewed.status, "ok");
+  assert.equal(skewed.age_seconds, 0);
+  const onlyFuture = join(directory, "backups-so-futuro");
+  mkdirSync(onlyFuture);
+  writeFileSync(join(onlyFuture, "radar-2099-01-01T00-00-00-000Z.sqlite"), "");
+  assert.equal(backupMetrics(onlyFuture, nowMs).status, "missing");
+});
+
 test("banco vazio: filas zeradas, sem rodada e tamanho do banco positivo", () => {
   const metrics = metricsNow();
   assert.ok(metrics.database.bytes > 0);

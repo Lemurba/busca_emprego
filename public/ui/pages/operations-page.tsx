@@ -95,7 +95,7 @@ export function OperationsPage(props: OperationsPageProps) {
         <MetricCard text="Duplicatas" value={data.possibleDuplicates.length} note="aguardando sua decisão" icon="≋" tone="orange" />
         <MetricCard text="Perguntas" value={openQuestions.length} note="esperando resposta no Telegram" icon="?" tone="red" />
       </div>
-      <OpsMetricsPanel fetchJson={props.fetchJson} formatDate={formatDate} roundStatus={props.roundStatus} />
+      <OpsMetricsPanel fetchJson={props.fetchJson} formatDate={formatDate} roundStatus={props.roundStatus} revision={data} />
       <AutomationPanel automation={data.automation} jobLabel={(applicationId, jobId) => jobName(jobId || applicationJob.get(applicationId) || "")} formatDate={formatDate} />
       <div class="dashboard-grid equal section-spaced">
         <ProfilePanel profile={profile} facts={facts} props={props} />

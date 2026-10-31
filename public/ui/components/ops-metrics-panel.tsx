@@ -2,8 +2,10 @@
  * F17 — painel "Saúde da instalação" da página "Saúde das buscas": idade do último backup,
  * tamanho do banco, filas que esperam alguém e a última rodada, lidos de `GET /api/metrics`.
  *
- * Autocontido como o painel de conectores: busca os dados ao montar e no botão "Atualizar"
- * (que para a propagação, para o handler global de cliques do #view não marcá-lo ocupado).
+ * Autocontido como o painel de conectores: busca os dados ao montar, quando a página recebe
+ * dados novos (`revision`, ex. "Sincronizar") e no botão "Atualizar" (que para a propagação,
+ * para o handler global de cliques do #view não marcá-lo ocupado; o painel cuida do próprio
+ * estado ocupado). Uma falha ao atualizar mantém os últimos números, com o aviso ao lado.
  */
 import { useCallback, useEffect, useState } from "preact/hooks";
 
@@ -20,6 +22,8 @@ export type OpsMetricsDeps = {
   fetchJson: <T>(url: string, options?: RequestInit) => Promise<T>;
   formatDate: (value: string | null | undefined) => string;
   roundStatus: (status: string) => { label: string; tone: string };
+  /** Muda quando a página recebe dados novos do bootstrap; dispara nova leitura das métricas. */
+  revision?: unknown;
 };
 
 const backupStatus: Record<OperationalMetrics["backup"]["status"], [string, string]> = {
@@ -60,24 +64,32 @@ function BackupItem({ backup, formatDate }: { backup: OperationalMetrics["backup
   );
 }
 
-export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus }: OpsMetricsDeps) {
+export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus, revision }: OpsMetricsDeps) {
   const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
+    setLoading(true);
     try {
       setMetrics(await fetchJson<OperationalMetrics>("/api/metrics"));
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Não foi possível carregar as métricas.");
+    } finally {
+      setLoading(false);
     }
   }, [fetchJson]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  // `revision` não é lido no efeito: só sinaliza que a página recebeu dados novos.
+  useEffect(() => { void refresh(); }, [refresh, revision]);
 
-  let body = <p class="muted-text">Carregando…</p>;
-  if (loadError) body = <p class="muted-text">{loadError}</p>;
-  else if (metrics) {
+  // Aviso em região viva: anuncia carregamento e falha sem tirar o foco de quem clicou.
+  let status = "";
+  if (loadError) status = metrics ? `Não foi possível atualizar (${loadError}); mostrando os dados de ${formatDate(metrics.generated_at)}.` : loadError;
+  else if (loading) status = metrics ? "Atualizando…" : "Carregando…";
+  let body = null;
+  if (metrics) {
     const { database, queues, last_round: round } = metrics;
     const status = round ? roundStatus(round.status) : null;
     body = (
@@ -87,7 +99,7 @@ export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus }: OpsMetri
           <div><strong>Banco de dados</strong><span>{`${formatBytes(database.bytes)}${database.wal_bytes ? ` + ${formatBytes(database.wal_bytes)} de WAL` : ""}`}</span></div>
         </article>
         <article class="ops-item">
-          <div><strong>Filas</strong><span>{`${queues.human_questions_open} pergunta(s) aberta(s) · ${queues.enrichment_pending} vaga(s) aguardando enriquecimento · ${queues.authorized_applications.issued} autorização(ões) de envio emitida(s) e ${queues.authorized_applications.claimed} em execução`}</span></div>
+          <div><strong>Filas</strong><span>{`${queues.human_questions_open} pergunta(s) aberta(s) · ${queues.enrichment_pending} vaga(s) aguardando enriquecimento · ${queues.authorized_applications.issued} autorização(ões) de envio emitida(s) e ainda válida(s), ${queues.authorized_applications.claimed} em execução`}</span></div>
         </article>
         <article class="ops-item">
           <div><strong>Última rodada</strong><span>{round ? `Iniciada em ${formatDate(round.started_at)}${round.finished_at ? ` · terminada em ${formatDate(round.finished_at)}` : ""}${round.error_code ? ` · erro ${round.error_code}` : ""}` : "Nenhuma rodada registrada."}</span></div>
@@ -101,8 +113,9 @@ export function OpsMetricsPanel({ fetchJson, formatDate, roundStatus }: OpsMetri
     <section class="panel section-spaced" aria-labelledby="ops-metrics-title">
       <div class="section-head flush">
         <div><h2 id="ops-metrics-title">Saúde da instalação</h2><p>Backup, banco e filas que esperam alguém. Os mesmos números saem em GET /api/metrics.</p></div>
-        <button type="button" class="secondary-button" data-ops-metrics-refresh onClick={(event) => { event.stopPropagation(); void refresh(); }}>Atualizar</button>
+        <button type="button" class="secondary-button" data-ops-metrics-refresh disabled={loading} aria-busy={loading ? "true" : undefined} onClick={(event) => { event.stopPropagation(); void refresh(); }}>Atualizar</button>
       </div>
+      <p class="muted-text" role="status" aria-live="polite" data-ops-metrics-status>{status}</p>
       {body}
     </section>
   );
