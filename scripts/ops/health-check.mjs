@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { accessSync, constants, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readEnvLocal } from "./lib/env-local.mjs";
+import { readEnvLocal, resolveDbPath } from "./lib/env-local.mjs";
 
 function fail(error, message) {
   console.error(JSON.stringify({ ok: false, error, message }));
@@ -23,8 +23,9 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.exit(0);
 }
 
-const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));
 const localEnv = readEnvLocal();
+// TD-20: sem --db, o banco da instalação (.env.local do app), como no backup.
+const { dbPath } = resolveDbPath(option("--db", undefined), localEnv);
 const port = process.env.PORT ?? localEnv.PORT ?? "8787";
 const url = option("--url", process.env.RADAR_HEALTH_URL ?? `http://127.0.0.1:${port}/api/health`);
 const timeoutValue = option("--timeout-ms", "3000");

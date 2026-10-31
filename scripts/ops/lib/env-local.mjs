@@ -58,6 +58,22 @@ export function readEnvLocal(appDir = appDirFromEnv(), options = {}) {
 }
 
 /**
+ * Banco alvo dos scripts de ops (TD-20), com a mesma regra em backup, restore e health-check:
+ * `--db` ou `RADAR_DB_PATH` do ambiente (relativos ao diretório atual, como sempre); senão o
+ * `RADAR_DB_PATH` do `.env.local` ou o padrão `./data/radar.sqlite`, relativos ao app.
+ * `fromEnvLocal` diz se o banco veio da instalação (e não de um caminho explícito).
+ * @param {string | undefined} explicit valor de `--db`, se passado
+ * @param {Record<string, string>} local resultado de `readEnvLocal`
+ * @param {string} [appDir]
+ * @returns {{ dbPath: string, fromEnvLocal: boolean }}
+ */
+export function resolveDbPath(explicit, local, appDir = appDirFromEnv()) {
+  const given = explicit ?? (process.env.RADAR_DB_PATH || undefined);
+  if (given) return { dbPath: resolve(given), fromEnvLocal: false };
+  return { dbPath: resolve(appDir, local.RADAR_DB_PATH || "./data/radar.sqlite"), fromEnvLocal: true };
+}
+
+/**
  * Valor efetivo de uma variável: o ambiente do processo tem precedência; vazio conta como
  * ausente e cai para o `.env.local`. Sem nenhum dos dois, devolve `fallback`.
  * @param {Record<string, string>} local

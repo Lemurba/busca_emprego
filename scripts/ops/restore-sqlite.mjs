@@ -8,7 +8,7 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readEnvLocal } from "./lib/env-local.mjs";
+import { readEnvLocal, resolveDbPath } from "./lib/env-local.mjs";
 
 function usage(exitCode = 0) {
   console.log(`Uso: node scripts/ops/restore-sqlite.mjs --from BACKUP --confirm RESTORE [--db CAMINHO] [--health-url URL] [--force]\n\n` +
@@ -17,7 +17,9 @@ function usage(exitCode = 0) {
     `dist/src/server.js usando este banco, consulta o registro de processos abertos <db>.processes/\n` +
     `(heartbeat do dashboard e do servidor MCP), confere o manifesto adjacente, cria uma cópia pre-restore\n` +
     `e troca o banco de forma atômica (sidecars -wal/-shm removidos antes do rename, com fsync).\n` +
-    `Um lock exclusivo <db>.restore.lock impede restaurações concorrentes.\n\n` +
+    `Um lock exclusivo <db>.restore.lock impede restaurações concorrentes.\n` +
+    `Sem --db: RADAR_DB_PATH do ambiente (relativo ao diretório atual) ou do $RADAR_APP_DIR/.env.local\n` +
+    `(relativo ao app); sem nenhum, <app>/data/radar.sqlite.\n\n` +
     `--force                     permite restaurar sobre um banco atual que falha no quick_check\n` +
     `                            (cenário de desastre); a cópia pre-restore vira cópia bruta, best effort.\n` +
     `                            Também ignora, com aviso, um servidor MCP ativo: as gravações que ele\n` +
@@ -41,7 +43,8 @@ const force = process.argv.includes("--force");
 const localEnv = readEnvLocal();
 const port = process.env.PORT ?? localEnv.PORT ?? "8787";
 const sourcePath = resolve(fromValue);
-const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));
+// TD-20: mesmo banco que o serviço e o backup usam, não ./data relativo ao diretório atual.
+const { dbPath } = resolveDbPath(option("--db", undefined), localEnv);
 const healthUrl = option("--health-url", process.env.RADAR_HEALTH_URL ?? `http://127.0.0.1:${port}/api/health`);
 const lockPath = `${dbPath}.restore.lock`;
 
