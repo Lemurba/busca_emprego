@@ -95,3 +95,12 @@ test("QA-06: currículo ATS legível, editável com checagem de fatos e sem rasc
   assert.equal(store.getResume(second.id).status, "approved");
   assert.equal(store.getResume(third.id).status, "draft");
 });
+
+test("QA-12: vaga sem nota registrada sai como não avaliada no bootstrap", () => {
+  const job = store.upsertJob({ id: "qa12-job", title: "Sem nota", company: "Épsilon", source: "fixture", source_url: "https://jobs.example/qa12" });
+  const fromBootstrap = () => store.getBootstrap().jobs.find((item) => item.id === job.id);
+  assert.equal(fromBootstrap().match_score, 0);
+  assert.equal(fromBootstrap().match_evaluated, false);
+  store.recordMatchScore({ job_id: job.id, scores: { role_family: 70, skills: 70, seniority: 70, location_work_model: 70, compensation: 70, explicit_preferences: 70 } });
+  assert.equal(fromBootstrap().match_evaluated, true);
+});

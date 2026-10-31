@@ -99,7 +99,7 @@ function JobRow({ job, props }: { job: Job; props: JobsPageProps }) {
       <td data-label="Vaga"><button type="button" class="table-link" data-detail={job.id}>{job.title}</button><small>{job.company}</small></td>
       <td data-label="Local">{job.location}<small>{job.work_model}</small></td>
       <td data-label="Salário"><strong>{props.salaryLabel(job)}</strong><small>{job.salary_source}</small></td>
-      <td data-label="Aderência"><ScoreBadge score={job.match_score} /><BlockerBadge job={job} /></td>
+      <td data-label="Aderência"><ScoreBadge score={job.match_score} evaluated={job.match_evaluated !== false} /><BlockerBadge job={job} /></td>
       <td data-label="Situação"><LifecycleChip meta={meta} /><small>{props.statusLabel(job.status)}</small></td>
       <td data-label="Prazo"><span class={`deadline-inline ${job.lifecycle === "lost" ? "lost" : ""}`}>{props.deadlineText(job)}</span><small>{props.relativeApplication(job)}</small></td>
       <td class="cell-action"><button type="button" class="secondary-button" data-detail={job.id} aria-label={`Detalhes de ${job.title}`}>Detalhes</button></td>

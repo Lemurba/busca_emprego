@@ -217,6 +217,8 @@ h3 { margin-bottom: 4px; color: var(--heading); font-size: var(--type-body); }
 .score.mid { color: var(--orange-fg); }
 .score.low { color: var(--muted); }
 .score.low::before { background: transparent; box-shadow: inset 0 0 0 2px currentColor; }
+.score.unrated { color: var(--muted); font-weight: 600; }
+.score.unrated::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
 .tag { padding: 4px 8px; color: var(--neutral-fg); border-radius: 6px; background: var(--neutral-bg); font-size: var(--type-xs); }
 

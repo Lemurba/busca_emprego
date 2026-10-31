@@ -11,7 +11,11 @@ export function scoreTone(score: number) {
 }
 export const SCORE_BADGE_TITLE = "Aderência: estimativa de quanto a vaga combina com seu perfil (não é nota de ATS)";
 
-export function ScoreBadge({ score }: { score: number }) {
+/** QA-12: vaga sem nota registrada pelo avaliador mostra "Não avaliada" em vez de 0%. */
+export const SCORE_UNRATED_TITLE = "Aderência ainda não calculada: o agente avaliador não registrou nota para esta vaga";
+
+export function ScoreBadge({ score, evaluated = true }: { score: number; evaluated?: boolean }) {
+  if (!evaluated) return <span class="score unrated" title={SCORE_UNRATED_TITLE}>Não avaliada</span>;
   return <span class={`score ${scoreTone(score)}`} title={SCORE_BADGE_TITLE}>{score}%</span>;
 }
 

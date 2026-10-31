@@ -299,6 +299,8 @@ export function getBootstrap(projectId = "busca-emprego") {
   const livenessRepost = livenessAndRepostSummaries(db);
   const activeProfile = getActiveProfile(projectId);
   const profileFacts = activeProfile?.facts ?? [];
+  // QA-12: sem nota registrada (e sem nota legada), a vaga é "não avaliada", não "0%".
+  const scoredJobs = new Set((db.prepare("SELECT DISTINCT job_id FROM match_scores WHERE project_id=?").all(projectId) as { job_id: string }[]).map((row) => row.job_id));
   const jobs = listJobs().map((job) => {
     const application = applicationByJob.get(job.id);
     const closedByDeadline = deadlinePassed(job.deadline_at, currentTime);
@@ -306,7 +308,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     const applied = Boolean(application && ["submitted", "accepted", "rejected"].includes(application.status));
     const lifecycle = applied ? "applied" : (isClosed ? "lost" : (job.decision === "not_interested" || job.status === "discarded" ? "not_interested" : (job.opening_status === "unknown" ? "unknown" : "open")));
     const applicationAgeDays = application?.submitted_at ? Math.max(0, Math.floor((currentTime - new Date(application.submitted_at).getTime()) / 86_400_000)) : null;
-    return { ...job, repost_count: 0, first_seen_at: null, repost_dates: [], last_liveness_check: null, ...livenessRepost.get(job.id), application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", blockers: evaluateBlockers(profileFacts, job) };
+    return { ...job, repost_count: 0, first_seen_at: null, repost_dates: [], last_liveness_check: null, ...livenessRepost.get(job.id), application_status: application?.status ?? null, application_date: application?.submitted_at ?? null, application_age_days: applicationAgeDays, lifecycle, is_open: lifecycle === "open", match_evaluated: scoredJobs.has(job.id) || job.match_score > 0, blockers: evaluateBlockers(profileFacts, job) };
   });
   const statuses = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.status] = (acc[job.status] ?? 0) + 1; return acc; }, {});
   const sources = jobs.reduce<Record<string, number>>((acc, job) => { acc[job.source] = (acc[job.source] ?? 0) + 1; return acc; }, {});
