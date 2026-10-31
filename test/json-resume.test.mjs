@@ -95,7 +95,7 @@ describe("import, confirmação e exportação", async () => {
 
   test("documento inválido ou vazio não cria perfil", () => {
     const before = store.listProfiles().length;
-    assert.throws(() => store.importJsonResumeProfile({ basics: { name: 7 } }), /^Error: profile\.import\.invalid:\/basics\/name$/u);
+    assert.throws(() => store.importJsonResumeProfile({ basics: { name: 7 } }), /^DomainError: profile\.import\.invalid:\/basics\/name$/u);
     assert.throws(() => store.importJsonResumeProfile({ basics: {} }), /profile\.import\.empty/u);
     assert.equal(store.listProfiles().length, before);
   });

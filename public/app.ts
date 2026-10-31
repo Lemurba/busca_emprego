@@ -924,6 +924,14 @@ const errorMessages: Record<string, string> = {
   "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: corrija o conteúdo do currículo. Esse bloqueio não aceita justificativa.",
   "job.requirements_json.invalid": "Exigências explícitas inválidas: cada exigência precisa do trecho literal do anúncio.",
   "job.already_exists": "Esta vaga já está no radar. Edite a vaga existente.",
+  // #29: portões humanos com código estável (antes eram frases soltas do núcleo).
+  "application.not_found": "Candidatura não encontrada. Atualize a página.",
+  "resume.not_found": "Currículo não encontrado. Atualize a página.",
+  "resume.approval.confirmation_required": "Digite APROVO para confirmar a revisão deste currículo.",
+  "application.authorization.confirmation_required": "Confirme digitando AUTORIZO para esta vaga.",
+  "decision.confirmation_required": "Confirme explicitamente sua decisão para esta vaga.",
+  "application.authorization.already_granted": "Esta candidatura já recebeu uma autorização automática.",
+  "application.already_exists": "Já existe uma candidatura para esta vaga.",
 };
 
 const errorPrefixMessages: Array<[string, string]> = [
@@ -948,7 +956,6 @@ class ApiError extends Error {
 function friendlyError(code: string, serverMessage?: string): string {
   const base = code.split(":")[0] ?? code;
   if (errorMessages[base]) return errorMessages[base];
-  if (code === "request.rejected" && serverMessage) return serverMessage;
   if (serverMessage && serverMessage !== GENERIC_SERVER_MESSAGE) return serverMessage;
   const prefixed = errorPrefixMessages.find(([prefix]) => base.startsWith(prefix));
   if (prefixed) return prefixed[1];

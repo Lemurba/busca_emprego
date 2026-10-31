@@ -8,6 +8,7 @@ import { openTempStore } from "./helpers/temp-db.mjs";
 delete process.env.RADAR_RUN_LEGACY_ANONYMIZATION;
 const { store, cleanup } = await openTempStore("radar-archive-undo", "archive.sqlite");
 const { errorResponse } = await import("../src/http-security.ts");
+const { DomainError } = await import("../src/errors.ts");
 after(cleanup);
 
 let counter = 0;
@@ -117,10 +118,10 @@ describe("excluir vaga e desfazer decisões", () => {
     const job = newJob();
     const code = codeOf(() => store.undoJobDecision(job.id));
     assert.equal(code, "decision.undo.nothing_to_undo");
-    const response = errorResponse(new Error(code));
+    const response = errorResponse(new DomainError(code));
     assert.equal(response.status, 422);
     assert.match(response.body.message, /Não há decisão/u);
-    assert.equal(errorResponse(new Error("job.archived")).status, 422);
+    assert.equal(errorResponse(new DomainError("job.archived")).status, 422);
   });
 
   test("vaga excluída não recebe currículo nem candidatura", () => {

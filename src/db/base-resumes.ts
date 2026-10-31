@@ -5,6 +5,7 @@ import { sha256Hex } from "../hash.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now } from "./util.js";
 import { mapBaseResume } from "./mappers.js";
+import { DomainError } from "../errors.js";
 
 const BASE_RESUME_COLUMNS = "id,title,file_name,mime_type,is_base,sha256,extraction_status,extraction_error,page_count,created_at,updated_at";
 
@@ -24,7 +25,7 @@ function getBaseResumeSummary(id: string): BaseResume | null {
 
 export function getBaseResumeExtraction(id: string): any {
   const row = db.prepare("SELECT id,sha256,extraction_status,extracted_text,extraction_error,page_count,extracted_at FROM base_resumes WHERE id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row) throw new Error("base_resume.not_found");
+  if (!row) throw new DomainError("base_resume.not_found");
   return { ...row, page_count: Number(row.page_count ?? 0) };
 }
 
@@ -35,7 +36,7 @@ export function getBaseResumeExtraction(id: string): any {
  */
 export async function proposeBaseResumeFacts(id: string) {
   const row = db.prepare("SELECT id,extraction_status,extracted_text,page_count FROM base_resumes WHERE id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row) throw new Error("base_resume.not_found");
+  if (!row) throw new DomainError("base_resume.not_found");
   if (row.extraction_status !== "extracted") return [];
   const file = getBaseResumeFile(id);
   if (file) {
@@ -53,18 +54,18 @@ function prepareBaseResume(input: BaseResumeUpload) {
   const title = String(input.title ?? "").trim().slice(0, 120);
   const fileName = String(input.file_name ?? "curriculo.pdf").replace(/[\\/\r\n\0]/g, "_").slice(0, 160);
   const fileData = String(input.file_data ?? "");
-  if (!title || !fileData || !/^[A-Za-z0-9+/]+={0,2}$/.test(fileData)) throw new Error("Informe um nome e um arquivo PDF válido.");
+  if (!title || !fileData || !/^[A-Za-z0-9+/]+={0,2}$/.test(fileData)) throw new DomainError("base_resume.upload.invalid", 400);
   const bytes = Buffer.from(fileData, "base64");
-  if (bytes.length > MAX_PDF_BYTES) throw new Error("O PDF deve ter no máximo 5 MB.");
-  if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("O arquivo enviado não parece ser um PDF válido.");
+  if (bytes.length > MAX_PDF_BYTES) throw new DomainError("PDF_TOO_LARGE");
+  if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new DomainError("PDF_SIGNATURE_INVALID");
   const checksum = sha256Hex(bytes);
-  if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
+  if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new DomainError("PDF_DUPLICATE");
   return { title, fileName, fileData, bytes, checksum };
 }
 
 function insertBaseResume(prepared: ReturnType<typeof prepareBaseResume>, extraction: PdfExtraction) {
   const { title, fileName, bytes, checksum } = prepared;
-  if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
+  if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new DomainError("PDF_DUPLICATE");
   const id = idFor(`base-resume|${checksum}`);
   const timestamp = now();
   const projectId = storeProjectId();
@@ -88,7 +89,7 @@ export async function createBaseResumeAsync(input: BaseResumeUpload) {
 }
 
 export function selectBaseResume(id: string, projectId = storeProjectId()) {
-  if (!db.prepare("SELECT id FROM base_resumes WHERE id = ? AND project_id = ?").get(id, projectId)) throw new Error("Currículo-base não encontrado.");
+  if (!db.prepare("SELECT id FROM base_resumes WHERE id = ? AND project_id = ?").get(id, projectId)) throw new DomainError("base_resume.not_found");
   tx(() => {
     db.prepare("UPDATE base_resumes SET is_base = 0, updated_at = ? WHERE project_id = ?").run(now(), projectId);
     db.prepare("UPDATE base_resumes SET is_base = 1, updated_at = ? WHERE id = ?").run(now(), id);

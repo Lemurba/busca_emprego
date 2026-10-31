@@ -1,26 +1,36 @@
-// Erros de domínio do Radar (issue #29): um único tipo `DomainError(code, status, details)`.
-// O núcleo (db/domain/workflow) lança códigos estáveis; as bordas HTTP e MCP decidem status
-// e mensagem só pelo `code`, com textos pt-BR vindos do dicionário abaixo. Mudar a redação
-// de uma mensagem nunca muda o status.
+// Erros de domínio do Radar (issue #29): um único tipo `DomainError(code, status, message, details)`.
+// O núcleo (src/db/, domain, workflow, conectores) lança só códigos estáveis; as bordas HTTP e MCP
+// decidem status e mensagem pelo `code` (nunca pelo texto), com textos pt-BR vindos do dicionário
+// abaixo. Mudar a redação de uma mensagem nunca muda o status. Qualquer outro erro (Error puro,
+// invariante interna, falha do SQLite) vira 500 `internal_error` e só aparece no log.
 
 export class DomainError extends Error {
   readonly status: number;
   readonly details: Readonly<Record<string, unknown>> | undefined;
 
+  /**
+   * `status` explícito vence a tabela STATUS_RULES. `code` pode trazer um sufixo de detalhe
+   * (`job.salary.invalid:min`): ele fica no código, por compatibilidade com os clientes, e vai
+   * para `details.reason` quando nenhum detalhe é informado.
+   */
   constructor(
     readonly code: string,
     status?: number,
-    details?: Readonly<Record<string, unknown>>,
     message?: string,
+    details?: Readonly<Record<string, unknown>>,
   ) {
     super(message ?? code);
     this.name = "DomainError";
     this.status = status ?? statusForCode(code);
-    this.details = details;
+    const suffix = code.includes(":") ? code.slice(code.indexOf(":") + 1) : "";
+    this.details = details ?? (suffix ? { reason: suffix } : undefined);
   }
 }
 
-/** Status por código: regras na ordem; a primeira que casar vence. Sem regra → 400. */
+/**
+ * Status por código (a parte antes de `:`): regras na ordem, a primeira que casar vence; sem
+ * regra → 400. É a tabela dos códigos estáveis, não uma leitura da mensagem.
+ */
 const STATUS_RULES: Array<[RegExp, number]> = [
   [/^AUTOMATION_DISABLED$/u, 403],
   // #32: limite diário de envios automáticos.
@@ -154,7 +164,44 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "base_resume.not_found": "Currículo-base não encontrado. Atualize a página.",
   "base_resume.required": "Escolha um currículo-base em PDF (ou use um perfil importado de JSON Resume).",
   PROFILE_SNAPSHOT_REQUIRED: "Confirme o perfil profissional antes: a nota e o currículo usam a versão confirmada do perfil.",
+  PROFILE_CONTEXT_TOO_LARGE: "O contexto do perfil passou do tamanho máximo: resuma as informações e tente de novo.",
   PROFILE_SNAPSHOT_INVALID: "A versão do perfil informada não existe neste projeto ou não é a fixada na rodada.",
+  // #29: decisões e portões humanos que antes eram frases soltas no núcleo, agora com código.
+  "base_resume.upload.invalid": "Informe um nome e um arquivo PDF válido.",
+  "job.not_found": "Vaga não encontrada.",
+  "application.preconditions_unmet": "Registre interesse e aprove o currículo antes de iniciar uma candidatura.",
+  "application.resume.not_approved": "Selecione o currículo aprovado para esta vaga.",
+  "application.already_exists": "Já existe uma candidatura para esta vaga.",
+  "application.not_found": "Candidatura não encontrada. Atualize a página.",
+  "application.manual.preconditions_unmet": "Mantenha o interesse registrado e o currículo aprovado para escolher o modo manual.",
+  "application.status.invalid": "Status de candidatura inválido.",
+  "application.status.requeue_forbidden": "Uma candidatura em andamento não pode ser recolocada na fila automaticamente.",
+  "application.status.review_forbidden": "Esta candidatura não pode voltar para revisão nesta etapa.",
+  "application.status.failure_forbidden": "Somente um envio automático autorizado pode ser registrado como falha.",
+  "application.status.submission_required": "Registre o envio antes de registrar o resultado da candidatura.",
+  "application.resume.locked": "O currículo vinculado não pode ser trocado após a autorização automática.",
+  "application.submission.manual_only": "O envio só pode ser registrado no modo manual ou após autorização automática explícita.",
+  "application.submission.interest_required": "Registre interesse na vaga antes de confirmar o envio.",
+  "application.submission.resume_not_approved": "O currículo vinculado precisa estar aprovado para registrar o envio.",
+  "decision.not_interested.feedback_required": "Use o feedback total com categoria e justificativa para rejeitar uma vaga.",
+  "decision.confirmation_required": "Confirme explicitamente sua decisão para esta vaga.",
+  "decision.reopen_required": "Reabra a vaga com motivo antes de registrar novo interesse.",
+  "decision.application_locked": "A decisão não pode ser alterada enquanto a candidatura está em andamento ou já foi enviada.",
+  "resume.interest_required": "Registre interesse na vaga antes de preparar o currículo.",
+  "resume.approval.human_required": "A aprovação exige confirmação humana explícita.",
+  "resume.approved_locked": "Retorne o currículo aprovado para revisão antes de alterá-lo.",
+  "resume.application_in_progress": "O currículo não pode ser alterado enquanto a candidatura está em andamento.",
+  "resume.approval.confirmation_required": "Digite APROVO para confirmar a revisão deste currículo.",
+  "resume.not_found": "Currículo não encontrado. Atualize a página.",
+  "resume.approval.interest_required": "A vaga precisa estar marcada como de interesse antes da aprovação.",
+  "resume.already_approved": "Este currículo já foi aprovado.",
+  "application.authorization.confirmation_required": "Confirme digitando AUTORIZO para esta vaga.",
+  "application.authorization.already_granted": "Esta candidatura já recebeu uma autorização automática.",
+  "application.authorization.resume_mismatch": "A autorização precisa apontar para o currículo revisado desta vaga.",
+  "application.authorization.resume_not_approved": "Aprove o currículo antes de autorizar a candidatura.",
+  "application.authorization.preconditions_unmet": "Registre interesse e conclua a revisão do currículo antes de autorizar.",
+  "application.authorization.not_awaiting": "A candidatura não está aguardando autorização.",
+  "feedback.application_locked": "A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.",
 };
 
 const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";
@@ -170,23 +217,10 @@ export function userMessage(error: DomainError): string {
   return messageForCode(error.code, error.message && error.message !== error.code ? error.message : DEFAULT_REJECTION_MESSAGE);
 }
 
-/** Código estável lançado como `new Error("job.salary.invalid:min")` (formato legado). */
-const STABLE_CODE = /^(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]+)(?::[A-Za-z0-9_.,:-]{0,200})?$/u;
-
 /**
- * Normaliza erros do domínio para `DomainError`: a própria classe (e subclasses, como
- * `DomainValidationError` e `WorkflowError`) passa direto; `Error` puro cuja mensagem é um
- * código estável (formato legado de src/db.ts) é convertido. Qualquer outra coisa → null
- * (a borda decide: frase pt-BR legada ou 500).
+ * Erro de domínio da borda (HTTP/MCP): a própria classe e as subclasses (`DomainValidationError`,
+ * `WorkflowError`). Não há mais conversão por texto: `Error` puro é sempre erro interno (null → 500).
  */
 export function toDomainError(error: unknown): DomainError | null {
-  if (error instanceof DomainError) return error;
-  if (error instanceof Error && error.constructor === Error && !("code" in error)) {
-    const raw = error.message.trim();
-    if (!STABLE_CODE.test(raw)) return null;
-    // O código mantém o sufixo (`job.salary.invalid:min`) por compatibilidade com clientes.
-    const suffix = raw.includes(":") ? raw.slice(raw.indexOf(":") + 1) : "";
-    return new DomainError(raw, statusForCode(raw), suffix ? { reason: suffix } : undefined);
-  }
-  return null;
+  return error instanceof DomainError ? error : null;
 }

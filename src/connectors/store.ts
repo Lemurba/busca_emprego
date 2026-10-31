@@ -4,6 +4,7 @@
 import { db, storeProjectId } from "../db/handle.js";
 import { idFor, insertAuditEvent, now } from "../db/util.js";
 import { connectorById, CONNECTORS } from "./sources.js";
+import { DomainError } from "../errors.js";
 
 // As tabelas connector_companies e connector_enrichment_queue são criadas pela migração
 // 0001_baseline (src/db/migrations/), aplicada por openStore() (src/db/handle.ts) no bootstrap.
@@ -49,15 +50,15 @@ export function listConnectorCompanies(projectId = storeProjectId(), options: { 
 function validateCompany(input: Record<string, unknown>) {
   const connector = String(input.connector ?? "").trim().toLowerCase();
   const definition = connectorById(connector);
-  if (!definition) throw new Error("connector.unknown");
+  if (!definition) throw new DomainError("connector.unknown");
   // Ashby e SmartRecruiters diferenciam maiúsculas no identificador; os demais não.
   const rawSlug = String(input.slug ?? "").trim();
   const slug = connector === "ashby" || connector === "smartrecruiters" ? rawSlug : rawSlug.toLowerCase();
-  if (!definition.slugPattern.test(slug)) throw new Error("connector.company.slug_invalid");
+  if (!definition.slugPattern.test(slug)) throw new DomainError("connector.company.slug_invalid");
   const name = String(input.name ?? "").replace(/\s+/gu, " ").trim() || slug;
-  if (name.length > 120) throw new Error("connector.company.name_invalid");
+  if (name.length > 120) throw new DomainError("connector.company.name_invalid");
   const query = String(input.query ?? "").replace(/\s+/gu, " ").trim();
-  if (query.length > 120) throw new Error("connector.company.query_invalid");
+  if (query.length > 120) throw new DomainError("connector.company.query_invalid");
   return { connector, slug, name, query, enabled: input.enabled === false ? 0 : 1 };
 }
 
@@ -80,7 +81,7 @@ function getConnectorCompany(id: string, projectId = storeProjectId()): Connecto
 
 export function updateConnectorCompany(id: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()): ConnectorCompany {
   const current = getConnectorCompany(id, projectId);
-  if (!current) throw new Error("connector.company.not_found");
+  if (!current) throw new DomainError("connector.company.not_found");
   // Conector e slug formam a identidade; mudar um deles é outra empresa.
   const value = validateCompany({ ...current, ...input, connector: current.connector, slug: current.slug });
   db.prepare("UPDATE connector_companies SET name=?,query=?,enabled=?,updated_at=? WHERE id=? AND project_id=?").run(value.name, value.query, value.enabled, now(), id, projectId);
@@ -90,7 +91,7 @@ export function updateConnectorCompany(id: string, input: Record<string, unknown
 
 export function deleteConnectorCompany(id: string, actor = "user", projectId = storeProjectId()) {
   const result = db.prepare("DELETE FROM connector_companies WHERE id=? AND project_id=?").run(id, projectId);
-  if (!result.changes) throw new Error("connector.company.not_found");
+  if (!result.changes) throw new DomainError("connector.company.not_found");
   audit(id, "deleted", { actor, project_id: projectId });
   return { deleted: true };
 }
@@ -132,11 +133,11 @@ export function listLlmEnrichmentQueue(projectId = storeProjectId(), status = "p
  * tratado não é reaberto nem trocado de estado; a decisão vai para a auditoria com o ator.
  */
 export function resolveLlmEnrichment(id: string, status: "done" | "dismissed", projectId = storeProjectId(), actor = "system") {
-  if (status !== "done" && status !== "dismissed") throw new Error("connector.enrichment.status.invalid");
+  if (status !== "done" && status !== "dismissed") throw new DomainError("connector.enrichment.status.invalid");
   const exists = db.prepare("SELECT status FROM connector_enrichment_queue WHERE id=? AND project_id=?").get(id, projectId) as { status: string } | undefined;
-  if (!exists) throw new Error("connector.enrichment.not_found");
+  if (!exists) throw new DomainError("connector.enrichment.not_found");
   const result = db.prepare("UPDATE connector_enrichment_queue SET status=?,updated_at=? WHERE id=? AND project_id=? AND status='pending'").run(status, now(), id, projectId);
-  if (!result.changes) throw new Error("connector.enrichment.already_resolved");
+  if (!result.changes) throw new DomainError("connector.enrichment.already_resolved");
   insertAuditEvent(db, "connector_enrichment", id, "resolved", { status, actor });
   return { id, status };
 }

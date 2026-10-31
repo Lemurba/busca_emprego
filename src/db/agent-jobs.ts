@@ -8,6 +8,7 @@ import { idFor, now } from "./util.js";
 import { addEvidence, getJob, selectEvidence, updateJob } from "./jobs.js";
 import { assertAgentUrlAllowed, publishedAgentConfig } from "./agents.js";
 import { ingestSourceItems } from "./ingestion.js";
+import { DomainError } from "../errors.js";
 
 /** Converte a vaga descrita por um agente no item de fonte de validateSourceBatch (campos desconhecidos são ignorados). */
 function agentJobItem(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
@@ -30,14 +31,14 @@ function agentJobItem(input: Partial<Job> & { source: string; title: string; com
  */
 export function ingestJobFromAgent(agentId: string, input: Partial<Job> & { source: string; title: string; company: string; source_url: string }, projectId = storeProjectId()) {
   const agent = publishedAgentConfig(agentId, projectId);
-  if (!agent?.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new Error("agent.jobs.create.forbidden");
-  if (!input.source_url?.trim()) throw new Error("agent.source_url.required");
-  if (!String(input.source ?? "").trim() || !String(input.title ?? "").trim() || !String(input.company ?? "").trim()) throw new Error("job.required_fields.invalid");
+  if (!agent?.enabled || !agent.can_create_jobs || !agent.tool_scopes.includes("jobs.create")) throw new DomainError("agent.jobs.create.forbidden");
+  if (!input.source_url?.trim()) throw new DomainError("agent.source_url.required");
+  if (!String(input.source ?? "").trim() || !String(input.title ?? "").trim() || !String(input.company ?? "").trim()) throw new DomainError("job.required_fields.invalid");
   for (const field of ["source_url", "linkedin_post_url", "job_url", "application_url", "salary_source_url"] as const) assertAgentUrlAllowed(agent, input[field]);
   // Job, evidence, occurrence and provenance are created together or not at all.
   return tx(() => {
     const [result] = ingestSourceItems(input.source, [agentJobItem(input)], { projectId, agentId });
-    if (!result) throw new Error("job.persist.failed");
+    if (!result) throw new DomainError("job.persist.failed");
     audit("job", result.job_id, result.action === "sighting" ? "sighted_by_agent" : "created_by_agent", { agent_id: agentId, actor: `agent:${agentId}`, action: result.action, reason: result.reason });
     return { ...result, job: getJob(result.job_id) };
   });
@@ -49,11 +50,11 @@ export function createJobFromAgent(agentId: string, input: Partial<Job> & { sour
 
 export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record<string, unknown>, evidenceSourceUrl: string, evidenceExcerpt = "", projectId = storeProjectId()) {
   const agent = publishedAgentConfig(agentId, projectId);
-  if (!agent?.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new Error("agent.jobs.enrich.forbidden");
+  if (!agent?.enabled || !agent.can_edit_jobs || !agent.tool_scopes.includes("jobs.enrich")) throw new DomainError("agent.jobs.enrich.forbidden");
   const current = getJob(jobId);
-  if (!current) throw new Error("job.not_found");
+  if (!current) throw new DomainError("job.not_found");
   const entries = Object.entries(patch);
-  if (!entries.length || entries.some(([key]) => !agent.editable_fields.includes(key) || !agentEditableJobFields.has(key))) throw new Error("agent.job_field.forbidden");
+  if (!entries.length || entries.some(([key]) => !agent.editable_fields.includes(key) || !agentEditableJobFields.has(key))) throw new DomainError("agent.job_field.forbidden");
   assertAgentUrlAllowed(agent, evidenceSourceUrl);
   const sourceUrl = canonicalizeJobUrl(evidenceSourceUrl);
   const normalizedPatch = { ...patch };
@@ -68,12 +69,12 @@ export function enrichJobFromAgent(agentId: string, jobId: string, patch: Record
     max: normalizedPatch.salary_max === undefined ? current.salary_max : Number(normalizedPatch.salary_max),
     currency: normalizedPatch.currency === undefined ? current.currency : String(normalizedPatch.currency)
   });
-  if (salary.fieldErrors.length) throw new Error(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
+  if (salary.fieldErrors.length) throw new DomainError(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
   const coordinates = validateCoordinates({
     latitude: normalizedPatch.latitude === undefined ? current.latitude : normalizedPatch.latitude == null ? null : Number(normalizedPatch.latitude),
     longitude: normalizedPatch.longitude === undefined ? current.longitude : normalizedPatch.longitude == null ? null : Number(normalizedPatch.longitude)
   });
-  if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
+  if (coordinates.fieldErrors.length) throw new DomainError(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
   const acceptedPatch: Record<string, unknown> = {};
   const conflicts: string[] = [];
   const selectedEvidenceIds: string[] = [];

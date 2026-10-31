@@ -5,23 +5,24 @@ import { abortApplyingJob } from "./job-workflow.js";
 import { assertCurrentAuthorization, currentAuthorization, leaseExpiresAt, revokeAuthorizationRows } from "./authorizations.js";
 import { getApplication } from "./application-store.js";
 import { getResume } from "./resumes.js";
+import { DomainError } from "../errors.js";
 
 export function createHumanQuestion(applicationId: string, input: Record<string, unknown>) {
   const application = getApplication(applicationId);
-  if (!application?.resume_id) throw new Error("application.not_found");
-  if (application.automation_mode !== "authorized_auto" || !application.auto_authorized_at) throw new Error("application.authorization.required");
-  if (application.status !== "in_progress") throw new Error("application.claim.required");
+  if (!application?.resume_id) throw new DomainError("application.not_found");
+  if (application.automation_mode !== "authorized_auto" || !application.auto_authorized_at) throw new DomainError("application.authorization.required");
+  if (application.status !== "in_progress") throw new DomainError("application.claim.required");
   assertCurrentAuthorization(currentAuthorization(applicationId), "claimed");
-  if (db.prepare("SELECT id FROM human_questions WHERE application_id=? AND status IN ('pending','delivered')").get(applicationId)) throw new Error("human_question.already_active");
+  if (db.prepare("SELECT id FROM human_questions WHERE application_id=? AND status IN ('pending','delivered')").get(applicationId)) throw new DomainError("human_question.already_active");
   const resume = getResume(application.resume_id);
-  if (!resume || resume.version !== application.authorized_resume_version) throw new Error("application.resume_version.changed");
+  if (!resume || resume.version !== application.authorized_resume_version) throw new DomainError("application.resume_version.changed");
   const fieldRef = String(input.field_ref ?? "").trim();
   const question = String(input.question ?? "").trim();
   const required = input.required !== false;
   const choices = Array.isArray(input.choices) ? input.choices.map(String).filter(Boolean).slice(0, 4) : [];
   const uncertaintyReason = String(input.uncertainty_reason ?? "").trim().slice(0, 500);
   const step = String(input.step ?? application.current_step ?? "").trim().slice(0, 200);
-  if (!fieldRef || !question || question.length > 1000 || (!required && !choices.length && !input.allow_free_text)) throw new Error("human_question.invalid");
+  if (!fieldRef || !question || question.length > 1000 || (!required && !choices.length && !input.allow_free_text)) throw new DomainError("human_question.invalid");
   const timestamp = now();
   const id = idFor(`question|${applicationId}|${timestamp}|${fieldRef}`);
   tx(() => {
@@ -39,7 +40,7 @@ export function markHumanQuestionDelivery(id: string, delivered: boolean, messag
   // `delivery_failed` é reentrega legítima da mesma pergunta (a ponte Telegram só
   // reenvia com --retry-failed); pergunta já respondida/cancelada nunca é reaberta.
   const result = db.prepare("UPDATE human_questions SET status=?,telegram_message_ref=?,sanitized_delivery_error=? WHERE id=? AND status IN ('pending','delivery_failed')").run(status, messageRef ?? null, error?.slice(0, 240) ?? null, id);
-  if (!result.changes) throw new Error("human_question.not_pending");
+  if (!result.changes) throw new DomainError("human_question.not_pending");
   audit("human_question", id, status, {});
   return db.prepare("SELECT * FROM human_questions WHERE id=?").get(id);
 }
@@ -64,12 +65,12 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
     if (seen) return { duplicate: true, question: db.prepare("SELECT * FROM human_questions WHERE id=?").get(seen.question_id) ?? null };
   }
   const row = db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row || !['pending', 'delivered'].includes(String(row.status))) throw new Error("human_question.not_active");
+  if (!row || !['pending', 'delivered'].includes(String(row.status))) throw new DomainError("human_question.not_active");
   const allowed = allowedAnswerIdentities();
   const identity = String(input.identity_id ?? input.sender_id ?? input.chat_id ?? "").trim();
-  if (!allowed.size || !identity || !allowed.has(identity)) throw new Error("human_question.identity_unauthorized");
+  if (!allowed.size || !identity || !allowed.has(identity)) throw new DomainError("human_question.identity_unauthorized");
   const replyTo = String(input.reply_to_message_ref ?? input.reply_to ?? "").trim();
-  if (replyTo && replyTo !== String(row.telegram_message_ref ?? "")) throw new Error("human_question.reply_not_correlated");
+  if (replyTo && replyTo !== String(row.telegram_message_ref ?? "")) throw new DomainError("human_question.reply_not_correlated");
   return recordHumanAnswer(row, input, identity, { replyTo, inboundMessageId, activeStatuses: ["pending", "delivered"] });
 }
 
@@ -80,8 +81,8 @@ export function answerHumanQuestion(id: string, input: Record<string, unknown>) 
  */
 export function answerHumanQuestionFromDashboard(id: string, input: Record<string, unknown>, actor: string) {
   const row = db.prepare("SELECT * FROM human_questions WHERE id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row) throw new Error("human_question.not_found");
-  if (!["pending", "delivered", "delivery_failed"].includes(String(row.status))) throw new Error("human_question.not_active");
+  if (!row) throw new DomainError("human_question.not_found");
+  if (!["pending", "delivered", "delivery_failed"].includes(String(row.status))) throw new DomainError("human_question.not_active");
   return recordHumanAnswer(row, input, actor, { replyTo: "", inboundMessageId: "", activeStatuses: ["pending", "delivered", "delivery_failed"] });
 }
 
@@ -92,9 +93,9 @@ function recordHumanAnswer(row: Record<string, unknown>, input: Record<string, u
   const action = String(input.action ?? "answer").toLowerCase();
   const answer = String(input.answer ?? input.text ?? "").trim();
   const required = Number(row.required ?? 1) === 1;
-  if (!["answer", "skip", "manual", "stop"].includes(action)) throw new Error("human_question.action.invalid");
-  if (action === "skip" && required) throw new Error("human_question.required_cannot_skip");
-  if (action === "answer" && (!answer || answer.length > 1000)) throw new Error("human_question.answer.invalid");
+  if (!["answer", "skip", "manual", "stop"].includes(action)) throw new DomainError("human_question.action.invalid");
+  if (action === "skip" && required) throw new DomainError("human_question.required_cannot_skip");
+  if (action === "answer" && (!answer || answer.length > 1000)) throw new DomainError("human_question.answer.invalid");
   const timestamp = now();
   const applicationId = String(row.application_id);
   const statusList = options.activeStatuses.map((status) => `'${status}'`).join(",");
@@ -106,7 +107,7 @@ function recordHumanAnswer(row: Record<string, unknown>, input: Record<string, u
     }
     const finalAnswer = action === "skip" ? "PULADO" : action === "manual" ? "MANUAL" : action === "stop" ? "PARADO" : answer;
     const updated = db.prepare(`UPDATE human_questions SET status=?,answered_at=?,answer=?,answer_actor=?,reply_to_message_ref=? WHERE id=? AND status IN (${statusList})`).run(action === "stop" ? "cancelled" : "answered", timestamp, finalAnswer, identity, replyTo || null, id);
-    if (!updated.changes) throw new Error("human_question.not_active");
+    if (!updated.changes) throw new DomainError("human_question.not_active");
     if (action === "manual") {
       revokeAuthorizationRows(applicationId, "human_manual");
       db.prepare("UPDATE applications SET automation_mode='manual',status='queued',authorization_id=NULL,auto_authorized_at=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=? AND status='needs_review'").run(`Fluxo manual após resposta ${id}`, timestamp, applicationId);

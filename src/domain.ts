@@ -10,7 +10,7 @@ export class DomainValidationError extends DomainError {
     message: string,
     readonly field: string,
   ) {
-    super(`validation.${field}`, 422, { field }, message);
+    super(`validation.${field}`, 422, message, { field });
     this.name = "DomainValidationError";
   }
 }

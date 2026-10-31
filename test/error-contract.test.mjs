@@ -70,21 +70,43 @@ try {
   });
 
   await test("mensagem vem do dicionário: mudar o texto não muda o status", () => {
-    const a = errorResponse(new DomainError("job.archived", undefined, undefined, "texto qualquer"));
-    const b = errorResponse(new Error("job.archived"));
+    const a = errorResponse(new DomainError("job.archived", undefined, "texto qualquer"));
+    const b = errorResponse(new DomainError("job.archived"));
     assert.equal(a.status, b.status);
     assert.equal(a.body.message, ERROR_MESSAGES["job.archived"]);
     assert.equal(b.body.message, ERROR_MESSAGES["job.archived"]);
   });
 
-  await test("legado: Error com código estável continua mapeado (com sufixo nos detalhes)", () => {
-    const response = errorResponse(new Error("job.salary.invalid:min,max"));
+  await test("código com sufixo: o detalhe vai para details.reason nas duas bordas", () => {
+    const response = errorResponse(new DomainError("job.salary.invalid:min,max"));
     assert.equal(response.status, 422);
     assert.equal(response.body.error, "job.salary.invalid:min,max");
     assert.deepEqual(response.body.details, { reason: "min,max" });
-    const tool = mcp(new Error("agent.domain.forbidden"));
+    const tool = mcp(new DomainError("agent.domain.forbidden"));
     assert.equal(tool.code, "agent.domain.forbidden");
     assert.equal(tool.status, 403);
+  });
+
+  await test("#29: Error puro nunca é lido pelo texto — código ou frase pt-BR viram 500 interno", () => {
+    for (const message of ["job.salary.invalid:min", "Vaga não encontrada.", "Confirme digitando AUTORIZO para esta vaga."]) {
+      const response = errorResponse(new Error(message));
+      assert.equal(response.status, 500, message);
+      assert.equal(response.body.error, "internal_error");
+      assert.equal(response.internal, true);
+      assert.ok(!JSON.stringify(response.body).includes(message), "o texto interno não vaza");
+      const tool = mcp(new Error(message));
+      assert.equal(tool.code, "internal_error");
+      assert.equal(tool.status, 500);
+    }
+    assert.equal(toDomainError(new Error("job.not_found")), null);
+  });
+
+  await test("#29: portões humanos têm código estável e mensagem do dicionário", () => {
+    const response = errorResponse(new DomainError("application.authorization.confirmation_required", 400));
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error, "application.authorization.confirmation_required");
+    assert.equal(response.body.message, ERROR_MESSAGES["application.authorization.confirmation_required"]);
+    assert.equal(errorResponse(new DomainError("job.not_found")).status, 404);
   });
 
   await test("WorkflowError mantém status e detalhes nas duas bordas", () => {

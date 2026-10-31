@@ -166,9 +166,9 @@ try {
     store.recordJobDecision(jobId, "interested", "TENHO INTERESSE");
     const resume = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV Produto", content: "Experiência confirmada" });
     assert.ok(resume.resume.id);
-    // Frase legada "Vaga não encontrada." do núcleo: mesmo contrato de antes da API (rule_violation/400).
-    const missing = JSON.parse((await refused("radar_create_resume", { agent_id: writer.id, job_id: "vaga-inexistente", title: "CV" }, "radar.rule_violation")).content[0].text);
-    assert.equal(missing.error.status, 400);
+    // #29: vaga inexistente tem código estável (job.not_found/404), não mais frase solta do núcleo.
+    const missing = JSON.parse((await refused("radar_create_resume", { agent_id: writer.id, job_id: "vaga-inexistente", title: "CV" }, "job.not_found")).content[0].text);
+    assert.equal(missing.error.status, 404);
     assert.equal(missing.error.message, "Vaga não encontrada.");
     assert.deepEqual(resume.fact_check, { pending: [], warnings: [] });
     // #31: fatos inventados voltam para o agente como pendências que bloqueiam o APROVO.

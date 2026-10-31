@@ -7,6 +7,7 @@
 // ignorados: contato já é coberto pelos fatos de contato do perfil.
 import { createHash } from "node:crypto";
 import { normalizeComparableText } from "./domain.js";
+import { DomainError } from "./errors.js";
 
 export type ClaimKind = "number" | "date" | "company" | "role" | "degree" | "certification" | "technology";
 
@@ -514,7 +515,7 @@ function assertSpans(content: string, spans: readonly Span[]) {
   const sorted = [...spans].sort((left, right) => right[0] - left[0]);
   let previousStart = Number.POSITIVE_INFINITY;
   for (const [start, end] of sorted) {
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > content.length || start >= end || end > previousStart) throw new Error("resume.facts.span_invalid");
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > content.length || start >= end || end > previousStart) throw new DomainError("resume.facts.span_invalid");
     previousStart = start;
   }
   return sorted;

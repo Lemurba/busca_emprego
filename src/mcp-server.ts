@@ -144,12 +144,6 @@ export function toolError(error: unknown) {
     }
     status = domain.status;
     details = domain.details;
-  } else if (error instanceof Error && error.constructor === Error && !("code" in error)
-    && error.message.trim() && error.message.length <= 300 && !/sqlite|constraint|SELECT|INSERT|UPDATE|\n/iu.test(error.message)) {
-    // Legado: frase pt-BR destinada ao usuário, ainda lançada como Error puro pelo núcleo.
-    code = "radar.rule_violation";
-    message = error.message.trim();
-    status = 400;
   } else {
     requestId = randomUUID();
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -226,11 +220,6 @@ function apiError(status: number, data: unknown): ToolError {
   const requestId = typeof body.request_id === "string" ? body.request_id : undefined;
   // #32: kill-switch do painel ou gate do servidor — mesmo código do gate por variável de ambiente.
   if (base === "AUTOMATION_DISABLED") return new ToolError("automation_disabled", "Candidatura automática pausada (kill-switch do painel ou RADAR_AUTO_APPLICATION_ENABLED).", status);
-  // Legado: frase pt-BR do núcleo sem código (o servidor a devolve como request.rejected).
-  if (base === "request.rejected") return new ToolError("radar.rule_violation", serverMessage, status);
-  // Legado: frase "… não encontrad…" do núcleo (o servidor a devolve como not_found/404). Em
-  // processo era radar.rule_violation/400; o 404 real segue em httpStatus para orNull.
-  if (base === "not_found" && serverMessage !== "Rota não encontrada.") return new ToolError("radar.rule_violation", serverMessage, 400, undefined, requestId, status);
   const code = base.startsWith("validation.") ? raw : base;
   return new ToolError(code, SAFE_MESSAGES[base] ?? serverMessage, status, body.details, requestId);
 }

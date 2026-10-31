@@ -247,10 +247,6 @@ export function readJsonBody(req: IncomingMessage, limitBytes = DEFAULT_BODY_LIM
 // ---------------------------------------------------------------------------------------
 // Erros: código estável + mensagem pt-BR segura. Detalhes internos só no log do servidor.
 
-const PT_SENTENCE = /^[^\n]{3,240}$/u;
-const PT_HINT = /[À-ÿ]|\b(?:de|da|do|para|antes|um|uma|o|a|os|as|esta|este)\b/iu;
-const INTERNAL_HINT = /sqlite|constraint|syntax|ENOENT|EACCES|undefined|null|\bat\s+\S+\s+\(|\/[a-z_]+\/[a-z_]+/iu;
-
 export type ErrorResponse = { status: number; body: { error: string; message: string; details?: unknown } };
 
 /** Converte qualquer erro numa resposta segura. Retorna `internal: true` quando deve ir ao log. */
@@ -258,19 +254,11 @@ export function errorResponse(error: unknown): ErrorResponse & { internal: boole
   if (error instanceof HttpError) {
     return { status: error.status, body: { error: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) }, internal: false };
   }
-  // Erros de domínio (DomainError, subclasses e códigos estáveis legados): status e
-  // mensagem decididos só pelo código.
+  // Erros de domínio (DomainError e subclasses): status e mensagem decididos só pelo código (#29).
+  // Qualquer outro erro é interno: nada do texto dele chega ao cliente.
   const domain = toDomainError(error);
   if (domain) {
     return { status: domain.status, body: { error: domain.code, message: userMessage(domain), ...(domain.details === undefined ? {} : { details: domain.details }) }, internal: false };
-  }
-  // Legado: frase pt-BR lançada como Error puro pelo núcleo (ainda não convertida para código).
-  if (error instanceof Error && error.constructor === Error && !("code" in error)) {
-    const message = error.message;
-    if (PT_SENTENCE.test(message) && PT_HINT.test(message) && !INTERNAL_HINT.test(message)) {
-      const notFound = /não encontrad/iu.test(message);
-      return { status: notFound ? 404 : 400, body: { error: notFound ? "not_found" : "request.rejected", message }, internal: false };
-    }
   }
   return { status: 500, body: { error: "internal_error", message: messageForCode("internal_error") }, internal: true };
 }

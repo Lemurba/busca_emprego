@@ -18,6 +18,7 @@ import { assertJobNotArchived, getJob } from "./jobs.js";
 import { getBaseResumeExtraction } from "./base-resumes.js";
 import { mapResume } from "./mappers.js";
 import { revokeAuthorizationRows } from "./authorizations.js";
+import { DomainError } from "../errors.js";
 
 /** Projeto do currículo: o da vaga dele (resumes não tem coluna própria). */
 function resumeProjectId(resume: Resume): string {
@@ -37,17 +38,17 @@ export function getResume(id: string): Resume | null {
 /** JSON Resume v1 de um currículo adaptado (somente leitura; não altera o currículo). */
 export function exportResumeJsonResume(id: string, projectId = storeProjectId()) {
   const resume = getResume(id);
-  if (!resume) throw new Error("resume.not_found");
+  if (!resume) throw new DomainError("resume.not_found");
   return { resume, document: buildResumeJsonResume(db, resume, projectId) };
 }
 
 export function createResume(input: Partial<Resume> & { job_id: string; title: string }, actor?: string) {
   assertJobNotArchived(input.job_id);
   const job = db.prepare("SELECT decision FROM jobs WHERE id = ?").get(input.job_id) as { decision: string } | undefined;
-  if (!job) throw new Error("Vaga não encontrada.");
-  if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
+  if (!job) throw new DomainError("job.not_found");
+  if (job.decision !== "interested") throw new DomainError("resume.interest_required", 400);
   const baseResumeId = input.base_resume_id ?? null;
-  if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(baseResumeId)) throw new Error("Currículo-base selecionado não encontrado.");
+  if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(baseResumeId)) throw new DomainError("base_resume.not_found");
   const id = input.id || idFor(`resume|${input.job_id}|${randomUUID()}|${input.title}`);
   const timestamp = now();
   const metadata = input as unknown as Record<string, unknown>;
@@ -66,17 +67,17 @@ export function createResume(input: Partial<Resume> & { job_id: string; title: s
 }
 
 export function updateResume(id: string, patch: Partial<Resume>) {
-  if (!db.prepare("SELECT id FROM resumes WHERE id = ?").get(id)) throw new Error("resume.not_found");
-  if (patch.status === "approved") throw new Error("A aprovação exige confirmação humana explícita.");
+  if (!db.prepare("SELECT id FROM resumes WHERE id = ?").get(id)) throw new DomainError("resume.not_found");
+  if (patch.status === "approved") throw new DomainError("resume.approval.human_required", 400);
   const allowed = ["base_resume_id", "title", "status", "content", "keywords", "changes"] as const;
-  if (patch.base_resume_id && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(patch.base_resume_id)) throw new Error("Currículo-base selecionado não encontrado.");
+  if (patch.base_resume_id && !db.prepare("SELECT id FROM base_resumes WHERE id = ?").get(patch.base_resume_id)) throw new DomainError("base_resume.not_found");
   const entries = allowed.flatMap((key) => patch[key] === undefined ? [] : [[key, Array.isArray(patch[key]) ? JSON.stringify(patch[key]) : patch[key]] as [string, unknown]]);
   if (!entries.length) return getResume(id);
   const current = getResume(id);
-  if (current?.status === "superseded") throw new Error("resume.superseded");
-  if (current?.status === "approved" && patch.status !== "review") throw new Error("Retorne o currículo aprovado para revisão antes de alterá-lo.");
-  if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
-  if (patch.status !== undefined && !["draft", "review"].includes(String(patch.status))) throw new Error("resume.status.invalid");
+  if (current?.status === "superseded") throw new DomainError("resume.superseded");
+  if (current?.status === "approved" && patch.status !== "review") throw new DomainError("resume.approved_locked", 400);
+  if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id)) throw new DomainError("resume.application_in_progress", 400);
+  if (patch.status !== undefined && !["draft", "review"].includes(String(patch.status))) throw new DomainError("resume.status.invalid");
   const set = entries.map(([key]) => `${key} = ?`).join(", ");
   tx(() => {
     db.prepare(`UPDATE resumes SET ${set}, version = version + 1, review_status = CASE WHEN ? IN ('content','keywords','changes','base_resume_id','facts_used','gaps') THEN 'not_run' ELSE review_status END, updated_at = ? WHERE id = ?`).run(...(entries.map(([, value]) => value) as any[]), entries.some(([key]) => ["content", "keywords", "changes", "base_resume_id", "facts_used", "gaps"].includes(key)) ? "content" : "unchanged", now(), id);
@@ -117,9 +118,9 @@ function resumeContactFacts(resume: Resume): Record<string, unknown>[] {
 /** Teste de leitura do PDF: gera, extrai e compara; o resultado fica gravado no currículo. */
 export async function runResumeParseCheck(id: string) {
   const resume = getResume(id);
-  if (!resume) throw new Error("resume.not_found");
+  if (!resume) throw new DomainError("resume.not_found");
   // Rascunho substituído por uma nova geração é só histórico: não revisa, não confirma fato, não testa.
-  if (resume.status === "superseded") throw new Error("resume.superseded");
+  if (resume.status === "superseded") throw new DomainError("resume.superseded");
   const check = await runParseCheck(resume, expectedContacts(resume.content, resumeContactFacts(resume)));
   // O texto pode ter mudado durante a extração: grava só se ainda é a mesma versão.
   const current = getResume(id);
@@ -136,7 +137,7 @@ export async function ensureResumeParseCheck(id: string) {
 }
 
 export function getResumeParseCheck(id: string) {
-  if (!getResume(id)) throw new Error("resume.not_found");
+  if (!getResume(id)) throw new DomainError("resume.not_found");
   return readResumeParseCheck(db, id);
 }
 
@@ -199,7 +200,7 @@ export function resumeFactSummary(resume: Resume) {
 
 export function getResumeFactChecks(id: string): FactCheckReport {
   const resume = getResume(id);
-  if (!resume) throw new Error("resume.not_found");
+  if (!resume) throw new DomainError("resume.not_found");
   return factCheckReport(db, resume, currentFactChecks(resume));
 }
 
@@ -231,16 +232,16 @@ export type ResumeFactAction = { action: "confirm" | "correct" | "remove"; repla
 /** Resolve uma afirmação da versão atual: confirmar (perfil N+1), corrigir ou remover o trecho. */
 export function resolveResumeFact(resumeId: string, claimId: string, input: ResumeFactAction, actor = "user", projectId = storeProjectId()) {
   const resume = getResume(resumeId);
-  if (!resume) throw new Error("resume.not_found");
-  if (resume.status === "approved") throw new Error("resume.fact.approved_locked");
+  if (!resume) throw new DomainError("resume.not_found");
+  if (resume.status === "approved") throw new DomainError("resume.fact.approved_locked");
   // Rascunho substituído por uma nova geração é só histórico: não revisa, não confirma fato, não testa.
-  if (resume.status === "superseded") throw new Error("resume.superseded");
-  if (!["confirm", "correct", "remove"].includes(String(input.action))) throw new Error("resume.fact.action.invalid");
+  if (resume.status === "superseded") throw new DomainError("resume.superseded");
+  if (!["confirm", "correct", "remove"].includes(String(input.action))) throw new DomainError("resume.fact.action.invalid");
   const rows = tx(() => refreshResumeFactChecks(resume.id));
   const row = rows.find((item) => item.claim_id === claimId);
-  if (!row) throw new Error("resume.fact.not_found");
+  if (!row) throw new DomainError("resume.fact.not_found");
   if (input.action === "confirm") {
-    if (!["pending", "warning"].includes(row.status)) throw new Error("resume.fact.already_resolved");
+    if (!["pending", "warning"].includes(row.status)) throw new DomainError("resume.fact.already_resolved");
     tx(() => {
       const created = createProfileVersionWithFact({
         type: CLAIM_FACT_TYPES[row.claim_kind] ?? "experience",
@@ -256,9 +257,9 @@ export function resolveResumeFact(resumeId: string, claimId: string, input: Resu
     });
   } else {
     // O trecho gravado precisa bater com o conteúdo atual (ninguém editou no meio).
-    if (row.spans.some(([start, end]) => resume.content.slice(start, end) !== row.claim_text)) throw new Error("resume.fact.stale");
+    if (row.spans.some(([start, end]) => resume.content.slice(start, end) !== row.claim_text)) throw new DomainError("resume.fact.stale");
     const replacement = String(input.replacement ?? "").trim();
-    if (input.action === "correct" && (!replacement || replacement.length > 500)) throw new Error("resume.fact.replacement_required");
+    if (input.action === "correct" && (!replacement || replacement.length > 500)) throw new DomainError("resume.fact.replacement_required");
     const content = input.action === "correct" ? replaceSpans(resume.content, row.spans, replacement) : removeSpans(resume.content, row.spans);
     tx(() => {
       resolveFactCheck(db, resume.id, resume.version, claimId, input.action === "correct" ? "corrected" : "removed", actor);
@@ -311,10 +312,10 @@ function writerFindings(resume: Resume): string[] {
  */
 export function reviewResume(id: string, input: Record<string, unknown> = {}, actor = "reviewer") {
   const resume = getResume(id);
-  if (!resume) throw new Error("resume.not_found");
+  if (!resume) throw new DomainError("resume.not_found");
   // Rascunho substituído por uma nova geração é só histórico: não revisa, não confirma fato, não testa.
-  if (resume.status === "superseded") throw new Error("resume.superseded");
-  if (input.verdict != null && !["pass", "fail"].includes(String(input.verdict))) throw new Error("resume.review.verdict.invalid");
+  if (resume.status === "superseded") throw new DomainError("resume.superseded");
+  if (input.verdict != null && !["pass", "fail"].includes(String(input.verdict))) throw new DomainError("resume.review.verdict.invalid");
   const reviewerFindings = [...(Array.isArray(input.findings) ? input.findings.map(String).slice(0, 10) : []), ...(input.verdict === "fail" ? ["reviewer.fail"] : [])];
   return tx(() => {
     const findings = [
@@ -343,32 +344,32 @@ function writerContentIntact(resume: Resume) {
 
 export function generateAtsResume(input: Record<string, unknown>, actor = "writer", projectId = storeProjectId()) {
   const job = getJob(String(input.job_id ?? ""));
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   assertJobNotArchived(job.id);
-  if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
+  if (job.decision !== "interested") throw new DomainError("resume.interest_required", 400);
   const snapshotId = String(input.profile_snapshot_id ?? getLatestProfileSnapshot(undefined, projectId)?.id ?? "");
   const snapshot = snapshotId ? db.prepare(`SELECT s.*,p.project_id,p.base_resume_id AS profile_base_resume_id,p.source AS profile_source
     FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id WHERE s.id=? AND p.project_id=?`).get(snapshotId, projectId) as Record<string, unknown> | undefined : undefined;
-  if (!snapshot) throw new Error("PROFILE_SNAPSHOT_REQUIRED");
+  if (!snapshot) throw new DomainError("PROFILE_SNAPSHOT_REQUIRED");
   const baseId = String(input.base_resume_id ?? "");
   // Perfil importado de JSON Resume dispensa PDF-base; perfis de PDF continuam exigindo o PDF extraído.
-  if (!baseId && snapshot.profile_source !== "json_resume") throw new Error("base_resume.required");
+  if (!baseId && snapshot.profile_source !== "json_resume") throw new DomainError("base_resume.required");
   if (baseId) {
-    if (snapshot.profile_base_resume_id && snapshot.profile_base_resume_id !== baseId) throw new Error("ATS_BASE_RESUME_MISMATCH");
+    if (snapshot.profile_base_resume_id && snapshot.profile_base_resume_id !== baseId) throw new DomainError("ATS_BASE_RESUME_MISMATCH");
     const base = getBaseResumeExtraction(baseId);
-    if (base.extraction_status !== "extracted") throw new Error("BASE_RESUME_EXTRACTION_REQUIRED");
+    if (base.extraction_status !== "extracted") throw new DomainError("BASE_RESUME_EXTRACTION_REQUIRED");
   }
   const factsUsed = Array.isArray(input.facts_used) ? [...new Set(input.facts_used.map(String))] : [];
-  if (!factsUsed.length) throw new Error("ATS_CONFIRMED_FACTS_REQUIRED");
+  if (!factsUsed.length) throw new DomainError("ATS_CONFIRMED_FACTS_REQUIRED");
   const confirmed = new Map(snapshotFacts(snapshot).filter((fact) => fact.state === "confirmed").map((fact) => [String(fact.id), fact]));
   const selectedFacts = factsUsed.map((factId) => confirmed.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
-  if (selectedFacts.length !== factsUsed.length) throw new Error("ATS_FACT_UNCONFIRMED");
+  if (selectedFacts.length !== factsUsed.length) throw new DomainError("ATS_FACT_UNCONFIRMED");
   const content = factualAtsContent(selectedFacts);
-  if (!content) throw new Error("resume.content.empty");
-  if (input.content != null && String(input.content).trim() !== content) throw new Error("ATS_CONTENT_NOT_FACTUAL");
+  if (!content) throw new DomainError("resume.content.empty");
+  if (input.content != null && String(input.content).trim() !== content) throw new DomainError("ATS_CONTENT_NOT_FACTUAL");
   const keywords = Array.isArray(input.keywords) ? [...new Set(input.keywords.map(String).map((value) => value.trim()).filter(Boolean))] : [];
   const supported = normalizeComparableText(selectedFacts.map((fact) => printableFactValue(fact.value)).join(" "));
-  if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new Error("ATS_KEYWORD_UNSUPPORTED");
+  if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new DomainError("ATS_KEYWORD_UNSUPPORTED");
   const gaps = Array.isArray(input.gaps) ? input.gaps.map(String) : [];
   // Gerar de novo substitui o rascunho anterior da vaga em vez de empilhar versões: os rascunhos
   // do redator ainda intactos, não aprovados e sem candidatura, viram `superseded` (somem do
@@ -391,21 +392,21 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
 }
 
 export function approveResume(id: string, confirmation: string, options: { override_reason?: string; actor?: string } = {}) {
-  if (confirmation !== "APROVO") throw new Error("Digite APROVO para confirmar a revisão deste currículo.");
+  if (confirmation !== "APROVO") throw new DomainError("resume.approval.confirmation_required", 400);
   const resume = getResume(id);
-  if (!resume) throw new Error("Currículo não encontrado.");
-  if (resume.status === "superseded") throw new Error("resume.superseded");
+  if (!resume) throw new DomainError("resume.not_found");
+  if (resume.status === "superseded") throw new DomainError("resume.superseded");
   // #31: afirmação sem fato confirmado bloqueia sempre; override_reason não vale para esta regra.
-  if (resume.status !== "approved" && tx(() => refreshResumeFactChecks(id)).some((row) => row.status === "pending")) throw new Error("resume.unverified_facts");
+  if (resume.status !== "approved" && tx(() => refreshResumeFactChecks(id)).some((row) => row.status === "pending")) throw new DomainError("resume.unverified_facts");
   const job = getJob(resume.job_id);
-  if (job?.decision !== "interested") throw new Error("A vaga precisa estar marcada como de interesse antes da aprovação.");
-  if (resume.status === "approved") throw new Error("Este currículo já foi aprovado.");
+  if (job?.decision !== "interested") throw new DomainError("resume.approval.interest_required", 400);
+  if (resume.status === "approved") throw new DomainError("resume.already_approved", 400);
   // SDD-ATS-003: never approve empty content, and every source (writer or manual) needs an
   // ATS review `pass` for the current version or an explicitly justified human override.
-  if (!String(resume.content ?? "").trim()) throw new Error("resume.content.empty");
-  if (resumeParseFindings(db, id).length) throw new Error("resume.pdf_parse_failed");
+  if (!String(resume.content ?? "").trim()) throw new DomainError("resume.content.empty");
+  if (resumeParseFindings(db, id).length) throw new DomainError("resume.pdf_parse_failed");
   const reason = String(options.override_reason ?? "").trim();
-  if (resume.review_status !== "pass" && reason.length < 10) throw new Error("ATS_REVIEW_REQUIRED");
+  if (resume.review_status !== "pass" && reason.length < 10) throw new DomainError("ATS_REVIEW_REQUIRED");
   const timestamp = now();
   tx(() => {
     if (resume.review_status !== "pass") db.prepare("UPDATE resumes SET review_status='override',review_findings=? WHERE id=?").run(JSON.stringify([`override:${reason.slice(0, 240)}`]), id);

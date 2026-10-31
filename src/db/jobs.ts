@@ -15,6 +15,7 @@ import { PRE_APPLICATION_STATUSES, abortApplyingJob, advanceJobTo, applyWorkflow
 import { applySuppression, positiveSignalFacets } from "./preferences.js";
 import { mapJob } from "./mappers.js";
 import { revokeAuthorizationRows, withdrawPendingAuthorizations } from "./authorizations.js";
+import { DomainError } from "../errors.js";
 
 /**
  * Vagas visíveis: sem as excluídas (arquivadas) e sem as ocultadas por regra "Não tenho interesse".
@@ -43,7 +44,7 @@ export function listArchivedJobs(projectId = storeProjectId()) {
 }
 
 export function listFieldProvenance(jobId: string) {
-  if (!getJob(jobId)) throw new Error("job.not_found");
+  if (!getJob(jobId)) throw new DomainError("job.not_found");
   const evidence = db.prepare(`SELECT e.*, p.selected_by, p.selected_at, p.superseded_at,
       CASE WHEN p.superseded_at IS NULL THEN 1 ELSE 0 END AS selected
     FROM evidence_records e JOIN job_field_provenance p ON p.evidence_id=e.id
@@ -156,25 +157,25 @@ function validateJobFields(changed: Record<string, unknown>, current: Record<str
   const salaryMin = optionalNumber(merged.salary_min);
   const salaryMax = optionalNumber(merged.salary_max);
   const salary = validateSalary({ min: salaryMin, max: salaryMax, currency: merged.currency == null || merged.currency === "" ? null : String(merged.currency) });
-  if (salary.fieldErrors.length || !salary.value) throw new Error(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
+  if (salary.fieldErrors.length || !salary.value) throw new DomainError(`job.salary.invalid:${salary.fieldErrors.join(",")}`);
   if ("salary_min" in changed) normalized.salary_min = salaryMin;
   if ("salary_max" in changed) normalized.salary_max = salaryMax;
   if ("currency" in changed || "salary_min" in changed || "salary_max" in changed) normalized.currency = salary.value.currency ?? (merged.currency == null || merged.currency === "" ? "BRL" : String(merged.currency));
   const salaryPeriod = merged.salary_period ?? null;
-  if (salaryPeriod !== null && !["hour", "month", "year"].includes(String(salaryPeriod))) throw new Error("job.salary_period.invalid");
+  if (salaryPeriod !== null && !["hour", "month", "year"].includes(String(salaryPeriod))) throw new DomainError("job.salary_period.invalid");
   const latitude = optionalNumber(merged.latitude);
   const longitude = optionalNumber(merged.longitude);
   const coordinates = validateCoordinates({ latitude, longitude });
-  if (coordinates.fieldErrors.length) throw new Error(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
+  if (coordinates.fieldErrors.length) throw new DomainError(`job.coordinates.invalid:${coordinates.fieldErrors.join(",")}`);
   if ("latitude" in changed) normalized.latitude = latitude;
   if ("longitude" in changed) normalized.longitude = longitude;
   if ("deadline_at" in changed && changed.deadline_at != null && String(changed.deadline_at).trim() !== "") {
     if (!isIsoDeadline(String(changed.deadline_at))) throw new DomainValidationError("Prazo inválido: use AAAA-MM-DD ou data-hora ISO 8601 com fuso.", "deadline_at");
     normalized.deadline_at = String(changed.deadline_at).trim();
   }
-  if ("opening_status" in changed && !OPENING_STATUSES.has(String(changed.opening_status ?? "unknown"))) throw new Error("job.opening_status.invalid");
+  if ("opening_status" in changed && !OPENING_STATUSES.has(String(changed.opening_status ?? "unknown"))) throw new DomainError("job.opening_status.invalid");
   for (const field of ["title", "company"] as const) {
-    if (field in changed && !String(changed[field] ?? "").trim()) throw new Error("job.required_fields.invalid");
+    if (field in changed && !String(changed[field] ?? "").trim()) throw new DomainError("job.required_fields.invalid");
   }
   // Exigências explícitas (eliminatórios): validadas e gravadas como JSON canônico.
   if ("requirements_json" in changed) {
@@ -189,8 +190,8 @@ function upsertJobId(source: string, identityUrl: string, title: string, company
 }
 
 export function upsertJob(input: Partial<Job> & { source: string; title: string; company: string; source_url: string }) {
-  if (!input.title?.trim() || !input.company?.trim() || !input.source?.trim()) throw new Error("job.required_fields.invalid");
-  if (!String(input.source_url ?? "").trim()) throw new Error("job.source_url.required");
+  if (!input.title?.trim() || !input.company?.trim() || !input.source?.trim()) throw new DomainError("job.required_fields.invalid");
+  if (!String(input.source_url ?? "").trim()) throw new DomainError("job.source_url.required");
   // Validation happens before any write, and the whole upsert is one transaction.
   const normalized = validateJobFields({ ...input, source_url: input.source_url ?? "", salary_period: input.salary_period ?? null } as Record<string, unknown>);
   input = { ...input, ...normalized, currency: String(normalized.currency ?? input.currency ?? "BRL") } as typeof input;
@@ -235,13 +236,13 @@ const nonCreatableJobFields = new Set(["id", "match_score", "project_id", "statu
  */
 export function createJobFromHuman(input: Record<string, unknown>, actor = "user", projectId = storeProjectId()) {
   const forbidden = Object.keys(input).filter((key) => nonCreatableJobFields.has(key));
-  if (forbidden.length) throw new Error(`job.field.not_editable:${forbidden.join(",")}`);
+  if (forbidden.length) throw new DomainError(`job.field.not_editable:${forbidden.join(",")}`);
   const job = input as Partial<Job> & { source: string; title: string; company: string; source_url: string };
   const identityUrl = String(job.job_url || job.linkedin_post_url || job.application_url || job.source_url || "");
   const id = upsertJobId(String(job.source ?? ""), identityUrl, String(job.title ?? ""), String(job.company ?? ""));
   return tx(() => {
     assertJobNotArchived(id);
-    if (getJob(id)) throw new Error("job.already_exists");
+    if (getJob(id)) throw new DomainError("job.already_exists");
     const created = upsertJob({ ...job, project_id: projectId } as typeof job);
     if (created) {
       for (const [field, value] of Object.entries(input)) {
@@ -263,8 +264,8 @@ export function getJob(id: string) {
 /** Ação "Reexibir" da visão Ocultadas: a vaga volta ao painel e as regras atuais não a ocultam de novo. */
 export function unsuppressJob(id: string, actor = "user") {
   const job = getJob(id);
-  if (!job) throw new Error("job.not_found");
-  if (!job.suppressed) throw new Error("job.not_suppressed");
+  if (!job) throw new DomainError("job.not_found");
+  if (!job.suppressed) throw new DomainError("job.not_suppressed");
   const timestamp = now();
   tx(() => {
     db.prepare("UPDATE jobs SET suppressed=0,suppressed_rule_ids='[]',suppression_dismissed_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, id);
@@ -301,7 +302,7 @@ export function closeJobFromSource(jobId: string, sourceId: string, sourceUrl: s
  */
 export function recordLivenessCheck(jobId: string, result: LivenessResult, checkedAt = now()) {
   const job = getJob(jobId);
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   const check = tx(() => {
     const inserted = insertLivenessCheck(db, jobId, result, checkedAt);
     const alreadyClosed = job.opening_status === "closed" || Boolean(job.closed_at);
@@ -322,7 +323,7 @@ export function recordLivenessCheck(jobId: string, result: LivenessResult, check
 /** Verifica agora (fetch no servidor, com as travas de src/liveness/http.ts) e registra. */
 export async function checkJobLivenessNow(jobId: string, deps: LivenessDeps = {}) {
   const job = getJob(jobId);
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   return recordLivenessCheck(jobId, await checkJobLiveness(job, deps));
 }
 
@@ -376,11 +377,11 @@ export function selectEvidence(jobId: string, field: string, evidenceId: string,
 
 export function updateJob(id: string, patch: Record<string, unknown>, options: { origin?: "human" | "system"; actor?: string; projectId?: string } = {}) {
   assertJobNotArchived(id);
-  if (patch.status !== undefined) throw new Error("workflow.status_requires_transition_command");
+  if (patch.status !== undefined) throw new DomainError("workflow.status_requires_transition_command");
   const forbidden = Object.keys(patch).filter((key) => nonPatchableJobFields.has(key));
-  if (forbidden.length) throw new Error(`job.field.not_editable:${forbidden.join(",")}`);
+  if (forbidden.length) throw new DomainError(`job.field.not_editable:${forbidden.join(",")}`);
   const current = getJob(id);
-  if (!current) throw new Error("job.not_found");
+  if (!current) throw new DomainError("job.not_found");
   const requested = Object.fromEntries(Object.entries(patch).filter(([key]) => editableJobFields.has(key)));
   if (!Object.keys(requested).length) return current;
   // Same validation as upsertJob, applied to the merged job before anything is written.
@@ -412,15 +413,15 @@ export function updateJob(id: string, patch: Record<string, unknown>, options: {
 
 export function recordJobDecision(id: string, decision: string, confirmation: string, actor = "user") {
   assertJobNotArchived(id);
-  if (decision === "not_interested") throw new Error("Use o feedback total com categoria e justificativa para rejeitar uma vaga.");
+  if (decision === "not_interested") throw new DomainError("decision.not_interested.feedback_required", 400);
   const phrases: Record<string, string> = { interested: "TENHO INTERESSE", no_time: "SEM TEMPO" };
-  if (!phrases[decision] || confirmation !== phrases[decision]) throw new Error("Confirme explicitamente sua decisão para esta vaga.");
+  if (!phrases[decision] || confirmation !== phrases[decision]) throw new DomainError("decision.confirmation_required", 400);
   const job = getJob(id);
-  if (!job) throw new Error("Vaga não encontrada.");
-  if (decision === "interested" && ["discarded", "expired", "completed"].includes(job.status)) throw new Error("Reabra a vaga com motivo antes de registrar novo interesse.");
+  if (!job) throw new DomainError("job.not_found");
+  if (decision === "interested" && ["discarded", "expired", "completed"].includes(job.status)) throw new DomainError("decision.reopen_required", 400);
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
   if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) {
-    throw new Error("A decisão não pode ser alterada enquanto a candidatura está em andamento ou já foi enviada.");
+    throw new DomainError("decision.application_locked", 400);
   }
   const timestamp = now();
   tx(() => {
@@ -458,7 +459,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
 
 export function assertJobNotArchived(id: string) {
   const row = db.prepare("SELECT archived_at FROM jobs WHERE id=?").get(id) as { archived_at: string | null } | undefined;
-  if (row?.archived_at) throw new Error("job.archived");
+  if (row?.archived_at) throw new DomainError("job.archived");
 }
 
 /**
@@ -466,12 +467,12 @@ export function assertJobNotArchived(id: string) {
  * buscas futuras (uma nova descoberta da mesma vaga continua oculta) e pode ser restaurada.
  */
 export function archiveJob(id: string, input: { reason?: unknown; confirmation?: unknown } = {}, actor = "user") {
-  if (input.confirmation !== "EXCLUIR") throw new Error("job.archive.confirmation_required");
+  if (input.confirmation !== "EXCLUIR") throw new DomainError("job.archive.confirmation_required");
   const job = getJob(id);
-  if (!job) throw new Error("job.not_found");
-  if ((job as Job & { archived_at?: string | null }).archived_at) throw new Error("job.archived");
+  if (!job) throw new DomainError("job.not_found");
+  if ((job as Job & { archived_at?: string | null }).archived_at) throw new DomainError("job.archived");
   const executing = db.prepare("SELECT id FROM applications WHERE job_id=? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id);
-  if (executing || job.status === "applying") throw new Error("job.archive.application_in_progress");
+  if (executing || job.status === "applying") throw new DomainError("job.archive.application_in_progress");
   const reason = String(input.reason ?? "").trim().slice(0, 500);
   const timestamp = now();
   tx(() => {
@@ -484,8 +485,8 @@ export function archiveJob(id: string, input: { reason?: unknown; confirmation?:
 
 export function restoreJob(id: string, actor = "user") {
   const job = getJob(id) as (Job & { archived_at?: string | null }) | null;
-  if (!job) throw new Error("job.not_found");
-  if (!job.archived_at) throw new Error("job.not_archived");
+  if (!job) throw new DomainError("job.not_found");
+  if (!job.archived_at) throw new DomainError("job.not_archived");
   const timestamp = now();
   tx(() => {
     db.prepare("UPDATE jobs SET archived_at=NULL, archived_reason=NULL, updated_at=? WHERE id=?").run(timestamp, id);
@@ -496,10 +497,10 @@ export function restoreJob(id: string, actor = "user") {
 
 export function resolveFieldConflict(conflictId: string, choice: "current" | "candidate", actor: string) {
   const conflict = db.prepare("SELECT * FROM field_conflicts WHERE id=? AND status='pending'").get(conflictId) as Record<string, unknown> | undefined;
-  if (!conflict) throw new Error("field_conflict.not_found");
+  if (!conflict) throw new DomainError("field_conflict.not_found");
   const evidenceId = choice === "candidate" ? String(conflict.candidate_evidence_id) : String(conflict.current_evidence_id ?? "");
   const evidence = db.prepare("SELECT * FROM evidence_records WHERE id=?").get(evidenceId) as Record<string, unknown> | undefined;
-  if (!evidence) throw new Error("field_conflict.evidence_not_found");
+  if (!evidence) throw new DomainError("field_conflict.evidence_not_found");
   const value = JSON.parse(String(evidence.observed_value_json));
   const timestamp = now();
   tx(() => {

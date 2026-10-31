@@ -6,6 +6,7 @@ import { connectorById } from "../connectors/sources.js";
 import { getActiveProfile } from "./profiles.js";
 import { listAgentConfigs, publishedAgentConfig } from "./agents.js";
 import { mapSourceConfig } from "./mappers.js";
+import { DomainError } from "../errors.js";
 
 export function listSourceConfigs(projectId = storeProjectId()): SourceConfigRecord[] {
   return (db.prepare("SELECT * FROM source_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapSourceConfig);
@@ -31,11 +32,11 @@ function sourceReadiness(source: SourceConfigRecord): { status: string; reason: 
 }
 
 export function setSourceReadiness(id: string, status: string, reason = "", actor = "system", projectId = storeProjectId()) {
-  if (!["configured", "not_ready", "ready", "paused", "blocked"].includes(status)) throw new Error("source.readiness.invalid");
+  if (!["configured", "not_ready", "ready", "paused", "blocked"].includes(status)) throw new DomainError("source.readiness.invalid");
   const timestamp = now();
   const result = db.prepare("UPDATE source_configs SET readiness_status=?,readiness_reason=?,last_smoke_test_at=?,updated_at=? WHERE id=? AND project_id=?")
     .run(status, reason.slice(0, 240), timestamp, timestamp, id, projectId);
-  if (!result.changes) throw new Error("source.not_found");
+  if (!result.changes) throw new DomainError("source.not_found");
   audit("source_config", id, "readiness_changed", { status, reason: reason.slice(0, 120), actor, project_id: projectId });
   return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
@@ -44,7 +45,7 @@ export function approveSourceTerms(id: string, actor = "user", projectId = store
   const timestamp = now();
   const result = db.prepare("UPDATE source_configs SET terms_approved_at=?,terms_approved_by=?,updated_at=? WHERE id=? AND project_id=?")
     .run(timestamp, actor, timestamp, id, projectId);
-  if (!result.changes) throw new Error("source.not_found");
+  if (!result.changes) throw new DomainError("source.not_found");
   audit("source_config", id, "terms_approved", { actor, project_id: projectId });
   return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
@@ -69,14 +70,14 @@ export function listSearchRounds(projectId = storeProjectId()): any[] {
 
 export function startSearchRound(input: Record<string, unknown> = {}, projectId = storeProjectId(), actor = "user") {
   const profile = getActiveProfile(projectId);
-  if (!profile?.snapshot) throw new Error("PROFILE_CONFIRMATION_REQUIRED");
+  if (!profile?.snapshot) throw new DomainError("PROFILE_CONFIRMATION_REQUIRED");
   const configuredSources = listSourceConfigs(projectId).filter((source) => source.enabled);
   const requested = Array.isArray(input.source_ids) ? input.source_ids.map(String) : configuredSources.map((source) => source.id);
   const sources = configuredSources.filter((source) => requested.includes(source.id));
-  if (!sources.length) throw new Error("ROUND_NO_SOURCES");
+  if (!sources.length) throw new DomainError("ROUND_NO_SOURCES");
   const readiness = sources.map((source) => ({ source, ...sourceReadiness(source) }));
   const ready = readiness.filter((item) => item.status === "ready");
-  if (!ready.length) throw new Error("ROUND_SOURCES_NOT_READY");
+  if (!ready.length) throw new DomainError("ROUND_SOURCES_NOT_READY");
   const readySources = ready.map((item) => item.source);
   const agents = listAgentConfigs(projectId).flatMap((agent) => {
     const published = publishedAgentConfig(agent.id, projectId);
@@ -106,15 +107,15 @@ export function startSearchRound(input: Record<string, unknown> = {}, projectId 
 }
 
 export function recordRoundSourceStatus(roundId: string, sourceId: string, status: string, input: Record<string, unknown> = {}, projectId = storeProjectId()) {
-  if (!["running", "completed", "failed", "cancelled", "ready", "not_ready", "paused", "blocked"].includes(status)) throw new Error("round.source.status.invalid");
+  if (!["running", "completed", "failed", "cancelled", "ready", "not_ready", "paused", "blocked"].includes(status)) throw new DomainError("round.source.status.invalid");
   const round = getRound(roundId, projectId);
-  if (!round) throw new Error("round.not_found");
+  if (!round) throw new DomainError("round.not_found");
   const source = (round.sources as Record<string, unknown>[]).find((item) => item.source_id === sourceId);
-  if (!source) throw new Error("round.source.not_found");
+  if (!source) throw new DomainError("round.source.not_found");
   const timestamp = now();
   const result = db.prepare(`UPDATE round_sources SET status=?,cursor=?,batch_number=?,received_count=?,accepted_count=?,error_code=?,finished_at=?
     WHERE round_id=? AND source_id=?`).run(status, input.cursor === undefined ? source.cursor == null ? null : String(source.cursor) : input.cursor == null ? null : String(input.cursor), Number(input.batch_number ?? source.batch_number ?? 0), Number(input.received_count ?? source.received_count ?? 0), Number(input.accepted_count ?? source.accepted_count ?? 0), input.error_code == null ? null : String(input.error_code).slice(0, 120), ["completed", "failed", "cancelled"].includes(status) ? timestamp : null, roundId, sourceId);
-  if (!result.changes) throw new Error("round.source.not_found");
+  if (!result.changes) throw new DomainError("round.source.not_found");
   const sources = db.prepare("SELECT status FROM round_sources WHERE round_id=?").all(roundId) as { status: string }[];
   const terminal = sources.length > 0 && sources.every((source) => ["completed", "failed", "cancelled", "not_ready", "blocked", "paused"].includes(source.status));
   if (terminal) {
@@ -137,12 +138,12 @@ function validateSourceConfig(input: Record<string, unknown>) {
   const authStrategy = String(input.auth_strategy ?? "none");
   const secretRef = input.secret_ref == null || input.secret_ref === "" ? null : String(input.secret_ref);
   const browserProfileId = input.browser_profile_id == null || input.browser_profile_id === "" ? null : String(input.browser_profile_id);
-  if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id) || name.length < 2 || name.length > 100) throw new Error("source.identity.invalid");
-  if (!sourceTypes.has(sourceType) || !sourceAuthStrategies.has(authStrategy)) throw new Error("source.type.invalid");
-  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)) throw new Error("source.domain.invalid");
-  if (secretRef && !/^(?:hermes|vault):\/\/[A-Za-z0-9_.:/-]{1,150}$/.test(secretRef)) throw new Error("source.secret_ref.invalid");
-  if (["bearer", "basic"].includes(authStrategy) && !secretRef) throw new Error("source.secret_ref.required");
-  if (authStrategy === "browser_profile" && !browserProfileId) throw new Error("source.browser_profile.required");
+  if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id) || name.length < 2 || name.length > 100) throw new DomainError("source.identity.invalid");
+  if (!sourceTypes.has(sourceType) || !sourceAuthStrategies.has(authStrategy)) throw new DomainError("source.type.invalid");
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)) throw new DomainError("source.domain.invalid");
+  if (secretRef && !/^(?:hermes|vault):\/\/[A-Za-z0-9_.:/-]{1,150}$/.test(secretRef)) throw new DomainError("source.secret_ref.invalid");
+  if (["bearer", "basic"].includes(authStrategy) && !secretRef) throw new DomainError("source.secret_ref.required");
+  if (authStrategy === "browser_profile" && !browserProfileId) throw new DomainError("source.browser_profile.required");
   return { id, name, sourceType, domain, authStrategy, secretRef, browserProfileId, enabled: input.enabled === false ? 0 : 1 };
 }
 
@@ -167,9 +168,9 @@ export function upsertSourceConfig(input: Record<string, unknown>, actor: string
 }
 
 export function deleteSourceConfig(id: string, actor: string, projectId = storeProjectId()) {
-  if (listAgentConfigs(projectId).some((agent) => agent.source_ids.includes(id))) throw new Error("source.in_use.disable_instead");
+  if (listAgentConfigs(projectId).some((agent) => agent.source_ids.includes(id))) throw new DomainError("source.in_use.disable_instead");
   const result = db.prepare("DELETE FROM source_configs WHERE id=? AND project_id=?").run(id, projectId);
-  if (!result.changes) throw new Error("source.not_found");
+  if (!result.changes) throw new DomainError("source.not_found");
   audit("source_config", id, "deleted", { actor, project_id: projectId });
   return { deleted: true };
 }

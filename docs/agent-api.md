@@ -500,14 +500,28 @@ Todas as rotas que alteram dados validam o corpo com um schema estrito (`src/htt
 
 ## Códigos de resposta e comportamento
 
-| Código | Significado |
-| --- | --- |
-| `200` | Consulta ou atualização concluída |
-| `201` | Registro criado ou upsert processado |
-| `400` | JSON inválido, evento desconhecido ou falha ao processar/gravar os dados; corpo `{ "error": "..." }` |
-| `403` | Capacidade interna negada, agente desabilitado ou URL fora de `allowed_domains` |
-| `404` | Rota ou registro desconhecido; corpo `{ "error": "not found" }` |
-| `409` | Conflito de versão, idempotência ou transição |
-| `422` | Schema, evidência, configuração, domínio ou precondição inválidos |
+Todo erro tem o corpo `{ "error": "<código estável>", "message": "<texto pt-BR>", "details"?: {...} }` (#29). O
+**código** é o contrato: o status HTTP e a mensagem saem só dele (tabela de status e dicionário em
+`src/errors.ts`), nunca do texto. Mudar a redação de uma mensagem não muda o status nem o código. Clientes (painel,
+MCP, Hermes) devem decidir pelo `error`; `message` é para exibir. Um código com sufixo (`job.salary.invalid:min`)
+repete o sufixo em `details.reason`. Qualquer erro que não seja de domínio (falha interna, SQLite, bug) responde
+`500 internal_error` com mensagem genérica; o detalhe fica só no log do servidor, com `request_id`.
+
+| Status | Significado | Exemplos de `error` |
+| --- | --- | --- |
+| `200` | Consulta ou atualização concluída | — |
+| `201` | Registro criado ou upsert processado | — |
+| `400` | JSON ou corpo inválido, ou portão humano sem a confirmação digitada | `invalid_json`, `invalid_body`, `resume.approval.confirmation_required` (APROVO), `application.authorization.confirmation_required` (AUTORIZO), `decision.confirmation_required` (TENHO INTERESSE / SEM TEMPO), `application.status.invalid`, `resume.interest_required` |
+| `401` | Sessão ou token ausente | `unauthorized` |
+| `403` | Decisão humana pedida pelo token de serviço, capacidade negada, agente desabilitado, URL fora de `allowed_domains`, automação pausada | `human_session_required`, `profile.confirm.forbidden`, `agent.domain.forbidden`, `application.internal_route_required`, `AUTOMATION_DISABLED` |
+| `404` | Rota ou registro desconhecido | `not_found` (rota), `job.not_found`, `resume.not_found`, `application.not_found`, `base_resume.not_found`, `profile.not_found`, `round.not_found` |
+| `409` | Conflito de versão, idempotência, estado ou transição | `VERSION_CONFLICT`, `ILLEGAL_TRANSITION`, `PDF_DUPLICATE`, `application.already_exists`, `profile.draft_exists`, `resume.unverified_facts`, `resume.pdf_parse_failed`, `agent.version.review_required` |
+| `413` | Conteúdo maior que o limite | `payload_too_large`, `PDF_TOO_LARGE` |
+| `422` | Schema, evidência, configuração, domínio ou precondição inválidos | `validation.<campo>`, `PRECONDITION_FAILED`, `PROFILE_SNAPSHOT_REQUIRED`, `PDF_SIGNATURE_INVALID`, `job.salary.invalid:<campos>`, `profile.draft_required` |
+| `429` | Limite de execução atingido | `agent.run.concurrency_exceeded`, `application.daily_limit_reached` |
+| `500` | Erro interno | `internal_error` |
+
+O servidor MCP repete o mesmo código e status no erro da ferramenta (`{ error: { code, message, status } }`); não
+existe mais o código genérico `radar.rule_violation` para frases sem código.
 
 Algumas rotas por ID ainda retornam `200` com `null`; a uniformização para 404 é um gate pendente. Agentes com histórico de enriquecimento não podem ser excluídos: pause-os com `PATCH`.

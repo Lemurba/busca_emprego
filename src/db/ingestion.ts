@@ -12,6 +12,7 @@ import { addEvidence, closeJobFromSource, detectJobRepost, detectSightingRepost,
 import { applySuppression } from "./preferences.js";
 import { getRound } from "./sources.js";
 import { mapJob } from "./mappers.js";
+import { DomainError } from "../errors.js";
 
 export function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -44,16 +45,16 @@ function openingCheckedAt(item: Record<string, unknown>): string | null {
 }
 
 export function validateSourceBatch(sourceId: string, batch: Record<string, unknown>) {
-  if (String(batch.source_id ?? sourceId) !== sourceId || !Array.isArray(batch.items) || batch.items.length > 25) throw new Error("SCHEMA_INVALID:source.items");
+  if (String(batch.source_id ?? sourceId) !== sourceId || !Array.isArray(batch.items) || batch.items.length > 25) throw new DomainError("SCHEMA_INVALID:source.items");
   const items = (batch.items as unknown[]).map((value, index) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`SCHEMA_INVALID:source.items.${index}`);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new DomainError(`SCHEMA_INVALID:source.items.${index}`);
     const item = value as Record<string, unknown>;
     const extras = Object.keys(item).filter((key) => !sourceItemFields.has(key));
-    if (extras.length) throw new Error(`SCHEMA_INVALID:source.items.${index}.${extras[0]}`);
-    if (String(item.source_id ?? sourceId) !== sourceId || !String(item.job_url ?? "").trim() || !String(item.title ?? "").trim() || !String(item.company ?? "").trim()) throw new Error(`SCHEMA_INVALID:source.items.${index}.required`);
+    if (extras.length) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.${extras[0]}`);
+    if (String(item.source_id ?? sourceId) !== sourceId || !String(item.job_url ?? "").trim() || !String(item.title ?? "").trim() || !String(item.company ?? "").trim()) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.required`);
     const opening = String(item.opening_status ?? "unknown");
-    if (!["open", "closed", "unknown"].includes(opening)) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_status`);
-    if (item.opening_checked_at != null && (!ISO_DATE_TIME.test(String(item.opening_checked_at)) || Number.isNaN(Date.parse(String(item.opening_checked_at))))) throw new Error(`SCHEMA_INVALID:source.items.${index}.opening_checked_at`);
+    if (!["open", "closed", "unknown"].includes(opening)) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.opening_status`);
+    if (item.opening_checked_at != null && (!ISO_DATE_TIME.test(String(item.opening_checked_at)) || Number.isNaN(Date.parse(String(item.opening_checked_at))))) throw new DomainError(`SCHEMA_INVALID:source.items.${index}.opening_checked_at`);
     for (const field of ["job_url", "source_url", "linkedin_post_url", "application_url"] as const) {
       if (item[field]) canonicalizeJobUrl(String(item[field]));
     }
@@ -191,7 +192,7 @@ function ingestSourceItem(item: Record<string, unknown>, ctx: IngestContext) {
   };
   // A sighting adds evidence/occurrence; it never overwrites the canonical human-visible card.
   const job = existingJob ?? upsertJob(jobInput);
-  if (!job) throw new Error("job.persist.failed");
+  if (!job) throw new DomainError("job.persist.failed");
   if (!existingJob) addToFuzzyIndex(ctx.batchFuzzyIndex, job.id, fuzzyFromItem(item));
   // #33: vaga nova → impressão digital + repostagem contra anteriores; vaga revista com nova data de publicação → repostagem da mesma vaga.
   if (!existingJob) detectJobRepost(job.id); else detectSightingRepost(job.id, item.posted_at == null ? null : String(item.posted_at));
@@ -265,13 +266,13 @@ export function ingestSourceItems(sourceId: string, items: unknown[], options: {
 
 export function ingestRoundBatch(roundId: string, sourceId: string, batch: Record<string, unknown>, projectId = storeProjectId(), agentId: string | null = null) {
   const round = getRound(roundId, projectId);
-  if (!round) throw new Error("round.not_found");
+  if (!round) throw new DomainError("round.not_found");
   const roundSource = (round.sources as Record<string, unknown>[]).find((source) => source.source_id === sourceId);
-  if (!roundSource) throw new Error("round.source.not_found");
+  if (!roundSource) throw new DomainError("round.source.not_found");
   const { items, nextCursor } = validateSourceBatch(sourceId, batch);
   const payloadHash = jobPayloadHash(batch);
-  if (!["running", "planning"].includes(String(round.status))) throw new Error("round.not_running");
-  if (!["ready", "running"].includes(String(roundSource.status))) throw new Error("round.source.not_runnable");
+  if (!["running", "planning"].includes(String(round.status))) throw new DomainError("round.not_running");
+  if (!["ready", "running"].includes(String(roundSource.status))) throw new DomainError("round.source.not_runnable");
   const results: Array<Record<string, unknown>> = [];
   // Fuzzy fora da transação de escrita: lê o índice e compara antes de abrir a transação (tx), para não
   // segurar o lock do SQLite (MCP e dashboard esperam no busy_timeout) durante os trigramas.
@@ -282,13 +283,13 @@ export function ingestRoundBatch(roundId: string, sourceId: string, batch: Recor
   return tx(() => {
     const lockedRound = db.prepare("SELECT status FROM search_rounds WHERE id=? AND project_id=?").get(roundId, projectId) as { status: string } | undefined;
     const lockedSource = db.prepare("SELECT status,batch_number FROM round_sources WHERE round_id=? AND source_id=?").get(roundId, sourceId) as { status: string; batch_number: number } | undefined;
-    if (!lockedRound || !lockedSource) throw new Error("round.source.not_found");
+    if (!lockedRound || !lockedSource) throw new DomainError("round.source.not_found");
     const priorCheckpoint = db.prepare("SELECT id FROM round_checkpoints WHERE round_id=? AND source_id=? AND payload_hash=? AND status='completed' LIMIT 1").get(roundId, sourceId, payloadHash);
     if (priorCheckpoint) {
       return { duplicate: true, run_id: roundId, source_id: sourceId, accepted: 0, items: [] };
     }
-    if (!["running", "planning"].includes(lockedRound.status)) throw new Error("round.not_running");
-    if (!["ready", "running"].includes(lockedSource.status)) throw new Error("round.source.not_runnable");
+    if (!["running", "planning"].includes(lockedRound.status)) throw new DomainError("round.not_running");
+    if (!["ready", "running"].includes(lockedSource.status)) throw new DomainError("round.source.not_runnable");
     const batchNumber = Number(lockedSource.batch_number ?? 0) + 1;
     const checkpointId = idFor(`checkpoint|${roundId}|${sourceId}|${batchNumber}|${payloadHash}`);
     db.prepare("DELETE FROM round_checkpoints WHERE round_id=? AND source_id=? AND payload_hash=? AND status<>'completed'").run(roundId, sourceId, payloadHash);
@@ -341,20 +342,20 @@ export function listRecentDuplicateDecisions(projectId = storeProjectId(), refer
 /** Desfaz a decisão (mesclar, distintas ou dispensar) dentro do prazo: a suspeita volta para a fila. */
 export function undoPossibleDuplicate(id: string, actor = "user", reference = Date.now(), projectId = storeProjectId()) {
   const row = db.prepare("SELECT status,reviewed_at FROM possible_duplicates WHERE id=? AND project_id=?").get(id, projectId) as { status: string; reviewed_at: string | null } | undefined;
-  if (!row) throw new Error("possible_duplicate.not_found");
-  if (row.status === "pending") throw new Error("possible_duplicate.not_resolved");
-  if (!row.reviewed_at || reference - Date.parse(row.reviewed_at) > DUPLICATE_UNDO_WINDOW_MS) throw new Error("possible_duplicate.undo_expired");
+  if (!row) throw new DomainError("possible_duplicate.not_found");
+  if (row.status === "pending") throw new DomainError("possible_duplicate.not_resolved");
+  if (!row.reviewed_at || reference - Date.parse(row.reviewed_at) > DUPLICATE_UNDO_WINDOW_MS) throw new DomainError("possible_duplicate.undo_expired");
   const result = db.prepare("UPDATE possible_duplicates SET status='pending',reviewed_at=NULL,reviewed_by=NULL WHERE id=? AND project_id=? AND status=?").run(id, projectId, row.status);
-  if (!result.changes) throw new Error("possible_duplicate.not_resolved");
+  if (!result.changes) throw new DomainError("possible_duplicate.not_resolved");
   audit("possible_duplicate", id, "undone", { previous_status: row.status, actor });
   return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
 }
 
 export function resolvePossibleDuplicate(id: string, status: "merged" | "distinct" | "dismissed", actor = "user", projectId = storeProjectId()) {
-  if (!["merged", "distinct", "dismissed"].includes(status)) throw new Error("possible_duplicate.status.invalid");
+  if (!["merged", "distinct", "dismissed"].includes(status)) throw new DomainError("possible_duplicate.status.invalid");
   const timestamp = now();
   const result = db.prepare("UPDATE possible_duplicates SET status=?,reviewed_at=?,reviewed_by=? WHERE id=? AND project_id=? AND status='pending'").run(status, timestamp, actor, id, projectId);
-  if (!result.changes) throw new Error("possible_duplicate.not_found");
+  if (!result.changes) throw new DomainError("possible_duplicate.not_found");
   audit("possible_duplicate", id, "resolved", { status, actor });
   return db.prepare("SELECT * FROM possible_duplicates WHERE id=?").get(id);
 }

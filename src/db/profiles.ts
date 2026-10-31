@@ -1,13 +1,27 @@
 // Perfil profissional (#49): rascunhos, fatos, revisão, entrevista, confirmação com snapshot e
 // novas versões. Revisar e confirmar são decisões humanas (atores `service:`/`agent:` recusados).
 import { randomUUID } from "node:crypto";
-import { compactProfileContext } from "../pdf-profile.js";
+import { compactProfileContext as compactContextJson } from "../pdf-profile.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now, parseObject } from "./util.js";
 import { buildProfileJsonResume, jsonResumeImportFacts } from "./profile-import.js";
 import { BLOCKER_FACT_TYPES, normalizeBlockerFact } from "../blockers.js";
 import { getBaseResumeExtraction, proposeBaseResumeFacts } from "./base-resumes.js";
 import { mapProfile, mapProfileFact } from "./mappers.js";
+import { DomainError } from "../errors.js";
+
+/**
+ * Contexto do perfil compactado em JSON. src/pdf-profile.ts roda também no worker de extração
+ * (sem imports locais), então lança Error puro; aqui o limite vira o código de domínio (#29).
+ */
+function compactProfileContext(context: Record<string, unknown>): string {
+  try {
+    return compactContextJson(context);
+  } catch (error) {
+    if (error instanceof Error && error.message === "PROFILE_CONTEXT_TOO_LARGE") throw new DomainError("PROFILE_CONTEXT_TOO_LARGE");
+    throw error;
+  }
+}
 
 export function listProfiles(projectId = storeProjectId()) {
   return (db.prepare("SELECT * FROM professional_profiles WHERE project_id=? ORDER BY version DESC").all(projectId) as Record<string, unknown>[]).map(mapProfile);
@@ -31,7 +45,7 @@ export function listProfileFacts(profileId: string): any[] {
 export function factValue(value: unknown): unknown {
   if (typeof value === "string") return value.trim();
   if (Array.isArray(value)) {
-    if (value.some((item) => item !== null && typeof item === "object")) throw new Error("profile.fact.invalid");
+    if (value.some((item) => item !== null && typeof item === "object")) throw new DomainError("profile.fact.invalid");
     return value.filter((item) => item != null).map((item) => String(item).trim()).filter(Boolean);
   }
   return value;
@@ -52,7 +66,7 @@ function isAutomatedActor(actor: string): boolean {
 
 export function addProfileFact(profileId: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()) {
   const profile = getProfile(profileId, projectId);
-  if (profile?.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new DomainError("profile.draft_required");
   const type = String(input.type ?? "").trim();
   const value = normalizeBlockerFact(type, factValue(input.value));
   const automated = isAutomatedActor(actor);
@@ -68,15 +82,15 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
   const defaultExcerpt = origin === "user" ? `Declaração humana: ${factExcerpt(value).slice(0, 200)}` : "";
   const evidenceExcerpt = String(input.evidence_excerpt ?? input.excerpt ?? defaultExcerpt).trim().slice(0, 500);
   const confidence = Number(input.confidence ?? (origin === "user" ? 1 : 0.8));
-  if (!type || type.length > 80 || value == null || value === "" || (Array.isArray(value) && value.length === 0)) throw new Error("profile.fact.invalid");
-  if (!["pdf", "user", "derived", "import"].includes(origin) || !["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
-  if (state === "confirmed" && origin !== "user" && !evidenceExcerpt && evidencePage == null) throw new Error("profile.fact.evidence.required");
+  if (!type || type.length > 80 || value == null || value === "" || (Array.isArray(value) && value.length === 0)) throw new DomainError("profile.fact.invalid");
+  if (!["pdf", "user", "derived", "import"].includes(origin) || !["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new DomainError("profile.fact.state.invalid");
+  if (state === "confirmed" && origin !== "user" && !evidenceExcerpt && evidencePage == null) throw new DomainError("profile.fact.evidence.required");
   // Fato importado (JSON Resume) tem como evidência o JSON Pointer do trecho de origem ("/work/0").
-  if (origin === "import" && !evidenceExcerpt.startsWith("/")) throw new Error("profile.fact.evidence.required");
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error("profile.fact.confidence.invalid");
-  if (evidencePage != null && (!Number.isInteger(evidencePage) || evidencePage < 1)) throw new Error("profile.fact.invalid");
+  if (origin === "import" && !evidenceExcerpt.startsWith("/")) throw new DomainError("profile.fact.evidence.required");
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new DomainError("profile.fact.confidence.invalid");
+  if (evidencePage != null && (!Number.isInteger(evidencePage) || evidencePage < 1)) throw new DomainError("profile.fact.invalid");
   // Fato "do PDF" vindo do serviço/agente precisa apontar a página de onde saiu.
-  if (automated && origin === "pdf" && evidencePage == null) throw new Error("profile.fact.evidence.required");
+  if (automated && origin === "pdf" && evidencePage == null) throw new DomainError("profile.fact.evidence.required");
   const id = String(input.id ?? idFor(`profile-fact|${profileId}|${type}|${JSON.stringify(value)}|${Date.now()}|${Math.random()}`));
   const timestamp = now();
   db.prepare(`INSERT INTO profile_facts
@@ -88,12 +102,12 @@ export function addProfileFact(profileId: string, input: Record<string, unknown>
 
 /** Revisa um fato; com `profileId`, o fato precisa pertencer a esse perfil (senão, não encontrado). */
 export function reviewProfileFact(id: string, state: string, actor = "user", profileId?: string) {
-  if (isAutomatedActor(actor)) throw new Error("profile.fact.review.forbidden");
-  if (!["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new Error("profile.fact.state.invalid");
+  if (isAutomatedActor(actor)) throw new DomainError("profile.fact.review.forbidden");
+  if (!["proposed", "confirmed", "rejected", "needs_review"].includes(state)) throw new DomainError("profile.fact.state.invalid");
   const row = db.prepare("SELECT f.*,p.status AS profile_status FROM profile_facts f JOIN professional_profiles p ON p.id=f.profile_id WHERE f.id=?").get(id) as Record<string, unknown> | undefined;
-  if (!row || (profileId !== undefined && row.profile_id !== profileId)) throw new Error("profile.fact.not_found");
-  if (row.profile_status !== "draft") throw new Error("profile.draft_required");
-  if (state === "confirmed" && row.origin !== "user" && row.evidence_page == null && !String(row.evidence_excerpt ?? "").trim()) throw new Error("profile.fact.evidence.required");
+  if (!row || (profileId !== undefined && row.profile_id !== profileId)) throw new DomainError("profile.fact.not_found");
+  if (row.profile_status !== "draft") throw new DomainError("profile.draft_required");
+  if (state === "confirmed" && row.origin !== "user" && row.evidence_page == null && !String(row.evidence_excerpt ?? "").trim()) throw new DomainError("profile.fact.evidence.required");
   db.prepare("UPDATE profile_facts SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
   audit("profile_fact", id, "reviewed", { state, actor });
   return mapProfileFact(db.prepare("SELECT * FROM profile_facts WHERE id=?").get(id) as Record<string, unknown>);
@@ -116,15 +130,15 @@ function nextProfileVersion(projectId: string): number {
  * aberto acumulava rascunhos e permitia confirmar um rascunho velho por cima do perfil ativo.
  */
 function assertNoOpenDraft(projectId: string) {
-  if (db.prepare("SELECT 1 FROM professional_profiles WHERE project_id=? AND status='draft' LIMIT 1").get(projectId)) throw new Error("profile.draft_exists");
+  if (db.prepare("SELECT 1 FROM professional_profiles WHERE project_id=? AND status='draft' LIMIT 1").get(projectId)) throw new DomainError("profile.draft_exists");
 }
 
 /** `options.source` não vem do corpo da requisição: só o import de JSON Resume cria perfis `json_resume`. */
 export function createProfessionalProfile(input: Record<string, unknown>, actor = "user", projectId = storeProjectId(), options: { source?: string } = {}): any {
   const baseResumeId = input.base_resume_id == null || input.base_resume_id === "" ? null : String(input.base_resume_id);
-  if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new Error("base_resume.not_found");
+  if (baseResumeId && !db.prepare("SELECT id FROM base_resumes WHERE id=?").get(baseResumeId)) throw new DomainError("base_resume.not_found");
   const source = options.source ?? "pdf";
-  if (!["pdf", "json_resume"].includes(source)) throw new Error("profile.source.invalid");
+  if (!["pdf", "json_resume"].includes(source)) throw new DomainError("profile.source.invalid");
   const context = parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
   const facts = Array.isArray(input.facts) ? input.facts : [];
@@ -172,13 +186,13 @@ export function importJsonResumeProfile(doc: unknown, actor = "user", projectId 
 /** JSON Resume v1 do perfil-mestre: só fatos confirmados. */
 export function exportProfileJsonResume(id: string, projectId = storeProjectId()) {
   const profile = getProfile(id, projectId);
-  if (!profile) throw new Error("profile.not_found");
+  if (!profile) throw new DomainError("profile.not_found");
   return { profile, document: buildProfileJsonResume(db, profile) };
 }
 
 export function updateProfessionalProfile(id: string, input: Record<string, unknown>, actor = "user", projectId = storeProjectId()): any {
   const profile = getProfile(id, projectId);
-  if (profile?.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new DomainError("profile.draft_required");
   const context = input.context === undefined && input.context_json === undefined ? profile.context : parseObject(input.context ?? input.context_json);
   const contextJson = compactProfileContext(context);
   // Contexto e fatos são uma unidade (como na criação): um fato inválido desfaz o PATCH inteiro.
@@ -197,16 +211,16 @@ function profileContext(profile: ReturnType<typeof getProfile>, facts: ReturnTyp
 }
 
 export function confirmProfessionalProfile(id: string, actor = "user", projectId = storeProjectId()): any {
-  if (isAutomatedActor(actor)) throw new Error("profile.confirm.forbidden");
+  if (isAutomatedActor(actor)) throw new DomainError("profile.confirm.forbidden");
   const profile = getProfile(id, projectId);
-  if (profile?.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new DomainError("profile.draft_required");
   // Rascunho mais velho que o perfil ativo (ex.: a checagem de fatos do currículo confirmou a
   // versão N+1 com o rascunho aberto): confirmá-lo apagaria do perfil ativo o que veio depois.
   const active = db.prepare("SELECT version FROM professional_profiles WHERE project_id=? AND status='confirmed' ORDER BY version DESC LIMIT 1").get(projectId) as { version: number } | undefined;
-  if (active && Number(active.version) > Number(profile.version)) throw new Error("profile.draft_stale");
+  if (active && Number(active.version) > Number(profile.version)) throw new DomainError("profile.draft_stale");
   const facts = listProfileFacts(id);
-  if (facts.some((fact) => ["proposed", "needs_review"].includes(String(fact.state)))) throw new Error("PROFILE_FACTS_UNCONFIRMED");
-  if (!facts.some((fact) => fact.state === "confirmed") && !Object.keys(profile.context).length) throw new Error("PROFILE_EMPTY");
+  if (facts.some((fact) => ["proposed", "needs_review"].includes(String(fact.state)))) throw new DomainError("PROFILE_FACTS_UNCONFIRMED");
+  if (!facts.some((fact) => fact.state === "confirmed") && !Object.keys(profile.context).length) throw new DomainError("PROFILE_EMPTY");
   const contextJson = profileContext(profile, facts);
   const timestamp = now();
   // tx (e não BEGIN cru) para poder rodar aninhada: a confirmação de fato do currículo (#31) cria a versão N+1 numa só transação.
@@ -267,11 +281,11 @@ export function listDraftProfiles(projectId = storeProjectId()): any[] {
  * agente/serviço ficam pendentes (a pessoa revisa uma a uma) e voltam em `skipped`. Decisão humana: atores automatizados recebem `profile.fact.review.forbidden`.
  */
 export function reviewAllProfileFacts(profileId: string, state: string, actor = "user", projectId = storeProjectId()) {
-  if (isAutomatedActor(actor)) throw new Error("profile.fact.review.forbidden");
-  if (state !== "confirmed") throw new Error("profile.fact.state.invalid");
+  if (isAutomatedActor(actor)) throw new DomainError("profile.fact.review.forbidden");
+  if (state !== "confirmed") throw new DomainError("profile.fact.state.invalid");
   const profile = getProfile(profileId, projectId);
-  if (!profile) throw new Error("profile.not_found");
-  if (profile.status !== "draft") throw new Error("profile.draft_required");
+  if (!profile) throw new DomainError("profile.not_found");
+  if (profile.status !== "draft") throw new DomainError("profile.draft_required");
   const pending = listProfileFacts(profileId).filter(isPendingFact);
   const ready = pending.filter((fact) => factHasEvidence(fact) && !isInterviewProposal(fact));
   const timestamp = now();
@@ -289,10 +303,10 @@ export function reviewAllProfileFacts(profileId: string, state: string, actor = 
  * Fatos e entrevistas saem junto (ON DELETE CASCADE).
  */
 export function deleteDraftProfile(id: string, actor = "user", projectId = storeProjectId()) {
-  if (isAutomatedActor(actor)) throw new Error("profile.delete.forbidden");
+  if (isAutomatedActor(actor)) throw new DomainError("profile.delete.forbidden");
   const profile = getProfile(id, projectId);
-  if (!profile) throw new Error("profile.not_found");
-  if (profile.status !== "draft") throw new Error("profile.draft_required");
+  if (!profile) throw new DomainError("profile.not_found");
+  if (profile.status !== "draft") throw new DomainError("profile.draft_required");
   tx(() => {
     db.prepare("DELETE FROM professional_profiles WHERE id=? AND project_id=? AND status='draft'").run(id, projectId);
     audit("profile", id, "draft_deleted", { actor, project_id: projectId, version: profile.version, source: profile.source });
@@ -328,10 +342,10 @@ export function cloneProfileAsDraft(source: any, actor: string, projectId: strin
  * e confirma de novo. Só um rascunho por vez (`profile.draft_exists`).
  */
 export function createProfileNewVersion(id: string, actor = "user", projectId = storeProjectId()): any {
-  if (isAutomatedActor(actor)) throw new Error("profile.new_version.forbidden");
+  if (isAutomatedActor(actor)) throw new DomainError("profile.new_version.forbidden");
   const profile = getProfile(id, projectId);
-  if (!profile) throw new Error("profile.not_found");
-  if (profile.status !== "confirmed") throw new Error("profile.confirmed_required");
+  if (!profile) throw new DomainError("profile.not_found");
+  if (profile.status !== "confirmed") throw new DomainError("profile.confirmed_required");
   assertNoOpenDraft(projectId);
   const draftId = tx(() => {
     const { draft } = cloneProfileAsDraft(profile, actor, projectId);
@@ -359,13 +373,13 @@ export function getLatestProfileSnapshot(profileId?: string, projectId = storePr
 
 export function answerProfileInterview(profileId: string, questionKey: string, answer: unknown, actor = "user", projectId = storeProjectId()) {
   const profile = getProfile(profileId, projectId);
-  if (profile?.status !== "draft") throw new Error("profile.draft_required");
+  if (profile?.status !== "draft") throw new DomainError("profile.draft_required");
   const key = questionKey.trim();
   // I49-11: lista com item não primitivo é inválida (antes virava "[object Object]").
   let value: unknown;
-  try { value = factValue(answer); } catch { throw new Error("profile.interview.invalid"); }
+  try { value = factValue(answer); } catch { throw new DomainError("profile.interview.invalid"); }
   const normalizedAnswer = normalizeBlockerFact(key, value);
-  if (!key || key.length > 80 || normalizedAnswer == null || normalizedAnswer === "" || (Array.isArray(normalizedAnswer) && !normalizedAnswer.length)) throw new Error("profile.interview.invalid");
+  if (!key || key.length > 80 || normalizedAnswer == null || normalizedAnswer === "" || (Array.isArray(normalizedAnswer) && !normalizedAnswer.length)) throw new DomainError("profile.interview.invalid");
   const timestamp = now();
   const excerptText = factExcerpt(normalizedAnswer).slice(0, 200);
   let alreadyAnswered = false;

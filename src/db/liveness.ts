@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { LivenessResult } from "../liveness/types.js";
 import { descriptionFingerprint, findReposts, fingerprintText, repostBucket, type RepostCandidate } from "../repost.js";
 import { idFor, now } from "./util.js";
+import { DomainError } from "../errors.js";
 
 // Persistência da verificação de vaga aberta e da repostagem (#33), recebendo a conexão por
 // parâmetro (sem import circular com src/db.ts). O fechamento da vaga em si continua no
@@ -103,9 +104,9 @@ function livenessProofFresh(proofAt: string | null | undefined, nowMs = Date.now
  * (ver `livenessProofAt`). O dashboard usa a mesma prova (`liveness_proof_at` no bootstrap).
  */
 export function assertJobLivenessFresh(db: DatabaseSync, job: { id: string; opening_status?: string | null; opening_checked_at?: string | null; closed_at?: string | null } | null | undefined, nowMs = Date.now()) {
-  if (job?.opening_status !== "open" || job.closed_at) throw new Error("job.liveness.stale");
+  if (job?.opening_status !== "open" || job.closed_at) throw new DomainError("job.liveness.stale");
   if (livenessProofFresh(livenessProofAt(db, job.id), nowMs)) return;
-  throw new Error("job.liveness.stale");
+  throw new DomainError("job.liveness.stale");
 }
 
 /** Última verificação e repostagens por vaga, para enriquecer o bootstrap numa única leitura. */

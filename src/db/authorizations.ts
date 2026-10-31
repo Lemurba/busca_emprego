@@ -50,23 +50,23 @@ export function leaseExpiresAt(from = Date.now()) {
 }
 
 export function authorizeAutoApplication(id: string, resumeId: string, confirmation: string, actor = "user") {
-  if (confirmation !== "AUTORIZO") throw new Error("Confirme digitando AUTORIZO para esta vaga.");
+  if (confirmation !== "AUTORIZO") throw new DomainError("application.authorization.confirmation_required", 400);
   const application = db.prepare(`SELECT applications.*, resumes.status AS resume_status, resumes.version AS resume_version,
       jobs.status AS job_status, jobs.decision AS job_decision
     FROM applications
     JOIN resumes ON resumes.id = applications.resume_id
     JOIN jobs ON jobs.id = applications.job_id
     WHERE applications.id = ?`).get(id) as (Application & { resume_status: string; resume_version: number; job_status: string; job_decision: string }) | undefined;
-  if (!application) throw new Error("Candidatura ou currículo não encontrado.");
+  if (!application) throw new DomainError("application.not_found");
   assertJobNotArchived(application.job_id);
-  if (application.automation_mode === "authorized_auto" || application.auto_authorized_at) throw new Error("Esta candidatura já recebeu uma autorização automática.");
-  if (application.resume_id !== resumeId || application.authorized_resume_id && application.authorized_resume_id !== resumeId) throw new Error("A autorização precisa apontar para o currículo revisado desta vaga.");
-  if (application.resume_status !== "approved") throw new Error("Aprove o currículo antes de autorizar a candidatura.");
-  if (application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) throw new Error("Registre interesse e conclua a revisão do currículo antes de autorizar.");
-  if (!MODE_CHANGE_STATUSES.includes(application.status)) throw new Error("A candidatura não está aguardando autorização.");
+  if (application.automation_mode === "authorized_auto" || application.auto_authorized_at) throw new DomainError("application.authorization.already_granted", 400);
+  if (application.resume_id !== resumeId || application.authorized_resume_id && application.authorized_resume_id !== resumeId) throw new DomainError("application.authorization.resume_mismatch", 400);
+  if (application.resume_status !== "approved") throw new DomainError("application.authorization.resume_not_approved", 400);
+  if (application.job_decision !== "interested" || !["resume_approved", "ready_to_apply"].includes(application.job_status)) throw new DomainError("application.authorization.preconditions_unmet", 400);
+  if (!MODE_CHANGE_STATUSES.includes(application.status)) throw new DomainError("application.authorization.not_awaiting", 400);
   const timestamp = now();
   const job = getJob(application.job_id);
-  if (!job?.application_url?.trim()) throw new Error("application.url.required");
+  if (!job?.application_url?.trim()) throw new DomainError("application.url.required");
   const applicationUrl = canonicalizeJobUrl(job.application_url);
   if (!isHttpsUrl(applicationUrl)) throw new DomainError("application.url.insecure", 422);
   // #32: envio automático só em ATS de empresa (allowlist); LinkedIn e portais amplos são manuais.
@@ -85,7 +85,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   tx(() => {
     assertAutomationActive(db);
     const update = db.prepare("UPDATE applications SET status = CASE WHEN status = 'failed' THEN 'needs_review' ELSE status END, automation_mode = 'authorized_auto', auto_authorized_at = ?, authorized_resume_id = ?, authorized_resume_version = ?, authorization_id=?,expires_at=?, current_step = ?, updated_at = ? WHERE id = ? AND auto_authorized_at IS NULL AND status IN ('queued','needs_review','failed')").run(timestamp, resumeId, application.resume_version, authorizationId, expiresAt, "Autorizada pelo usuário; aguardando Browser Harness", timestamp, id);
-    if (!update.changes) throw new Error("application.authorization.race");
+    if (!update.changes) throw new DomainError("application.authorization.race");
     db.prepare(`INSERT INTO application_authorizations
       (id,application_id,job_id,resume_id,resume_version,application_url,application_url_hash,redirect_chain_hash,actor,issued_at,expires_at,nonce,state,signature)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'issued',?)`).run(authorizationId, id, application.job_id, resumeId, application.resume_version, applicationUrl, applicationUrlHash, null, actor, timestamp, expiresAt, nonce, signature);
@@ -99,7 +99,7 @@ export function revokeAutoApplication(id: string, actor = "user") {
   // vence e o claim encontra a autorização revogada, ou o claim vence e a revogação recebe 409.
   tx(() => {
     const application = db.prepare("SELECT id,status FROM applications WHERE id=?").get(id) as { id: string; status: string } | undefined;
-    if (!application) throw new Error("Candidatura não encontrada.");
+    if (!application) throw new DomainError("application.not_found");
     if (!MODE_CHANGE_STATUSES.includes(application.status)) throw applicationStateConflict("A autorização não pode ser revogada após o início do envio.", application.status);
     const updated = db.prepare(`UPDATE applications SET automation_mode = 'assisted', auto_authorized_at = NULL, authorized_resume_id = NULL, authorized_resume_version = NULL,
       authorization_id=NULL,expires_at=NULL, current_step = 'Autorização automática revogada', updated_at = ?
@@ -276,38 +276,38 @@ export function assertCurrentAuthorization(value: Record<string, unknown> | unde
     || value.application_resume_id !== value.resume_id || value.authorized_resume_id !== value.resume_id
     || Number(value.authorized_resume_version) !== Number(value.resume_version) || Number(value.current_resume_version) !== Number(value.resume_version)
     || value.current_resume_status !== "approved" || value.job_decision !== "interested" || !["resume_approved", "ready_to_apply", "applying"].includes(String(value.job_status))) {
-    throw new Error("application.authorization.unavailable");
+    throw new DomainError("application.authorization.unavailable");
   }
   const currentUrl = String(value.current_application_url ?? "").trim();
-  if (!currentUrl) throw new Error("application.authorization.unavailable");
+  if (!currentUrl) throw new DomainError("application.authorization.unavailable");
   const canonicalUrl = canonicalizeJobUrl(currentUrl);
   if (!isHttpsUrl(canonicalUrl)) throw new DomainError("application.url.insecure", 422);
   const currentHash = urlHash(canonicalUrl);
-  if (value.application_url !== canonicalUrl || value.application_url_hash !== currentHash) throw new Error("application.authorization.unavailable");
+  if (value.application_url !== canonicalUrl || value.application_url_hash !== currentHash) throw new DomainError("application.authorization.unavailable");
   return value;
 }
 
 export function claimAuthorizedApplication(applicationId: string, workerId: string, nonce: string) {
-  if (!workerId.trim()) throw new Error("application.worker.required");
-  if (!nonce.trim()) throw new Error("application.authorization.nonce.required");
+  if (!workerId.trim()) throw new DomainError("application.worker.required");
+  if (!nonce.trim()) throw new DomainError("application.authorization.nonce.required");
   expireAuthorizations();
   const timestamp = now();
   const lease = leaseExpiresAt();
   tx(() => {
     assertAutomationActive(db);
     const authorization = assertCurrentAuthorization(currentAuthorization(applicationId), "issued", timestamp);
-    if (authorization.nonce !== nonce) throw new Error("application.authorization.unavailable");
+    if (authorization.nonce !== nonce) throw new DomainError("application.authorization.unavailable");
     // #10: só vale autorização emitida pelo dashboard (assinatura HMAC com o segredo do processo).
-    if (!hasValidAuthorizationSignature(authorization)) throw new Error("application.authorization.unavailable");
+    if (!hasValidAuthorizationSignature(authorization)) throw new DomainError("application.authorization.unavailable");
     assertAtsUrl(db, authorization.application_url);
-    if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["queued", "needs_review"].includes(String(authorization.application_status))) throw new DomainError("application.authorization.unavailable");
     // Vaga excluída nunca é enviada, mesmo que uma autorização tenha escapado da revogação.
     assertJobNotArchived(String(authorization.job_id));
     const claimed = db.prepare(`UPDATE application_authorizations SET state='claimed',claimed_by=?,claimed_at=?,lease_expires_at=?,heartbeat_at=?
       WHERE id=? AND nonce=? AND state='issued' AND expires_at>?`).run(workerId.trim(), timestamp, lease, timestamp, String(authorization.id), nonce, timestamp);
-    if (!claimed.changes) throw new Error("application.authorization.unavailable");
+    if (!claimed.changes) throw new DomainError("application.authorization.unavailable");
     const updated = db.prepare("UPDATE applications SET status='in_progress',claimed_by=?,claimed_at=?,current_step='Execução autorizada iniciada',updated_at=? WHERE id=? AND authorization_id=? AND status IN ('queued','needs_review')").run(workerId.trim(), timestamp, timestamp, applicationId, String(authorization.id));
-    if (!updated.changes) throw new Error("application.authorization.unavailable");
+    if (!updated.changes) throw new DomainError("application.authorization.unavailable");
     // The claimed, current authorization is the precondition for ready_to_apply -> applying.
     advanceJobTo(String(authorization.job_id), "applying", { actor: `worker:${workerId.trim()}`, data: { reason: "authorized_execution_claimed" } });
   });
@@ -325,21 +325,21 @@ export function heartbeatAuthorizedApplication(id: string, workerId: string) {
   return tx(() => {
     const timestamp = now();
     const { authorization, worker } = claimedAuthorizationFor(id, workerId);
-    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new DomainError("application.authorization.unavailable");
     const lease = leaseExpiresAt();
     // A validade (lease, ou TTL durante a espera humana do #32) já foi conferida acima.
     const renewed = db.prepare(`UPDATE application_authorizations SET lease_expires_at=?,heartbeat_at=?
       WHERE id=? AND state='claimed' AND claimed_by=? AND MAX(expires_at, COALESCE(lease_expires_at, expires_at)) > ?`).run(lease, timestamp, String(authorization.id), worker, timestamp);
-    if (!renewed.changes) throw new Error("application.authorization.unavailable");
+    if (!renewed.changes) throw new DomainError("application.authorization.unavailable");
     return { application_id: id, authorization_valid: true, lease_expires_at: lease, heartbeat_at: timestamp };
   });
 }
 
 function claimedAuthorizationFor(id: string, workerId: string) {
   const worker = String(workerId ?? "").trim();
-  if (!worker) throw new Error("application.worker.required");
+  if (!worker) throw new DomainError("application.worker.required");
   const authorization = assertCurrentAuthorization(currentAuthorization(id), "claimed");
-  if (String(authorization.claimed_by ?? "") !== worker) throw new Error("application.claim.worker_mismatch");
+  if (String(authorization.claimed_by ?? "") !== worker) throw new DomainError("application.claim.worker_mismatch");
   return { authorization, worker };
 }
 
@@ -355,30 +355,30 @@ export function submitAuthorizedApplication(id: string, input: { worker_id: stri
   const timestamp = now();
   const limited = tx(() => {
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
-    if (authorization.application_status !== "in_progress") throw new Error("application.authorization.unavailable");
-    if (!evidenceRef) throw new Error("SUBMISSION_EVIDENCE_REQUIRED");
+    if (authorization.application_status !== "in_progress") throw new DomainError("application.authorization.unavailable");
+    if (!evidenceRef) throw new DomainError("SUBMISSION_EVIDENCE_REQUIRED");
     const hit = executor().checkFinalSubmit(id, authorization, input ?? {}, worker, timestamp);
     if (hit) return hit;
     const consumed = db.prepare("UPDATE application_authorizations SET state='consumed',consumed_at=?,evidence_ref=?,submit_token_hash=NULL WHERE id=? AND state='claimed' AND claimed_by=?").run(timestamp, evidenceRef.slice(0, 500), String(authorization.id), worker);
-    if (!consumed.changes) throw new Error("application.authorization.unavailable");
+    if (!consumed.changes) throw new DomainError("application.authorization.unavailable");
     db.prepare("UPDATE applications SET status='submitted',submitted_at=?,evidence_ref=?,current_step='Envio confirmado pelo portal',updated_at=? WHERE id=? AND status='in_progress'").run(timestamp, evidenceRef.slice(0, 500), timestamp, id);
     markJobApplied(String(authorization.job_id), timestamp, `worker:${worker}`, evidenceRef.slice(0, 500));
     audit("application", id, "submitted_authorized", { worker_id: worker, authorization_id: authorization.id, final_confirmation_by: authorization.final_confirmation_by ?? null });
     return null;
   });
   // O limite revoga a autorização (gravado acima); só então o envio é recusado.
-  if (limited) throw new Error("application.daily_limit_reached");
+  if (limited) throw new DomainError("application.daily_limit_reached");
   return getApplication(id);
 }
 
 /** C1 — records a sanitized failure of the claimed execution and hands the job back to human review. */
 export function failAuthorizedApplication(id: string, input: { worker_id: string; reason: string }) {
   const reason = String(input?.reason ?? "").normalize("NFKC").replace(/[^\p{L}\p{N} _.:,-]+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 120);
-  if (!reason) throw new Error("application.failure.reason_required");
+  if (!reason) throw new DomainError("application.failure.reason_required");
   const timestamp = now();
   tx(() => {
     const { authorization, worker } = claimedAuthorizationFor(id, String(input?.worker_id ?? ""));
-    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new Error("application.authorization.unavailable");
+    if (!["in_progress", "needs_review", "awaiting_final_confirmation"].includes(String(authorization.application_status))) throw new DomainError("application.authorization.unavailable");
     revokeAuthorizationRows(id, `execution_failed:${reason}`);
     db.prepare(`UPDATE applications SET status='failed',automation_mode='assisted',auto_authorized_at=NULL,authorized_resume_id=NULL,authorized_resume_version=NULL,
       authorization_id=NULL,expires_at=NULL,claimed_by=NULL,claimed_at=NULL,current_step=?,updated_at=? WHERE id=?`).run(`Falha no envio autorizado: ${reason}`, timestamp, id);

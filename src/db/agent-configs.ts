@@ -2,6 +2,7 @@ import { sha256Hex } from "../hash.js";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_AGENT_PROMPT } from "../agent-defaults.js";
 import { idFor, insertAuditEvent, now } from "./util.js";
+import { DomainError } from "../errors.js";
 
 // Regras de configuração de agentes recebendo a conexão por parâmetro, para que tanto
 // src/db.ts quanto as migrações (instalação dos agentes padrão no baseline) usem o mesmo
@@ -29,9 +30,9 @@ export const agentEditableJobFields = new Set([
 ]);
 
 function validatedStringArray(value: unknown, allowed: Set<string>, field: string) {
-  if (!Array.isArray(value)) throw new Error(`agent.${field}.invalid`);
+  if (!Array.isArray(value)) throw new DomainError(`agent.${field}.invalid`);
   const result = [...new Set(value.map(String))];
-  if (result.some((item) => !allowed.has(item))) throw new Error(`agent.${field}.forbidden`);
+  if (result.some((item) => !allowed.has(item))) throw new DomainError(`agent.${field}.forbidden`);
   return result;
 }
 
@@ -39,42 +40,42 @@ export function validateAgentConfigInput(input: Record<string, unknown>) {
   const name = String(input.name ?? "").trim();
   const description = String(input.description ?? "").trim();
   const roleType = String(input.role_type ?? "");
-  if (name.length < 3 || name.length > 100) throw new Error("agent.name.invalid");
-  if (description.length > 500) throw new Error("agent.description.too_long");
-  if (!agentRoles.has(roleType)) throw new Error("agent.role_type.invalid");
+  if (name.length < 3 || name.length > 100) throw new DomainError("agent.name.invalid");
+  if (description.length > 500) throw new DomainError("agent.description.too_long");
+  if (!agentRoles.has(roleType)) throw new DomainError("agent.role_type.invalid");
   const toolScopes = validatedStringArray(input.tool_scopes ?? [], safeAgentTools, "tool_scopes");
-  if (toolScopes.some((scope) => !roleAgentTools[roleType]?.has(scope))) throw new Error("agent.tool_scopes.role_forbidden");
+  if (toolScopes.some((scope) => !roleAgentTools[roleType]?.has(scope))) throw new DomainError("agent.tool_scopes.role_forbidden");
   const editableFields = validatedStringArray(input.editable_fields ?? [], agentEditableJobFields, "editable_fields");
   const sourceIds = Array.isArray(input.source_ids) ? [...new Set(input.source_ids.map((item) => String(item).trim()).filter(Boolean))] : [];
   const allowedDomains = Array.isArray(input.allowed_domains) ? [...new Set(input.allowed_domains.map((item) => String(item).trim().toLowerCase()).filter(Boolean))] : [];
-  if (allowedDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(domain))) throw new Error("agent.allowed_domains.invalid");
+  if (allowedDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(domain))) throw new DomainError("agent.allowed_domains.invalid");
   const browserEnabled = Boolean(input.browser_enabled);
   const canCreate = Boolean(input.can_create_jobs);
   const canEdit = Boolean(input.can_edit_jobs);
-  if (browserEnabled && !toolScopes.includes("browser.read")) throw new Error("agent.browser_scope.required");
-  if (browserEnabled && !allowedDomains.length) throw new Error("agent.allowed_domains.required");
-  if (canCreate && !toolScopes.includes("jobs.create")) throw new Error("agent.create_scope.required");
-  if (canEdit && (!toolScopes.includes("jobs.enrich") || !editableFields.length)) throw new Error("agent.edit_scope.required");
+  if (browserEnabled && !toolScopes.includes("browser.read")) throw new DomainError("agent.browser_scope.required");
+  if (browserEnabled && !allowedDomains.length) throw new DomainError("agent.allowed_domains.required");
+  if (canCreate && !toolScopes.includes("jobs.create")) throw new DomainError("agent.create_scope.required");
+  if (canEdit && (!toolScopes.includes("jobs.enrich") || !editableFields.length)) throw new DomainError("agent.edit_scope.required");
   const concurrency = Number(input.concurrency ?? 1);
   const timeoutSeconds = Number(input.timeout_seconds ?? 120);
-  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 20) throw new Error("agent.concurrency.invalid");
-  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 1800) throw new Error("agent.timeout.invalid");
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 20) throw new DomainError("agent.concurrency.invalid");
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 1800) throw new DomainError("agent.timeout.invalid");
   const prompt = String(input.prompt ?? "").trim();
-  if (prompt.length > 12_000) throw new Error("agent.prompt.too_long");
+  if (prompt.length > 12_000) throw new DomainError("agent.prompt.too_long");
   const memoryEnabled = input.memory_enabled !== false;
   const hermesPromptOptimization = Boolean(input.hermes_prompt_optimization);
   const modelId = input.model_id == null || input.model_id === "" ? null : String(input.model_id).trim();
   const reasoningEffort = input.reasoning_effort == null || input.reasoning_effort === "" ? null : String(input.reasoning_effort);
-  if (modelId && (modelId.length > 160 || !/^[A-Za-z0-9_.:/-]+$/u.test(modelId))) throw new Error("agent.model_id.invalid");
-  if (reasoningEffort && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoningEffort)) throw new Error("agent.reasoning_effort.invalid");
+  if (modelId && (modelId.length > 160 || !/^[A-Za-z0-9_.:/-]+$/u.test(modelId))) throw new DomainError("agent.model_id.invalid");
+  if (reasoningEffort && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoningEffort)) throw new DomainError("agent.reasoning_effort.invalid");
   const maxInputTokens = input.max_input_tokens == null ? null : Number(input.max_input_tokens);
   const maxOutputTokens = input.max_output_tokens == null ? null : Number(input.max_output_tokens);
   const maxCostPerRun = input.max_cost_per_run == null ? null : Number(input.max_cost_per_run);
-  if (maxInputTokens !== null && (!Number.isSafeInteger(maxInputTokens) || maxInputTokens < 1)) throw new Error("agent.max_input_tokens.invalid");
-  if (maxOutputTokens !== null && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1)) throw new Error("agent.max_output_tokens.invalid");
-  if (maxCostPerRun !== null && (!Number.isFinite(maxCostPerRun) || maxCostPerRun < 0)) throw new Error("agent.max_cost.invalid");
+  if (maxInputTokens !== null && (!Number.isSafeInteger(maxInputTokens) || maxInputTokens < 1)) throw new DomainError("agent.max_input_tokens.invalid");
+  if (maxOutputTokens !== null && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1)) throw new DomainError("agent.max_output_tokens.invalid");
+  if (maxCostPerRun !== null && (!Number.isFinite(maxCostPerRun) || maxCostPerRun < 0)) throw new DomainError("agent.max_cost.invalid");
   const fallbackPolicy = String(input.fallback_policy ?? "none");
-  if (!["none", "same_capability", "configured"].includes(fallbackPolicy)) throw new Error("agent.fallback_policy.invalid");
+  if (!["none", "same_capability", "configured"].includes(fallbackPolicy)) throw new DomainError("agent.fallback_policy.invalid");
   return { name, description, roleType, toolScopes, editableFields, sourceIds, allowedDomains, browserEnabled, canCreate, canEdit, concurrency, timeoutSeconds, prompt, memoryEnabled, hermesPromptOptimization, enabled: input.enabled === false ? 0 : 1, modelId, reasoningEffort, maxInputTokens, maxOutputTokens, maxCostPerRun, fallbackPolicy, structuredOutputRequired: input.structured_output_required !== false };
 }
 

@@ -1,3 +1,4 @@
+import { DomainError } from "./errors.js";
 /**
  * Eliminatórios ("hard blockers") — regras puras, sem banco nem I/O.
  *
@@ -73,7 +74,7 @@ function stringList(value: unknown): string[] {
 }
 
 function invalid(detail: string): never {
-  throw new Error(`job.requirements_json.invalid:${detail}`);
+  throw new DomainError(`job.requirements_json.invalid:${detail}`);
 }
 
 /**
@@ -141,26 +142,26 @@ export function normalizeBlockerFact(type: string, value: unknown): unknown {
   switch (type) {
     case "accepted_locations": {
       const list = stringList(value);
-      if (!list.length) throw new Error("profile.fact.invalid");
+      if (!list.length) throw new DomainError("profile.fact.invalid");
       return list;
     }
     case "work_models": {
       const models = [...new Set(stringList(value).map(normalizeWorkModel))];
-      if (!models.length || models.some((model) => model === null)) throw new Error("profile.fact.invalid");
+      if (!models.length || models.some((model) => model === null)) throw new DomainError("profile.fact.invalid");
       return models;
     }
     case "work_authorization": {
       let raw = value;
       if (typeof raw === "string") { try { raw = JSON.parse(raw); } catch { raw = { countries: raw }; } }
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("profile.fact.invalid");
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DomainError("profile.fact.invalid");
       const countries = stringList((raw as Record<string, unknown>).countries);
       const sponsorship = (raw as Record<string, unknown>).needs_sponsorship;
-      if (!countries.length || (sponsorship !== undefined && typeof sponsorship !== "boolean")) throw new Error("profile.fact.invalid");
+      if (!countries.length || (sponsorship !== undefined && typeof sponsorship !== "boolean")) throw new DomainError("profile.fact.invalid");
       return { countries, needs_sponsorship: sponsorship === true };
     }
     case "years_experience": {
       const years = Number(Array.isArray(value) ? value[0] : value);
-      if (!Number.isFinite(years) || years < 0 || years > 70) throw new Error("profile.fact.invalid");
+      if (!Number.isFinite(years) || years < 0 || years > 70) throw new DomainError("profile.fact.invalid");
       return years;
     }
     default:

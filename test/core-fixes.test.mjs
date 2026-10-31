@@ -176,7 +176,7 @@ describe("Core domain fixes (workflow, evidence, scores, dedupe, expiration, C1,
     assert.throws(() => store.upsertJob({ title: "Inválida", company: "X", source: "fixture", source_url: "https://jobs.example.test/x", latitude: 999, longitude: 0 }), /coordinates/);
     assert.equal(store.listJobs().length, jobs);
     const { job } = approvedJob();
-    assert.throws(() => store.createApplication({ job_id: job.id, resume_id: store.listResumes().find((item) => item.job_id === job.id).id }), /Já existe/);
+    assert.throws(() => store.createApplication({ job_id: job.id, resume_id: store.listResumes().find((item) => item.job_id === job.id).id }), /application\.already_exists/);
     assert.equal(store.listApplications().filter((item) => item.job_id === job.id).length, 1);
   });
 

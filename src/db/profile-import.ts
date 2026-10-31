@@ -7,6 +7,7 @@ import { experienceToWork, factsToJsonResume, type FactLike, type JsonResume, js
 import { isHeading } from "../resume-files.js";
 import type { Resume } from "../types.js";
 import { now } from "./util.js";
+import { DomainError } from "../errors.js";
 
 type Row = Record<string, unknown>;
 
@@ -168,8 +169,8 @@ const IMPORT_FACT_CONFIDENCE = 0.9;
  */
 export function jsonResumeImportFacts(input: unknown): Row[] {
   const result = validateJsonResume(input);
-  if (!result.ok) throw new Error(`profile.import.invalid:${result.issues[0]?.path ?? "/"}`);
+  if (!result.ok) throw new DomainError(`profile.import.invalid:${result.issues[0]?.path ?? "/"}`);
   const facts = jsonResumeToFacts(result.data);
-  if (!facts.length) throw new Error("profile.import.empty");
+  if (!facts.length) throw new DomainError("profile.import.empty");
   return facts.map((fact) => ({ type: fact.type, value: fact.value, evidence_excerpt: fact.evidence_excerpt, origin: "import", state: "proposed", confidence: IMPORT_FACT_CONFIDENCE }));
 }

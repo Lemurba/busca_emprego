@@ -6,6 +6,7 @@ import { executeWorkflowCommand, WorkflowError, type TransitionInput, type Trans
 import { audit, db, tx } from "./handle.js";
 import { assertCurrentAuthorization, currentAuthorization } from "./authorizations.js";
 import { assertJobNotArchived, getJob } from "./jobs.js";
+import { DomainError } from "../errors.js";
 
 // ---------------------------------------------------------------------------
 // Workflow: the single path for every write to jobs.status (SDD-WORKFLOW-001).
@@ -42,7 +43,7 @@ interface WorkflowContext {
  */
 function workflowFacts(jobId: string): Record<string, unknown> {
   const job = db.prepare("SELECT title,company,source,source_url,decision FROM jobs WHERE id=?").get(jobId) as Record<string, unknown> | undefined;
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   const score = db.prepare("SELECT score_final,coverage_percent FROM match_scores WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId) as { score_final: number; coverage_percent: number } | undefined;
   const resume = db.prepare("SELECT id,base_resume_id FROM resumes WHERE job_id=? AND status<>'superseded' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get(jobId) as { id: string; base_resume_id: string | null } | undefined;
   const approved = db.prepare("SELECT id FROM resumes WHERE job_id=? AND status='approved' LIMIT 1").get(jobId);
@@ -81,7 +82,7 @@ function workflowFacts(jobId: string): Record<string, unknown> {
 export function applyWorkflowCommand(jobId: string, command: WorkflowCommand, ctx: WorkflowContext): TransitionResult {
   return tx(() => {
     const row = db.prepare("SELECT status,version,workflow_cycle FROM jobs WHERE id=?").get(jobId) as { status: JobStatus; version: number; workflow_cycle: number } | undefined;
-    if (!row) throw new Error("job.not_found");
+    if (!row) throw new DomainError("job.not_found");
     const version = Number(row.version ?? 0);
     const data = { ...(ctx.data ?? {}), ...workflowFacts(jobId) };
     const result = executeWorkflowCommand({ status: row.status, version, cycle: Number(row.workflow_cycle ?? 1) }, {
@@ -109,7 +110,7 @@ export function advanceJobTo(jobId: string, target: JobStatus, ctx: WorkflowCont
     const results: TransitionResult[] = [];
     for (let step = 0; step < 16; step += 1) {
       const row = db.prepare("SELECT status FROM jobs WHERE id=?").get(jobId) as { status: JobStatus } | undefined;
-      if (!row) throw new Error("job.not_found");
+      if (!row) throw new DomainError("job.not_found");
       const status = row.status;
       if (status === target || STATUS_RANK[status] >= STATUS_RANK[target]) return results;
       if (STATUS_RANK[status] < 0) throw new WorkflowError("ILLEGAL_TRANSITION", 409, "Reabra a vaga antes de continuar o fluxo.", { from_status: status, target });
@@ -139,7 +140,7 @@ export function abortApplyingJob(jobId: string, reason: string, actor: string) {
  */
 export function transitionJob(id: string, input: TransitionInput) {
   assertJobNotArchived(id);
-  if (!getJob(id)) throw new Error("job.not_found");
+  if (!getJob(id)) throw new DomainError("job.not_found");
   if (INTERNAL_ONLY_COMMANDS.has(input.command)) {
     throw new WorkflowError("ILLEGAL_TRANSITION", 409, "Comando reservado ao fluxo interno.", { command: input.command });
   }

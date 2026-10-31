@@ -8,6 +8,7 @@ import { feedbackFacetValue } from "./preferences.js";
 import { getJob } from "./jobs.js";
 import { getLatestProfileSnapshot } from "./profiles.js";
 import { json } from "./ingestion.js";
+import { DomainError } from "../errors.js";
 
 /**
  * I49-09: a nota de aderência sempre se refere a um snapshot de perfil confirmado do projeto.
@@ -24,22 +25,22 @@ function resolveScoreSnapshot(snapshotId: string | null | undefined, roundId: st
   let resolved = requested;
   if (round) {
     const row = db.prepare("SELECT profile_snapshot_id FROM search_rounds WHERE id=? AND project_id=?").get(round, projectId) as { profile_snapshot_id: string } | undefined;
-    if (!row) throw new Error("round.not_found");
-    if (requested && requested !== row.profile_snapshot_id) throw new Error("PROFILE_SNAPSHOT_INVALID");
+    if (!row) throw new DomainError("round.not_found");
+    if (requested && requested !== row.profile_snapshot_id) throw new DomainError("PROFILE_SNAPSHOT_INVALID");
     resolved = row.profile_snapshot_id;
   }
   if (!resolved) {
-    if (!activeId) throw new Error("PROFILE_SNAPSHOT_REQUIRED");
+    if (!activeId) throw new DomainError("PROFILE_SNAPSHOT_REQUIRED");
     return { snapshotId: String(activeId), roundId: round, active: true };
   }
   const row = db.prepare("SELECT s.id FROM profile_snapshots s JOIN professional_profiles p ON p.id=s.profile_id WHERE s.id=? AND p.project_id=?").get(resolved, projectId);
-  if (!row) throw new Error("PROFILE_SNAPSHOT_INVALID");
+  if (!row) throw new DomainError("PROFILE_SNAPSHOT_INVALID");
   return { snapshotId: resolved, roundId: round, active: resolved === activeId };
 }
 
 export function recordMatchScore(input: { job_id: string; scores: Record<string, unknown>; profile_snapshot_id?: string | null; round_id?: string | null; evidence?: unknown[]; strengths?: string[]; gaps?: string[]; project_id?: string }) {
   const job = getJob(input.job_id);
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   const projectId = input.project_id ?? storeProjectId();
   const { snapshotId, roundId, active } = resolveScoreSnapshot(input.profile_snapshot_id, input.round_id, projectId);
   // Critério = número (legado, "estimado") ou {value, basis, evidence}; a conta não muda.

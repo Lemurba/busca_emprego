@@ -28,7 +28,7 @@ export function listAgentConfigs(projectId = storeProjectId()): AgentConfig[] {
 }
 
 export function listAgentConfigVersions(agentId: string, projectId = storeProjectId()) {
-  if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new Error("agent.not_found");
+  if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new DomainError("agent.not_found");
   // Versão com proposta registrada (`prompt_proposed`) é do coordenador, qualquer que seja o ator.
   const proposed = new Set((db.prepare("SELECT payload FROM audit_events WHERE entity_type='agent_config' AND entity_id=? AND event_type='prompt_proposed'").all(agentId) as { payload: string }[])
     .map((row) => String((JSON.parse(row.payload) as Record<string, unknown>).version_id ?? "")));
@@ -94,10 +94,10 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
   if (agentId && enforceLimits) expireTimedOutAgentRuns();
   const current = input.id && agentId && enforceLimits ? db.prepare("SELECT status,message FROM agent_runs WHERE id=?").get(input.id) as { status: string; message: string } | undefined : existing;
   if (current?.status === "failed" && String(current.message ?? "").startsWith(RUN_LIMIT_PREFIX)) {
-    throw new Error(String(current.message).includes("tempo limite") ? "agent.run.timeout" : "agent.run.aborted");
+    throw new DomainError(String(current.message).includes("tempo limite") ? "agent.run.timeout" : "agent.run.aborted");
   }
   // Execução encerrada não volta a `running`: reabrir driblaria a concorrência e o tempo limite.
-  if (current && current.status !== "running" && input.status === "running") throw new Error("agent.run.not_reopenable");
+  if (current && current.status !== "running" && input.status === "running") throw new DomainError("agent.run.not_reopenable");
   let versionId = input.config_version_id ?? null;
   let snapshot = input.config_snapshot ?? null;
   // Uma execução em curso continua com a versão com que começou (republicar não muda os limites dela).
@@ -107,7 +107,7 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
   }
   if (agentId && (!versionId || !snapshot)) {
     const version = publishedVersion(agentId);
-    if (!version) throw new Error("agent.published_version.required");
+    if (!version) throw new DomainError("agent.published_version.required");
     versionId = version.id;
     snapshot = version.snapshot;
   }
@@ -116,7 +116,7 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     const running = Number((db.prepare("SELECT COUNT(*) AS total FROM agent_runs WHERE agent_id=? AND status='running' AND id<>?").get(agentId!, id) as { total: number }).total);
     if (running >= limits.concurrency) {
       audit("agent_run", id, "rejected", { limit: "concurrency", agent_id: agentId, running, concurrency: limits.concurrency });
-      throw new Error("agent.run.concurrency_exceeded");
+      throw new DomainError("agent.run.concurrency_exceeded");
     }
   }
   // Execução nova não começa no futuro (fugiria do tempo limite); início inválido vira agora.
@@ -145,7 +145,7 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
   audit("agent_run", id, "status", { status, found_count: input.found_count ?? 0, agent_id: agentId, config_version_id: versionId });
   if (violation) {
     audit("agent_run", id, "limit_exceeded", { limit: violation.code, agent_id: agentId, detail: violation.detail });
-    throw new Error(violation.code);
+    throw new DomainError(violation.code);
   }
   return getAgentRun(id);
 }
@@ -156,7 +156,7 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
  */
 export function recordAgentRunForAgent(agentId: string, input: Omit<Partial<AgentRun>, "agent_id" | "agent_name"> & { status: AgentRun["status"] }, projectId = storeProjectId()) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
-  if (!agent) throw new Error("agent.not_found");
+  if (!agent) throw new DomainError("agent.not_found");
   const existing = input.id ? db.prepare("SELECT agent_id FROM agent_runs WHERE id=?").get(input.id) as { agent_id: string | null } | undefined : undefined;
   if (existing && existing.agent_id !== agentId) throw new DomainError("agent_run.agent_mismatch", 409);
   return recordAgentRun({ ...input, agent_id: agentId, agent_name: agent.name });
@@ -165,7 +165,7 @@ export function recordAgentRunForAgent(agentId: string, input: Omit<Partial<Agen
 /** Host igual a um domínio permitido do agente ou subdomínio dele (regra única: `agentUrlAllowed`). */
 export function assertAgentUrlAllowed(agent: Pick<AgentConfig, "allowed_domains">, value: unknown) {
   if (!value) return;
-  if (!agentUrlAllowed(agent.allowed_domains, String(value))) throw new Error("agent.domain.forbidden");
+  if (!agentUrlAllowed(agent.allowed_domains, String(value))) throw new DomainError("agent.domain.forbidden");
 }
 
 /**
@@ -199,7 +199,7 @@ export function publishedAgentConfig(agentId: string, projectId: string): AgentC
 /** Agente vivo e o snapshot publicado (null sem publicação): base do portão de agente do MCP (#10). */
 export function getPublishedAgentConfig(agentId: string, projectId = storeProjectId()) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
-  if (!agent) throw new Error("agent.not_found");
+  if (!agent) throw new DomainError("agent.not_found");
   return { agent, published: publishedAgentConfig(agentId, projectId) };
 }
 
@@ -225,7 +225,7 @@ export function createAgentConfig(input: Record<string, unknown>, actor: string,
  */
 export function updateAgentConfig(id: string, input: Record<string, unknown>, actor: string, projectId = storeProjectId()) {
   const current = listAgentConfigs(projectId).find((agent) => agent.id === id);
-  if (!current) throw new Error("agent.not_found");
+  if (!current) throw new DomainError("agent.not_found");
   const merged = { ...current, ...input } as unknown as Record<string, unknown>;
   const values = validateAgentConfigInput(merged);
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(id) as { version: number }).version);
@@ -264,7 +264,7 @@ export function agentVersionOrigin(createdBy: string): "human" | "coordinator" |
 export function getAgentVersionDiff(agentId: string, versionId: string, projectId = storeProjectId()) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
-  if (!agent || !version) throw new Error("agent.version.not_found");
+  if (!agent || !version) throw new DomainError("agent.version.not_found");
   const published = agent.published_version_id
     ? db.prepare("SELECT id,version,config_json FROM agent_config_versions WHERE id=?").get(agent.published_version_id) as { id: string; version: number; config_json: string } | undefined
     : undefined;
@@ -301,12 +301,12 @@ export function publishAgentConfigVersion(agentId: string, versionId: string, ac
 function publishAgentVersion(agentId: string, versionId: string, actor: string, projectId: string, reviewedChecksum: string | undefined, restoring: boolean) {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   const version = db.prepare("SELECT * FROM agent_config_versions WHERE id=? AND agent_id=?").get(versionId, agentId) as Record<string, unknown> | undefined;
-  if (!agent || !version) throw new Error("agent.version.not_found");
-  if (version.status !== "draft") throw new Error("agent.version.not_draft");
+  if (!agent || !version) throw new DomainError("agent.version.not_found");
+  if (version.status !== "draft") throw new DomainError("agent.version.not_draft");
   // Só o rascunho atual é publicável: se chegou outro (edição ou proposta) depois da revisão,
   // publicar o antigo esconderia o mais novo sem que ninguém o revisasse.
-  if (!restoring && agent.draft_version_id !== versionId) throw new Error("agent.version.stale");
-  if (reviewedChecksum ? reviewedChecksum !== version.checksum : agentVersionOrigin(String(version.created_by)) !== "human") throw new Error("agent.version.review_required");
+  if (!restoring && agent.draft_version_id !== versionId) throw new DomainError("agent.version.stale");
+  if (reviewedChecksum ? reviewedChecksum !== version.checksum : agentVersionOrigin(String(version.created_by)) !== "human") throw new DomainError("agent.version.review_required");
   const snapshot = JSON.parse(String(version.config_json)) as Record<string, unknown>;
   const values = validateAgentConfigInput(snapshot);
   const timestamp = now();
@@ -322,10 +322,10 @@ function publishAgentVersion(agentId: string, versionId: string, actor: string, 
 
 export function rollbackAgentConfig(agentId: string, targetVersionId: string, actor: string, projectId = storeProjectId()) {
   const target = db.prepare("SELECT config_json,version,published_at FROM agent_config_versions WHERE id=? AND agent_id=?").get(targetVersionId, agentId) as { config_json: string; version: number; published_at: string | null } | undefined;
-  if (!target || !listAgentConfigs(projectId).some((item) => item.id === agentId)) throw new Error("agent.version.not_found");
+  if (!target || !listAgentConfigs(projectId).some((item) => item.id === agentId)) throw new DomainError("agent.version.not_found");
   // Restaurar só vale para versões que já estiveram publicadas: rascunho (ou proposta descartada)
   // passa pela revisão do diff, não por aqui.
-  if (!target.published_at) throw new Error("agent.version.not_restorable");
+  if (!target.published_at) throw new DomainError("agent.version.not_restorable");
   const values = validateAgentConfigInput(JSON.parse(target.config_json));
   const nextVersion = Number((db.prepare("SELECT COALESCE(MAX(version),0)+1 AS version FROM agent_config_versions WHERE agent_id=?").get(agentId) as { version: number }).version);
   const versionId = insertAgentVersion(db, agentId, nextVersion, "draft", values, actor);
@@ -339,12 +339,12 @@ export function rollbackAgentConfig(agentId: string, targetVersionId: string, ac
 /** Proposta de prompt do coordenador: vira rascunho com origem `coordinator`; só vale após revisão e publicação humana. */
 export function proposeAgentPrompt(agentId: string, input: Record<string, unknown>, projectId = storeProjectId(), actor = "hermes-memory") {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
-  if (!agent) throw new Error("agent.not_found");
-  if (!agent.hermes_prompt_optimization) throw new Error("agent.prompt_optimization.disabled");
+  if (!agent) throw new DomainError("agent.not_found");
+  if (!agent.hermes_prompt_optimization) throw new DomainError("agent.prompt_optimization.disabled");
   const reason = String(input.reason ?? "").trim();
-  if (reason.length < 10 || reason.length > 1000) throw new Error("agent.prompt_optimization.reason.invalid");
+  if (reason.length < 10 || reason.length > 1000) throw new DomainError("agent.prompt_optimization.reason.invalid");
   const prompt = String(input.prompt ?? "").trim();
-  if (!prompt || prompt === agent.prompt) throw new Error("agent.prompt_optimization.prompt.invalid");
+  if (!prompt || prompt === agent.prompt) throw new DomainError("agent.prompt_optimization.prompt.invalid");
   const result = updateAgentConfig(agentId, { prompt }, actor, projectId);
   const draft = result?.draft_version_id ? db.prepare("SELECT version FROM agent_config_versions WHERE id=?").get(result.draft_version_id) as { version: number } | undefined : undefined;
   audit("agent_config", agentId, "prompt_proposed", { actor, reason, version_id: result?.draft_version_id ?? null, version: draft ? Number(draft.version) : null });
@@ -354,16 +354,16 @@ export function proposeAgentPrompt(agentId: string, input: Record<string, unknow
 /** Descarta um rascunho (ex.: proposta do coordenador recusada): a versão fica `retired` no histórico. */
 export function discardAgentDraft(agentId: string, versionId: string, actor: string, projectId = storeProjectId()) {
   const result = db.prepare("UPDATE agent_config_versions SET status='retired' WHERE id=? AND agent_id=? AND status='draft' AND agent_id IN (SELECT id FROM agent_configs WHERE project_id=?)").run(versionId, agentId, projectId);
-  if (!result.changes) throw new Error("agent.version.not_draft");
+  if (!result.changes) throw new DomainError("agent.version.not_draft");
   db.prepare("UPDATE agent_configs SET draft_version_id=NULL,updated_at=? WHERE id=? AND draft_version_id=?").run(now(), agentId, versionId);
   audit("agent_config", agentId, "draft_discarded", { actor, version_id: versionId });
   return listAgentConfigs(projectId).find((item) => item.id === agentId) ?? null;
 }
 
 export function deleteAgentConfig(id: string, actor: string, projectId = storeProjectId()) {
-  if (db.prepare("SELECT id FROM job_enrichment_events WHERE agent_id=? LIMIT 1").get(id)) throw new Error("agent.has_history.disable_instead");
+  if (db.prepare("SELECT id FROM job_enrichment_events WHERE agent_id=? LIMIT 1").get(id)) throw new DomainError("agent.has_history.disable_instead");
   const result = db.prepare("DELETE FROM agent_configs WHERE id=? AND project_id=?").run(id, projectId);
-  if (!result.changes) throw new Error("agent.not_found");
+  if (!result.changes) throw new DomainError("agent.not_found");
   audit("agent_config", id, "deleted", { actor });
   return { deleted: true };
 }

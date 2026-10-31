@@ -15,6 +15,7 @@ import { ConnectorBudgetError, ConnectorHttpClient, type ConnectorHttpOptions } 
 import { connectorById } from "./sources.js";
 import { listConnectorCompanies, queueLlmEnrichment, recordConnectorCompanyRun, type ConnectorCompany } from "./store.js";
 import type { ConnectorItem } from "./types.js";
+import { DomainError } from "../errors.js";
 
 const CONNECTOR_BATCH_SIZE = 25;
 
@@ -52,8 +53,8 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
 function publishedAgentLimits(agentId: string, projectId: string) {
   // TD-11: a mesma versão publicada que o MCP e as execuções de agente enxergam (getPublishedAgentConfig).
   const published = listAgentConfigs(projectId).some((item) => item.id === agentId) ? getPublishedAgentConfig(agentId, projectId).published : null;
-  if (!published) throw new Error("agent.published_version.required");
-  if (!published.enabled) throw new Error("agent.disabled");
+  if (!published) throw new DomainError("agent.published_version.required");
+  if (!published.enabled) throw new DomainError("agent.disabled");
   return { concurrency: published.concurrency, timeout_seconds: published.timeout_seconds, max_cost_per_run: published.max_cost_per_run };
 }
 
@@ -61,9 +62,9 @@ export function resolveConnectorLimits(options: ConnectorRunOptions = {}): Conne
   const agent = options.agentId ? publishedAgentLimits(options.agentId, options.projectId ?? storeProjectId()) : {} as Record<string, unknown>;
   const env = process.env;
   const maxCost = options.maxCostPerRun !== undefined ? options.maxCostPerRun : agent.max_cost_per_run != null ? Number(agent.max_cost_per_run) : env.RADAR_CONNECTOR_MAX_COST ? Number(env.RADAR_CONNECTOR_MAX_COST) : null;
-  if (maxCost != null && (!Number.isFinite(maxCost) || maxCost < 0)) throw new Error("connector.max_cost.invalid");
+  if (maxCost != null && (!Number.isFinite(maxCost) || maxCost < 0)) throw new DomainError("connector.max_cost.invalid");
   const costPerRequest = Number(options.costPerRequest ?? env.RADAR_CONNECTOR_COST_PER_REQUEST ?? 0);
-  if (!Number.isFinite(costPerRequest) || costPerRequest < 0) throw new Error("connector.cost_per_request.invalid");
+  if (!Number.isFinite(costPerRequest) || costPerRequest < 0) throw new DomainError("connector.cost_per_request.invalid");
   return {
     concurrency: clampInteger(options.concurrency ?? agent.concurrency ?? env.RADAR_CONNECTOR_CONCURRENCY, 4, 1, 20),
     timeout_seconds: clampInteger(options.timeoutSeconds ?? agent.timeout_seconds ?? env.RADAR_CONNECTOR_TIMEOUT_SECONDS, 600, 1, 3600),
@@ -262,9 +263,9 @@ export async function smokeTestConnectors(options: ConnectorRunOptions = {}) {
  */
 export async function smokeTestSource(sourceId: string, options: ConnectorRunOptions = {}) {
   const projectId = options.projectId ?? storeProjectId();
-  if (!listSourceConfigs(projectId).some((source) => source.id === sourceId)) throw new Error("source.not_found");
-  if (!connectorById(sourceId)) throw new Error("source.smoke_test.manual_only");
+  if (!listSourceConfigs(projectId).some((source) => source.id === sourceId)) throw new DomainError("source.not_found");
+  if (!connectorById(sourceId)) throw new DomainError("source.smoke_test.manual_only");
   const [result] = await smokeTestConnectors({ ...options, connectors: [sourceId] });
-  if (!result) throw new Error("source.smoke_test.company_required");
+  if (!result) throw new DomainError("source.smoke_test.company_required");
   return { result, source: listSourceConfigsWithReadiness(projectId).find((source) => source.id === sourceId) ?? null };
 }

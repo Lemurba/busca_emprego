@@ -76,7 +76,7 @@ export class WorkflowError extends DomainError {
     message: string,
     details: Readonly<Record<string, unknown>> = {},
   ) {
-    super(code, httpStatus, details, message);
+    super(code, httpStatus, message, details);
     this.name = "WorkflowError";
   }
 

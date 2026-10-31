@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements } from "../src/blockers.ts";
+import { DomainError } from "../src/errors.ts";
 import { COVERAGE_WEIGHTS, computeCoverage, extractJobKeywords } from "../src/coverage.ts";
 import { DEFAULT_AGENT_PRESETS } from "../src/agent-defaults.ts";
 import { openDb } from "../src/db/connection.ts";
@@ -153,7 +154,7 @@ describe("teste de leitura do PDF", () => {
     assert.equal(reviewed.review_findings[0], "pdf.parse_failed");
     assert.equal(reviewed.parse_check.ok, false);
     assert.throws(() => store.approveResume(noContact.id, "APROVO", { override_reason: "Aprovo mesmo assim, revisei manualmente." }), /resume\.pdf_parse_failed/u);
-    assert.equal(errorResponse(new Error("resume.pdf_parse_failed")).status, 409);
+    assert.equal(errorResponse(new DomainError("resume.pdf_parse_failed")).status, 409);
 
     // Corrigir o conteúdo invalida o teste anterior (stale) e o novo teste libera.
     store.updateResume(noContact.id, { content: "Contato\nana.souza@example.com\nExperiência\nBackend em Node.js e PostgreSQL" });

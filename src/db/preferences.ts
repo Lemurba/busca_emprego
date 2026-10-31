@@ -8,6 +8,7 @@ import { ACTIVE_STATUSES, applyWorkflowCommand } from "./job-workflow.js";
 import { assertJobNotArchived, getJob, listSuppressedJobs } from "./jobs.js";
 import { mapJob } from "./mappers.js";
 import { withdrawPendingAuthorizations } from "./authorizations.js";
+import { DomainError } from "../errors.js";
 
 type SuppressionRule = { id: string; match_json: string };
 
@@ -98,16 +99,16 @@ export function recordJobFeedback(jobId: string, input: Record<string, unknown>,
   const detailKey = String(input.detail_key ?? "");
   const explanation = String(input.explanation ?? "").trim();
   const confirmation = String(input.confirmation ?? "");
-  if (!feedbackDetailByReason[reasonCode]) throw new Error("feedback.reason_code.invalid");
-  if (!detailKey || !feedbackDetailByReason[reasonCode].has(detailKey)) throw new Error("feedback.detail_key.incompatible");
-  if (explanation.length < 10 || explanation.length > 500) throw new Error("feedback.explanation.length");
-  if (mode === "total" && confirmation !== "SEM INTERESSE") throw new Error("feedback.confirmation.total");
-  if (mode === "partial" && confirmation !== "REJEITAR PARCIALMENTE") throw new Error("feedback.confirmation.partial");
-  if (!['total', 'partial'].includes(mode)) throw new Error("feedback.mode.invalid");
+  if (!feedbackDetailByReason[reasonCode]) throw new DomainError("feedback.reason_code.invalid");
+  if (!detailKey || !feedbackDetailByReason[reasonCode].has(detailKey)) throw new DomainError("feedback.detail_key.incompatible");
+  if (explanation.length < 10 || explanation.length > 500) throw new DomainError("feedback.explanation.length");
+  if (mode === "total" && confirmation !== "SEM INTERESSE") throw new DomainError("feedback.confirmation.total");
+  if (mode === "partial" && confirmation !== "REJEITAR PARCIALMENTE") throw new DomainError("feedback.confirmation.partial");
+  if (!['total', 'partial'].includes(mode)) throw new DomainError("feedback.mode.invalid");
   const job = getJob(jobId);
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(jobId) as { status: string } | undefined;
-  if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new Error("A rejeição não pode ser registrada enquanto a candidatura está em andamento ou já foi enviada.");
+  if (activeApplication && ["in_progress", "awaiting_final_confirmation", "submitted", "accepted", "rejected"].includes(activeApplication.status)) throw new DomainError("feedback.application_locked", 400);
   const timestamp = now();
   const id = idFor(`feedback|${jobId}|${timestamp}|${mode}|${reasonCode}|${detailKey}`);
   const cycle = Number((db.prepare("SELECT COALESCE(MAX(cycle),0)+1 AS cycle FROM job_feedback_events WHERE job_id = ?").get(jobId) as { cycle: number }).cycle);
@@ -164,11 +165,11 @@ export function listPreferenceState(projectId = storeProjectId()) {
 }
 
 export function setPreferenceRuleState(id: string, state: string) {
-  if (!['active', 'paused'].includes(state)) throw new Error("preference_rule.state.invalid");
+  if (!['active', 'paused'].includes(state)) throw new DomainError("preference_rule.state.invalid");
   const rule = db.prepare("SELECT project_id,state FROM preference_rules WHERE id=?").get(id) as { project_id: string; state: string } | undefined;
-  if (!rule) throw new Error("preference_rule.not_found");
+  if (!rule) throw new DomainError("preference_rule.not_found");
   // Uma regra desfeita junto com o feedback de origem não volta a valer por aqui.
-  if (rule.state === "undone") throw new Error("preference_rule.undone");
+  if (rule.state === "undone") throw new DomainError("preference_rule.undone");
   tx(() => {
     db.prepare("UPDATE preference_rules SET state=?,updated_at=? WHERE id=?").run(state, now(), id);
     if (state === "paused") refreshSuppression(rule.project_id);
@@ -220,7 +221,7 @@ function undoFeedbackRows(feedback: { id: string; project_id: string; mode: stri
 export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {}, actor = "user") {
   assertJobNotArchived(id);
   const job = getJob(id);
-  if (!job) throw new Error("job.not_found");
+  if (!job) throw new DomainError("job.not_found");
   const projectId = job.project_id ?? storeProjectId();
   const timestamp = now();
   const activeApplication = db.prepare("SELECT status FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1").get(id) as { status: string } | undefined;
@@ -229,8 +230,8 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
 
   if (input.feedback_id) {
     const feedback = db.prepare("SELECT id,project_id,mode,detail_key,job_id,facet_value FROM job_feedback_events WHERE id=? AND job_id=? AND undone_at IS NULL").get(String(input.feedback_id), id) as FeedbackRow | undefined;
-    if (!feedback) throw new Error("decision.undo.feedback_not_found");
-    if (feedback.mode !== "partial") throw new Error("decision.undo.use_current_decision");
+    if (!feedback) throw new DomainError("decision.undo.feedback_not_found");
+    if (feedback.mode !== "partial") throw new DomainError("decision.undo.use_current_decision");
     tx(() => {
       undoFeedbackRows(feedback, job, timestamp);
       audit("job", id, "feedback_undone", { feedback_id: feedback.id, actor });
@@ -239,8 +240,8 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   }
 
   const decision = job.decision;
-  if (decision === "pending") throw new Error("decision.undo.nothing_to_undo");
-  if (locked) throw new Error("decision.undo.application_locked");
+  if (decision === "pending") throw new DomainError("decision.undo.nothing_to_undo");
+  if (locked) throw new DomainError("decision.undo.application_locked");
 
   if (decision === "not_interested") {
     const feedback = db.prepare("SELECT id,project_id,mode,detail_key,job_id,facet_value FROM job_feedback_events WHERE job_id=? AND mode='total' AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1").get(id) as FeedbackRow | undefined;
@@ -256,7 +257,7 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
 
   if (decision === "interested") {
     const hasResume = db.prepare("SELECT id FROM resumes WHERE job_id=? LIMIT 1").get(id);
-    if (hasResume || activeApplication) throw new Error("decision.undo.interest_has_progress");
+    if (hasResume || activeApplication) throw new DomainError("decision.undo.interest_has_progress");
     tx(() => {
       if (job.status === "selected") applyWorkflowCommand(id, "withdraw_interest", { actor, data: { reason: "decision_undone" } });
       db.prepare("UPDATE jobs SET decision='pending', decision_at=?, updated_at=? WHERE id=?").run(timestamp, timestamp, id);
@@ -277,7 +278,7 @@ export function undoJobDecision(id: string, input: { feedback_id?: unknown } = {
   }
 
   // Só "sem tempo" volta direto; "expired"/"applied" refletem o estado da vaga e não são desfeitos.
-  if (decision !== "no_time") throw new Error("decision.undo.not_undoable");
+  if (decision !== "no_time") throw new DomainError("decision.undo.not_undoable");
   tx(() => {
     db.prepare("UPDATE jobs SET decision='pending', decision_at=?, updated_at=? WHERE id=?").run(timestamp, timestamp, id);
     audit("job", id, "decision_undone", { previous: decision, actor });
