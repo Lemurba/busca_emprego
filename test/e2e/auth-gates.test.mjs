@@ -343,7 +343,7 @@ try {
 
       // Atrás do proxy TLS, o MCP sem RADAR_FORWARDED_PROTO=https recebe 426 em toda ferramenta
       // (por isso o env de cada servidor MCP repassa a variável); referência não resolvida é ignorada.
-      for (const proto of [undefined, "$\{env:RADAR_FORWARDED_PROTO}"]) {
+      for (const proto of [undefined, `$\{env:RADAR_FORWARDED_PROTO}`]) {
         if (proto === undefined) delete process.env.RADAR_FORWARDED_PROTO;
         else process.env.RADAR_FORWARDED_PROTO = proto;
         const plain = createRadarMcpServer({ role: "leitura" });
