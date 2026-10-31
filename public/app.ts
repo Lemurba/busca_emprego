@@ -875,6 +875,12 @@ const errorMessages: Record<string, string> = {
   "resume.fact.stale": "O currículo mudou desde a checagem. Atualize e tente de novo.",
   "resume.fact.replacement_required": "Informe o texto correto (até 500 caracteres).",
   "resume.fact.already_resolved": "Esse fato já foi resolvido.",
+  "resume.superseded": "Este rascunho foi substituído por um currículo gerado depois. Atualize a página.",
+  "base_resume.required": "Envie e selecione o currículo-base em PDF (Currículos) antes de gerar o currículo ATS.",
+  BASE_RESUME_EXTRACTION_REQUIRED: "O texto do currículo-base ainda não foi extraído. Envie o PDF de novo ou escolha outro currículo-base.",
+  ATS_BASE_RESUME_MISMATCH: "O perfil confirmado veio de outro currículo-base. Selecione o PDF de origem do perfil em Currículos.",
+  ATS_CONFIRMED_FACTS_REQUIRED: "O perfil confirmado não tem informações para o currículo. Revise o perfil antes de gerar.",
+  ATS_FACT_UNCONFIRMED: "Uma informação do perfil deixou de estar confirmada. Atualize a página e gere de novo.",
   "application.internal_route_required": "Envios automáticos só podem ser registrados pelo executor autorizado, não pelo dashboard.",
   "application.claim.worker_mismatch": "Esta candidatura está reservada por outro executor.",
   "application.url_mismatch": "A página da candidatura não corresponde à URL autorizada. Revise e autorize de novo.",
@@ -1352,10 +1358,14 @@ function showJobDetail(id: string) {
       primary = "";
     } else if (job.decision !== "interested") {
       primary = `<button class="primary-button" data-action="mark-interested" data-job-id="${escapeHtml(job.id)}">Tenho interesse</button>`;
+    } else if (!resume && !profileSnapshot(data)) {
+      // QA-03: sem perfil confirmado não há fatos para o currículo; explica e leva à revisão do perfil.
+      notice = `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Falta o perfil profissional confirmado.</strong> O currículo ATS é montado só com informações confirmadas por você no perfil. Revise e confirme o perfil em “${escapeHtml(pageMeta.operations.label)}” e volte aqui.</div></div>`;
+      primary = `<button class="primary-button" data-action="open-profile-review">Revisar perfil</button>`;
     } else if (!resume) {
-      primary = `<button class="primary-button" data-action="create-resume" data-job-id="${escapeHtml(job.id)}">Preparar currículo</button>`;
+      primary = `<button class="primary-button" data-action="generate-resume" data-job-id="${escapeHtml(job.id)}">Gerar currículo ATS</button>`;
     } else if (resume.status !== "approved") {
-      primary = `<button class="primary-button" data-edit-resume="${escapeHtml(resume.id)}">Revisar e aprovar currículo</button>`;
+      primary = `${profileSnapshot(data) ? `<button class="secondary-button" data-action="generate-resume" data-job-id="${escapeHtml(job.id)}">Gerar de novo</button>` : ""}<button class="primary-button" data-edit-resume="${escapeHtml(resume.id)}">Revisar e aprovar currículo</button>`;
     } else if (application?.status === "awaiting_final_confirmation") {
       notice = `<div class="notice warning"><span aria-hidden="true">!</span><div>O executor preencheu o formulário e aguarda sua confirmação final. Revise a captura em “${escapeHtml(pageMeta.operations.label)}” e digite ENVIAR, ou cancele o envio.</div></div>`;
     } else if (application?.status === "in_progress") {
@@ -1501,7 +1511,7 @@ async function confirmResumeApproval(id: string) {
   const parseFailed = (reviewed.review_findings ?? []).includes("pdf.parse_failed");
   const parseMissing = (reviewed.parse_check?.missing ?? []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   const coverageNotice = `<details class="detail-section"><summary>Cobertura de requisitos (${reviewed.coverage ? `${escapeHtml(reviewed.coverage.total)}%` : "—"})</summary>${coverageBlock(reviewed.coverage)}</details>`;
-  const parseBlock = parseFailed ? `<div class="notice danger"><span aria-hidden="true">!</span><div><strong>Um parser não consegue ler parte deste currículo.</strong>${parseMissing ? `<ul>${parseMissing}</ul>` : ""}Corrija o conteúdo (veja “Como um parser enxerga” no editor). Esse bloqueio não aceita justificativa.</div></div>` : "";
+  const parseBlock = parseFailed ? `<div class="notice danger"><span aria-hidden="true">!</span><div><strong>Um parser não consegue ler parte deste currículo.</strong>${parseMissing ? `<ul>${parseMissing}</ul>` : ""}Corrija o conteúdo no editor (veja “Como um parser enxerga”), salve e aprove de novo. Esse bloqueio não aceita justificativa.</div></div>` : "";
   const reviewBlock = blocked
     ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Aprovação bloqueada: há ${escapeHtml(facts.pending.length)} fato${facts.pending.length === 1 ? "" : "s"} novo${facts.pending.length === 1 ? "" : "s"} sem confirmação.</strong>${findings ? `<ul>${findings}</ul>` : ""}Resolva cada fato abaixo; a justificativa de exceção não vale para fatos novos.</div></div>`
     : parseFailed
@@ -1517,7 +1527,8 @@ async function confirmResumeApproval(id: string) {
     body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${coverageNotice}${parseBlock}${reviewBlock}${highlightedResume(resume.content, facts)}${factChecklist(facts)}${blocked ? "" : `<label class="check-row"><input type="checkbox" name="confirmed" required data-message="Confirme que revisou o conteúdo." /> <span>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</span></label>`}`,
     onRender: (form) => {
       const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
-      if (blocked && submit) { submit.disabled = true; submit.title = "Resolva os fatos novos antes de aprovar."; }
+      // QA-07: teste de leitura do PDF reprovado também bloqueia (sem justificativa possível).
+      if ((blocked || parseFailed) && submit) { submit.disabled = true; submit.title = blocked ? "Resolva os fatos novos antes de aprovar." : "O teste de leitura do PDF falhou: corrija o conteúdo e salve antes de aprovar."; }
       for (const button of form.querySelectorAll<HTMLButtonElement>("[data-fact-action]")) {
         button.addEventListener("click", () => {
           choice.value = { action: button.dataset.factAction as FactChoice["action"], claimId: button.dataset.claimId ?? "" };
@@ -1527,7 +1538,7 @@ async function confirmResumeApproval(id: string) {
     }
   });
   if (choice.value) { await resolveResumeFactChoice(id, choice.value, facts); return; }
-  if (!result || blocked) return;
+  if (!result || blocked || parseFailed) return;
   const overrideReason = String(result.get("override_reason") ?? "").trim();
   await fetchJson(`/api/resumes/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ confirmation: "APROVO", ...(failed ? { override_reason: overrideReason } : {}) }) });
   closeModal(); await loadData(); toast("Currículo aprovado. Agora escolha como se candidatar.");
@@ -1884,13 +1895,36 @@ async function unsuppressJob(jobId: string) {
   toast("Vaga reexibida no painel.");
 }
 
-async function createResume(jobId: string) {
-  const job = currentData().jobs.find((item) => item.id === jobId);
+/** Snapshot do perfil confirmado ativo: a fonte dos fatos do currículo ATS. */
+function profileSnapshot(data: Data): { id: string; facts: Array<{ id: string; type: string; state: string }> } | null {
+  const snapshot = data.activeProfile?.snapshot;
+  return snapshot?.id ? snapshot : null;
+}
+
+/** Preferências de busca alimentam os eliminatórios, não o currículo (src/ats-content.ts). */
+const nonResumeFactTypes = new Set(["accepted_locations", "work_models"]);
+
+/**
+ * QA-03/QA-06: gera o currículo ATS no servidor (POST /api/resumes/generate) só com os fatos
+ * confirmados do snapshot ativo. Gerar de novo substitui o rascunho anterior da vaga.
+ */
+async function generateResume(jobId: string) {
+  const data = currentData();
+  const job = data.jobs.find((item) => item.id === jobId);
   if (!job) return;
-  if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de preparar o currículo.");
-  const baseResume = currentData().baseResumes.find((item) => item.is_base);
-  const created = await fetchJson<{ id?: string }>("/api/resumes", { method: "POST", body: JSON.stringify({ job_id: jobId, base_resume_id: baseResume?.id ?? null, title: `Currículo — ${job.title}`, status: "draft", content: "Rascunho aguardando preparação e revisão.", keywords: [], changes: ["Revisar aderência aos requisitos", "Confirmar resultados e informações pessoais"] }) });
-  closeModal(); await loadData(); toast("Rascunho do currículo criado.");
+  if (job.decision !== "interested") throw new Error("Registre interesse na vaga antes de gerar o currículo.");
+  const snapshot = profileSnapshot(data);
+  if (!snapshot) throw new Error(errorMessages.PROFILE_SNAPSHOT_REQUIRED);
+  const draft = data.resumes.find((item) => item.job_id === jobId && item.status !== "approved");
+  if (draft && !await confirmDialog("Gerar o currículo de novo?", `O rascunho atual (“${draft.title}”, versão ${draft.version}) será substituído por um novo, montado com o perfil confirmado. Edições feitas nele não passam para o novo.`, "Gerar de novo")) return;
+  const factsUsed = snapshot.facts.filter((fact) => fact.state === "confirmed" && !nonResumeFactTypes.has(fact.type)).map((fact) => fact.id);
+  if (!factsUsed.length) throw new Error(errorMessages.ATS_CONFIRMED_FACTS_REQUIRED);
+  // Perfil vindo de PDF usa o PDF de origem; importado de JSON Resume dispensa currículo-base.
+  const profile = data.activeProfile;
+  const baseResumeId = profile?.base_resume_id ?? (profile?.source === "json_resume" ? null : data.baseResumes.find((item) => item.is_base)?.id ?? null);
+  const created = await fetchJson<{ id?: string }>("/api/resumes/generate", { method: "POST", body: JSON.stringify({ job_id: jobId, profile_snapshot_id: snapshot.id, facts_used: factsUsed, title: `Currículo ATS — ${job.title}`, ...(baseResumeId ? { base_resume_id: baseResumeId } : {}) }) });
+  closeModal(); await loadData();
+  toast("Currículo ATS gerado só com informações confirmadas. Revise, edite se quiser e aprove.");
   if (created?.id) showResumeModal(created.id);
 }
 
@@ -1979,7 +2013,8 @@ async function handleAction(target: HTMLElement) {
     case "mark-interested": await markInterested(jobId); return;
     case "not-interested": await markNotInterested(jobId); return;
     case "no-time": await markNoTime(jobId); return;
-    case "create-resume": await createResume(jobId); return;
+    case "generate-resume": await generateResume(jobId); return;
+    case "open-profile-review": closeModal(); navigate("operations"); return;
     case "prepare-manual": await prepareManualApplication(jobId); return;
     case "authorize-auto": await authorizeAutomaticApplication(jobId); return;
     case "check-liveness": await checkLivenessNow(jobId); showJobDetail(jobId); return;

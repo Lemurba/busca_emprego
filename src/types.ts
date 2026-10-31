@@ -128,7 +128,8 @@ export interface Resume {
   base_resume_id: string | null;
   version: number;
   title: string;
-  status: "draft" | "review" | "approved";
+  /** `superseded`: rascunho substituído por uma nova geração ATS da mesma vaga (fora do painel). */
+  status: "draft" | "review" | "approved" | "superseded";
   content: string;
   keywords: string[];
   changes: string[];

@@ -17,6 +17,7 @@ import { checkJobLiveness, type LivenessDeps, type LivenessResult } from "./live
 import { assertAtsUrl, assertAutomationActive, createExecutor } from "./db/applications.js";
 import { computeFactChecks, factCheckReport, type FactCheckReport, type FactCheckRow, recomputeFactChecks, resolveFactCheck, storedFactChecks, summarizeFactChecks } from "./db/resume-facts.js";
 import { RESUME_PLACEHOLDER_CONTENT, removeSpans, replaceSpans } from "./fact-check.js";
+import { factualAtsContent } from "./ats-content.js";
 import { evaluateBlockers, normalizeBlockerFact, normalizeJobRequirements, parseJobRequirementsColumn } from "./blockers.js";
 import { computeCoverage } from "./coverage.js";
 import { expectedContacts, runResumeParseCheck as runParseCheck } from "./resume-parse-check.js";
@@ -314,7 +315,8 @@ export function getBootstrap(projectId = "busca-emprego") {
   const suppressedJobs = listSuppressedJobs(projectId);
   return {
     jobs,
-    resumes: listResumes().map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
+    // Rascunhos substituídos por uma nova geração ATS ficam só no histórico.
+    resumes: listResumes().filter((resume) => resume.status !== "superseded").map((resume) => ({ ...resume, fact_check: resumeFactSummary(resume) })),
     baseResumes: listBaseResumes(),
     applications,
     preferences: listPreferenceState(projectId),
@@ -439,7 +441,7 @@ function workflowFacts(jobId: string): Record<string, unknown> {
   const job = db.prepare("SELECT title,company,source,source_url,decision FROM jobs WHERE id=?").get(jobId) as Record<string, unknown> | undefined;
   if (!job) throw new Error("job.not_found");
   const score = db.prepare("SELECT score_final,coverage_percent FROM match_scores WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId) as { score_final: number; coverage_percent: number } | undefined;
-  const resume = db.prepare("SELECT id,base_resume_id FROM resumes WHERE job_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1").get(jobId) as { id: string; base_resume_id: string | null } | undefined;
+  const resume = db.prepare("SELECT id,base_resume_id FROM resumes WHERE job_id=? AND status<>'superseded' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get(jobId) as { id: string; base_resume_id: string | null } | undefined;
   const approved = db.prepare("SELECT id FROM resumes WHERE job_id=? AND status='approved' LIMIT 1").get(jobId);
   const application = db.prepare("SELECT id,status,automation_mode,authorization_id,evidence_ref FROM applications WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId) as Record<string, unknown> | undefined;
   let authorizationCurrent = false;
@@ -1414,7 +1416,7 @@ export function recordJobDecision(id: string, decision: string, confirmation: st
     db.prepare("UPDATE jobs SET decision = ?, decision_at = ?, updated_at = ? WHERE id = ?").run(decision, timestamp, timestamp, id);
     const projectId = job.project_id ?? "busca-emprego";
     if (decision === "interested") {
-      const resume = db.prepare("SELECT status FROM resumes WHERE job_id = ? ORDER BY updated_at DESC LIMIT 1").get(id) as { status: string } | undefined;
+      const resume = db.prepare("SELECT status FROM resumes WHERE job_id = ? AND status <> 'superseded' ORDER BY updated_at DESC LIMIT 1").get(id) as { status: string } | undefined;
       const approved = db.prepare("SELECT id FROM resumes WHERE job_id = ? AND status = 'approved' LIMIT 1").get(id);
       const application = db.prepare("SELECT id FROM applications WHERE job_id = ? LIMIT 1").get(id);
       const target: JobStatus = approved ? (application ? "ready_to_apply" : "resume_approved") : resume ? "resume" : "selected";
@@ -1808,6 +1810,7 @@ export function updateResume(id: string, patch: Partial<Resume>) {
   const entries = allowed.flatMap((key) => patch[key] === undefined ? [] : [[key, Array.isArray(patch[key]) ? JSON.stringify(patch[key]) : patch[key]] as [string, unknown]]);
   if (!entries.length) return listResumes().find((resume) => resume.id === id) ?? null;
   const current = listResumes().find((resume) => resume.id === id);
+  if (current?.status === "superseded") throw new Error("resume.superseded");
   if (current?.status === "approved" && patch.status !== "review") throw new Error("Retorne o currículo aprovado para revisão antes de alterá-lo.");
   if (db.prepare("SELECT id FROM applications WHERE resume_id = ? AND status IN ('in_progress','awaiting_final_confirmation') LIMIT 1").get(id)) throw new Error("O currículo não pode ser alterado enquanto a candidatura está em andamento.");
   if (patch.status !== undefined && !["draft", "review"].includes(String(patch.status))) throw new Error("resume.status.invalid");
@@ -1885,9 +1888,6 @@ function printableFactValue(value: unknown): string {
   return String(value ?? "").trim();
 }
 
-function factualAtsContent(facts: readonly Record<string, unknown>[]): string {
-  return facts.map((fact) => `${String(fact.type ?? "fato")}: ${printableFactValue(fact.value)}`).filter((line) => !line.endsWith(": ")).join("\n");
-}
 
 function snapshotProfileSource(snapshot: Record<string, unknown>) {
   const row = db.prepare("SELECT source FROM professional_profiles WHERE id=?").get(String(snapshot.profile_id ?? "")) as { source?: string } | undefined;
@@ -2037,7 +2037,9 @@ function writerFindings(resume: Resume): string[] {
   const used = (resume.facts_used ?? []).map((factId) => byId.get(factId)).filter((fact): fact is Record<string, unknown> => Boolean(fact));
   if (!snapshot) findings.push("profile_snapshot.required");
   if (!(resume.facts_used?.length) || used.length !== resume.facts_used.length) findings.push("facts.unconfirmed_or_missing");
-  if (used.length && content !== factualAtsContent(used)) findings.push("content.unsupported_or_modified");
+  // QA-06: a pessoa pode editar o texto gerado. A edição passa se a checagem de fatos do texto
+  // editado não achar afirmação sem fato confirmado; senão o texto deixa de ser "dos fatos usados".
+  if (used.length && content !== factualAtsContent(used).trim() && refreshResumeFactChecks(resume.id).some((row) => row.status === "pending")) findings.push("content.unsupported_or_modified");
   const supported = normalizeComparableText(used.map((fact) => printableFactValue(fact.value)).join(" "));
   if (resume.keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) findings.push("keyword.unsupported");
   return findings;
@@ -2099,8 +2101,19 @@ export function generateAtsResume(input: Record<string, unknown>, actor = "write
   const supported = normalizeComparableText(selectedFacts.map((fact) => printableFactValue(fact.value)).join(" "));
   if (keywords.some((keyword) => !supported.includes(normalizeComparableText(keyword)))) throw new Error("ATS_KEYWORD_UNSUPPORTED");
   const gaps = Array.isArray(input.gaps) ? input.gaps.map(String) : [];
-  const resume = createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId || null, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never, actor === "writer" ? undefined : actor);
-  audit("resume", resume?.id ?? "unknown", "generated_by_writer", { actor, profile_snapshot_id: snapshotId, base_resume_id: baseId, facts_count: factsUsed.length, gaps_count: gaps.length });
+  // Gerar de novo substitui o rascunho anterior da vaga em vez de empilhar versões: os não
+  // aprovados e sem candidatura viram `superseded` (somem do painel, ficam no banco e na auditoria).
+  const superseded = (db.prepare(`SELECT id FROM resumes WHERE job_id=? AND status IN ('draft','review')
+    AND id NOT IN (SELECT resume_id FROM applications WHERE resume_id IS NOT NULL)`).all(job.id) as { id: string }[]).map((row) => row.id);
+  const resume = tx(() => {
+    const timestamp = now();
+    for (const id of superseded) {
+      db.prepare("UPDATE resumes SET status='superseded',updated_at=? WHERE id=?").run(timestamp, id);
+      audit("resume", id, "superseded", { job_id: job.id, actor });
+    }
+    return createResume({ job_id: job.id, title: String(input.title ?? `Currículo ATS — ${job.title}`), base_resume_id: baseId || null, content, keywords, changes: Array.isArray(input.changes) ? input.changes.map(String) : [], profile_snapshot_id: snapshotId, generation_source: "writer", facts_used: factsUsed, gaps } as never, actor === "writer" ? undefined : actor);
+  });
+  audit("resume", resume?.id ?? "unknown", "generated_by_writer", { actor, profile_snapshot_id: snapshotId, base_resume_id: baseId, facts_count: factsUsed.length, gaps_count: gaps.length, superseded_count: superseded.length });
   return resume;
 }
 
@@ -2108,6 +2121,7 @@ export function approveResume(id: string, confirmation: string, options: { overr
   if (confirmation !== "APROVO") throw new Error("Digite APROVO para confirmar a revisão deste currículo.");
   const resume = listResumes().find((item) => item.id === id);
   if (!resume) throw new Error("Currículo não encontrado.");
+  if (resume.status === "superseded") throw new Error("resume.superseded");
   // #31: afirmação sem fato confirmado bloqueia sempre; override_reason não vale para esta regra.
   if (resume.status !== "approved" && tx(() => refreshResumeFactChecks(id)).some((row) => row.status === "pending")) throw new Error("resume.unverified_facts");
   const job = getJob(resume.job_id);

@@ -53,7 +53,7 @@ As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs
 
 1. O agente registra a vaga. O registro fica como `found` e `pending`.
 2. O usuário marca interesse com a ação explícita **Tenho interesse**.
-3. O usuário ou agente prepara o currículo ATS, usando um PDF-base opcional da biblioteca local.
+3. O usuário (botão **Gerar currículo ATS** na vaga) ou o agente gera o currículo ATS só com as informações confirmadas do perfil; o usuário pode editar o texto, que passa de novo pela checagem de fatos. Gerar de novo substitui o rascunho anterior da vaga.
 4. O usuário revisa e aprova a versão salva digitando `APROVO`.
 5. O usuário escolhe o envio manual ou digita `AUTORIZO` para permitir automação naquela vaga e naquela versão do currículo.
 

@@ -281,6 +281,12 @@ Toda versão de currículo (manual, MCP ou redator) tem suas afirmações extra�
 
 `POST /api/resumes/{id}/review` calcula o veredito no servidor (`verdict: "pass"` do cliente é ignorado; `verdict: "fail"` e `findings` só endurecem). Achados: `facts.unverified:N`, `content.empty`, `content.placeholder` (rascunho-padrão do painel) e, para o redator, as checagens estritas de fatos usados. Conteúdo sem nenhuma afirmação verificável passa. O bootstrap traz `fact_check: { pending, warnings }` em cada currículo e `radar_create_resume` devolve `fact_check.pending` para o agente.
 
+### `POST /api/resumes/generate`
+
+Gera o currículo ATS só com fatos confirmados: `{ job_id, profile_snapshot_id?, facts_used: [ids], base_resume_id?, title?, keywords?, changes?, gaps? }`. Sem snapshot de perfil confirmado → `422 PROFILE_SNAPSHOT_REQUIRED`; perfil de PDF sem `base_resume_id` → `base_resume.required`. O texto sai legível, com nome e cargo no topo e seções em pt-BR (`CONTATO`, `RESUMO`, `EXPERIÊNCIA PROFISSIONAL`, `FORMAÇÃO ACADÊMICA`, `HABILIDADES`, `IDIOMAS`, `CERTIFICAÇÕES`, `PROJETOS`, `INFORMAÇÕES ADICIONAIS`), nunca com as chaves internas dos fatos; preferências de busca (`accepted_locations`, `work_models`) ficam fora do texto. Gerar de novo para a mesma vaga marca os rascunhos anteriores (`draft`/`review`, sem candidatura) como `superseded`: saem do bootstrap, ficam no banco e na auditoria e não podem mais ser editados nem aprovados (`resume.superseded`). Currículo aprovado nunca é substituído.
+
+A pessoa pode editar o texto gerado (`PATCH /api/resumes/{id}`). Na revisão, o texto editado passa pela checagem de fatos: reordenar, encurtar ou reescrever com respaldo nos fatos confirmados passa; afirmação bloqueante sem fato confirmado gera `facts.unverified:N` e `content.unsupported_or_modified`, e bloqueia o `APROVO`. No painel, o botão “Gerar currículo ATS” da vaga chama esta rota com todos os fatos confirmados do perfil ativo; sem perfil confirmado, ele explica o bloqueio e leva à revisão do perfil.
+
 ### Biblioteca de PDFs-base
 
 | Método e rota | Uso |
