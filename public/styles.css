@@ -714,3 +714,10 @@ body.auth-required .app-shell, body.auth-required .mobile-tabbar { display: none
   .source-table td.source-actions { position: static; padding-top: 8px; }
   .source-table td.source-actions .button-row { justify-content: flex-start; }
 }
+
+/* Mapa (§5 P2-21): vagas sem coordenadas listadas abaixo do mapa. */
+.map-missing { margin-top: 10px; font-size: var(--type-sm); }
+.map-missing summary { cursor: pointer; font-weight: 700; }
+.map-missing ul { margin: 6px 0 0; padding: 0; list-style: none; }
+.map-missing li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 2px 0; }
+.map-missing li small { color: var(--muted); }

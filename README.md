@@ -77,7 +77,7 @@ O Radar lê e grava currículos no formato aberto [JSON Resume v1](https://jsonr
 
 Fatos de texto livre extraídos do PDF são exportados como texto (ex.: `skills` vira um grupo “Habilidades”); a fidelidade campo a campo vale para fatos importados.
 
-O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcadores exigem latitude e longitude fornecidas com cada vaga; a aplicação não geocodifica automaticamente endereços. O mapa-base requer conexão com a internet.
+O mapa usa Leaflet e tiles do OpenStreetMap com atribuição visível. Os marcadores exigem latitude e longitude fornecidas com cada vaga; a aplicação não geocodifica automaticamente endereços (escopo reduzido: não há serviço de geocodificação). Abaixo do mapa, *Análises* lista as vagas sem coordenadas; informe-as em “Editar vaga”. O mapa-base requer conexão com a internet.
 
 ## API Hermes
 
