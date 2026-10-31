@@ -4,10 +4,12 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { appDirFromEnv, readEnvLocal } from "./lib/env-local.mjs";
 
 function usage(exitCode = 0) {
   console.log(`Uso: node scripts/ops/backup-sqlite.mjs [--db CAMINHO] [--out DIRETORIO] [--timeout-ms N]\n\n` +
-    `Variáveis equivalentes: RADAR_DB_PATH e RADAR_BACKUP_DIR.\n` +
+    `Variáveis equivalentes: RADAR_DB_PATH e RADAR_BACKUP_DIR (ambiente; na falta, $RADAR_APP_DIR/.env.local,\n` +
+    `com caminhos relativos ao diretório do app). Sem nenhuma: <app>/data/radar.sqlite.\n` +
     `Cria um snapshot SQLite consistente com VACUUM INTO, valida-o e grava manifesto SHA-256.`);
   process.exit(exitCode);
 }
@@ -21,14 +23,23 @@ function option(name, fallback) {
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) usage();
 
-const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));
+// TD-20: sem --db nem RADAR_DB_PATH no ambiente, vale o mesmo .env.local que o serviço lê; antes
+// o padrão relativo ao diretório atual podia copiar outro banco (ou nenhum) em vez do de produção.
+// Valores do .env.local e o padrão são relativos ao diretório do app, como no backup agendado.
+const appDir = appDirFromEnv();
+const localEnv = readEnvLocal(appDir, { keys: ["RADAR_DB_PATH", "RADAR_BACKUP_DIR"] });
+// --db/--out e o ambiente seguem relativos ao diretório atual (comportamento de sempre).
+const explicitDb = option("--db", undefined) ?? (process.env.RADAR_DB_PATH || undefined);
+const dbPath = explicitDb ? resolve(explicitDb) : resolve(appDir, localEnv.RADAR_DB_PATH || "./data/radar.sqlite");
 const timeoutValue = option("--timeout-ms", "10000");
 const timeoutMs = Number(timeoutValue);
 if (!/^\d+$/u.test(String(timeoutValue)) || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
   console.error(JSON.stringify({ ok: false, error: "invalid_numeric_argument", argument: "--timeout-ms", message: "--timeout-ms precisa ser um inteiro positivo (ms)" }));
   process.exit(1);
 }
-const backupDir = resolve(option("--out", process.env.RADAR_BACKUP_DIR ?? join(dirname(dbPath), "backups")));
+const explicitOut = option("--out", undefined) ?? (process.env.RADAR_BACKUP_DIR || undefined);
+const backupDir = explicitOut ? resolve(explicitOut)
+  : localEnv.RADAR_BACKUP_DIR ? resolve(appDir, localEnv.RADAR_BACKUP_DIR) : join(dirname(dbPath), "backups");
 
 if (!existsSync(dbPath) || !statSync(dbPath).isFile()) {
   console.error(JSON.stringify({ ok: false, error: "database_not_found", db_path: dbPath }));

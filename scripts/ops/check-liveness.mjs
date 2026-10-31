@@ -25,9 +25,9 @@
  *   RADAR_INTERNAL_SERVICE_TOKEN   token interno (env ou .env.local)
  *   RADAR_FORWARDED_PROTO          só se definido: envia x-forwarded-proto
  */
-import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { envSetting, readEnvLocal } from "./lib/env-local.mjs";
 
 const repoRoot = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const USAGE = "Uso: node scripts/ops/check-liveness.mjs [--dry-run] [--limit N (1-200, padrão 50)] [--report] [--base URL] [--host-interval-ms N]";
@@ -38,26 +38,8 @@ if (argv.includes("--help") || argv.includes("-h")) {
   process.exit(0);
 }
 
-const unquote = (raw) => {
-  const value = raw.trim();
-  return /^(["']).*\1$/su.test(value) ? value.slice(1, -1) : value;
-};
-
-function readLocalEnv() {
-  const path = resolve(repoRoot, ".env.local");
-  if (!existsSync(path)) return {};
-  return Object.fromEntries(
-    readFileSync(path, "utf8").split("\n")
-      .filter((line) => line.includes("=") && !line.trim().startsWith("#"))
-      .map((line) => [line.slice(0, line.indexOf("=")).replace(/^\s*export\s+/u, "").trim(), unquote(line.slice(line.indexOf("=") + 1))]),
-  );
-}
-
-const localEnv = readLocalEnv();
-const env = (name) => {
-  const fromProcess = process.env[name];
-  return fromProcess != null && fromProcess !== "" ? fromProcess : (localEnv[name] ?? "");
-};
+const localEnv = readEnvLocal(repoRoot);
+const env = (name) => envSetting(localEnv, name);
 const flag = (name) => argv.includes(name);
 const value = (name, fallback) => {
   const index = argv.indexOf(name);

@@ -70,29 +70,12 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { envSetting, readEnvLocal } from "./lib/env-local.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-const unquote = (raw) => {
-  const value = raw.trim();
-  return /^(["']).*\1$/su.test(value) ? value.slice(1, -1) : value;
-};
-
-function readLocalEnv() {
-  const path = resolve(repoRoot, ".env.local");
-  if (!existsSync(path)) return {};
-  return Object.fromEntries(
-    readFileSync(path, "utf8").split("\n")
-      .filter((line) => line.includes("=") && !line.trim().startsWith("#"))
-      .map((line) => [line.slice(0, line.indexOf("=")).replace(/^\s*export\s+/u, "").trim(), unquote(line.slice(line.indexOf("=") + 1))]),
-  );
-}
-
-const localEnv = readLocalEnv();
-const env = (name) => {
-  const fromProcess = process.env[name];
-  return fromProcess != null && fromProcess !== "" ? fromProcess : (localEnv[name] ?? "");
-};
+const localEnv = readEnvLocal(repoRoot);
+const env = (name) => envSetting(localEnv, name);
 const argv = process.argv.slice(2);
 const command = argv.find((item) => !item.startsWith("--")) ?? "list";
 const flag = (name) => argv.includes(name);

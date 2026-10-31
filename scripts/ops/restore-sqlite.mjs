@@ -7,8 +7,8 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { readEnvLocal } from "./lib/env-local.mjs";
 
 function usage(exitCode = 0) {
   console.log(`Uso: node scripts/ops/restore-sqlite.mjs --from BACKUP --confirm RESTORE [--db CAMINHO] [--health-url URL] [--force]\n\n` +
@@ -33,27 +33,12 @@ function option(name, fallback) {
   return process.argv[index + 1];
 }
 
-function readLocalEnv() {
-  const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const vars = {};
-  try {
-    for (const raw of readFileSync(join(appDir, ".env.local"), "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#")) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch {}
-  return vars;
-}
-
 if (process.argv.includes("--help") || process.argv.includes("-h")) usage();
 
 const fromValue = option("--from");
 if (!fromValue || option("--confirm") !== "RESTORE") usage(2);
 const force = process.argv.includes("--force");
-const localEnv = readLocalEnv();
+const localEnv = readEnvLocal();
 const port = process.env.PORT ?? localEnv.PORT ?? "8787";
 const sourcePath = resolve(fromValue);
 const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));

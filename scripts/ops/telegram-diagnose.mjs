@@ -11,21 +11,10 @@
 //
 // `getUpdates` concorre com o poller do gateway do Hermes, por isso só roda com --updates.
 import { readFileSync } from "node:fs";
+import { parseEnvText } from "./lib/env-local.mjs";
 
 const envFile = process.env.HERMES_ENV_FILE ?? "/opt/data/.env";
-function readEnvFile(path) {
-  const vars = {};
-  for (const raw of readFileSync(path, "utf8").split(/\r?\n/u)) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-    if (!match || raw.trim().startsWith("#")) continue;
-    let value = match[2];
-    if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-    vars[match[1]] = value;
-  }
-  return vars;
-}
-
-const env = readEnvFile(envFile);
+const env = parseEnvText(readFileSync(envFile, "utf8"));
 const token = env.TELEGRAM_BOT_TOKEN;
 const home = process.env.TELEGRAM_CHAT_ID ?? env.TELEGRAM_HOME_CHANNEL ?? env.HERMES_TELEGRAM_CHAT_ID;
 const allowed = env.TELEGRAM_ALLOWED_USERS ?? env.HERMES_LINKED_RECIPIENT_ID;

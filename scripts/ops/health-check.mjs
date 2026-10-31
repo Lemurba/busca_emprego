@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { accessSync, constants, existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { readEnvLocal } from "./lib/env-local.mjs";
 
 function fail(error, message) {
   console.error(JSON.stringify({ ok: false, error, message }));
@@ -18,28 +18,13 @@ function option(name, fallback) {
   return value;
 }
 
-function readLocalEnv() {
-  const appDir = process.env.RADAR_APP_DIR ? resolve(process.env.RADAR_APP_DIR) : resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const vars = {};
-  try {
-    for (const raw of readFileSync(join(appDir, ".env.local"), "utf8").split(/\r?\n/u)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u.exec(raw);
-      if (!match || raw.trim().startsWith("#")) continue;
-      let value = match[2];
-      if (value.length >= 2 && (value[0] === "\"" || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
-      vars[match[1]] = value;
-    }
-  } catch {}
-  return vars;
-}
-
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log("Uso: node scripts/ops/health-check.mjs [--db CAMINHO] [--url HEALTH_URL] [--timeout-ms N]");
   process.exit(0);
 }
 
 const dbPath = resolve(option("--db", process.env.RADAR_DB_PATH ?? "./data/radar.sqlite"));
-const localEnv = readLocalEnv();
+const localEnv = readEnvLocal();
 const port = process.env.PORT ?? localEnv.PORT ?? "8787";
 const url = option("--url", process.env.RADAR_HEALTH_URL ?? `http://127.0.0.1:${port}/api/health`);
 const timeoutValue = option("--timeout-ms", "3000");
