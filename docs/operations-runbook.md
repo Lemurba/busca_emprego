@@ -238,7 +238,7 @@ Não fazer downgrade de código sobre schema incompatível. O schema é versiona
 - `/api/health` comprova apenas que o HTTP responde; `health-check.mjs` acrescenta verificação do banco e volume. `GET /api/metrics` (token interno ou sessão) mede idade do último backup, tamanho do banco, filas (perguntas abertas, enriquecimento, autorizações de envio) e a última rodada, mas não há alerta automático sobre esses números nem métricas de latência.
 - `/api/ready` valida o SQLite e a presença do operador; SIGTERM/SIGINT encerram o listener de forma graciosa. O health de dependências externas continua sob responsabilidade dos gateways/alertas do Hermes.
 - A API distingue apenas dois papéis (token interno e sessão do dashboard), sem escopos por rota. SQLite continua em instância única.
-- O build atual não mede a cobertura mínima de 80% exigida pelo SDD.
+- `npm test` exige cobertura mínima de `src/` (50% de linhas, 52% de branches, 42% de funções), ainda abaixo dos 80% exigidos pelo SDD; o limite sobe conforme os testes entram.
 - As migrações são versionadas, mas não há rollback automático de schema (use o backup pré-deploy), alertas ou retenção automática. O teste de carga incluído cobre 10 fontes, 500 resultados e 20 workers, mas precisa ser repetido no ambiente real antes da promoção.
 - A anonimização legada não roda mais na inicialização (importar `src/db.ts` não altera dados). Ela é um comando explícito: `RADAR_RUN_LEGACY_ANONYMIZATION=true node scripts/ops/anonymize-legacy.mjs --db CAMINHO` (sem a variável o script sai com código 2). Faça backup antes e não a use em produção. O aplicativo não possui carga de dados demonstrativos: o banco inicia vazio.
 

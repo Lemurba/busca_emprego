@@ -1,0 +1,4 @@
+# Ferramentas de lint e tipos do plugin nativo (só CI/desenvolvimento; o plugin não tem
+# dependências de runtime além da biblioteca padrão). Versões exatas; o Dependabot (pip) atualiza.
+ruff==0.16.9
+mypy==2.3.1
