@@ -1161,6 +1161,20 @@ async function confirmDialog(title: string, message: string, confirmLabel: strin
   return Boolean(await openDialog({ title, body: `<p>${escapeHtml(message)}</p>`, confirmLabel, danger }));
 }
 
+/**
+ * QA-17: palavra de confirmação (TENHO INTERESSE, APROVO, AUTORIZO) digitada pela pessoa, como o
+ * README promete; maiúsculas/minúsculas e espaços nas pontas não importam. O painel só envia a
+ * palavra canônica ao servidor depois que o texto digitado confere.
+ */
+function typedConfirmationField(word: string, id: string) {
+  return `<div class="form-field"><label for="${id}">Digite ${escapeHtml(word)} para confirmar</label><input class="input" id="${id}" name="confirmation" required autocomplete="off" spellcheck="false" autocapitalize="characters" data-message="Digite ${escapeHtml(word)} para confirmar." /></div>`;
+}
+
+function typedConfirmationError(form: HTMLFormElement, word: string) {
+  const typed = String(new FormData(form).get("confirmation") ?? "").trim().replace(/\s+/gu, " ").toLocaleUpperCase("pt-BR");
+  return typed === word ? null : `Digite ${word} para confirmar.`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Formulários                                                         */
 /* ------------------------------------------------------------------ */
@@ -1523,8 +1537,8 @@ async function confirmResumeApproval(id: string) {
   const result = await openDialog({
     title: "Aprovar currículo",
     confirmLabel: "Aprovar esta versão",
-    validate: () => parseFailed ? "O teste de leitura do PDF falhou. Corrija o conteúdo e salve antes de aprovar." : null,
-    body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${coverageNotice}${parseBlock}${reviewBlock}${highlightedResume(resume.content, facts)}${factChecklist(facts)}${blocked ? "" : `<label class="check-row"><input type="checkbox" name="confirmed" required data-message="Confirme que revisou o conteúdo." /> <span>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</span></label>`}`,
+    validate: (form) => parseFailed ? "O teste de leitura do PDF falhou. Corrija o conteúdo e salve antes de aprovar." : typedConfirmationError(form, "APROVO"),
+    body: `<p><strong>${escapeHtml(resume.title)}</strong> · versão ${escapeHtml(resume.version)}</p>${coverageNotice}${parseBlock}${reviewBlock}${highlightedResume(resume.content, facts)}${factChecklist(facts)}${blocked || parseFailed ? "" : `<p>Revisei o conteúdo salvo e aprovo esta versão para candidaturas.</p>${typedConfirmationField("APROVO", "approve-confirmation")}`}`,
     onRender: (form) => {
       const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
       // QA-07: teste de leitura do PDF reprovado também bloqueia (sem justificativa possível).
@@ -1701,9 +1715,18 @@ async function mutate(url: string, method: string, body: Record<string, unknown>
 }
 
 async function markInterested(jobId: string) {
+  const job = currentData().jobs.find((item) => item.id === jobId);
+  if (!job) return;
+  const result = await openDialog({
+    title: "Registrar interesse nesta vaga?",
+    confirmLabel: "Tenho interesse",
+    validate: (form) => typedConfirmationError(form, "TENHO INTERESSE"),
+    body: `<p><strong>${escapeHtml(job.title)}</strong> · ${escapeHtml(job.company)}</p><p>A vaga segue para a preparação do currículo. Nada é enviado: o currículo ainda passa pelo seu APROVO e você escolhe depois como se candidatar.</p>${typedConfirmationField("TENHO INTERESSE", "interest-confirmation")}`
+  });
+  if (!result) return;
   await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/decision`, { method: "POST", body: JSON.stringify({ decision: "interested", confirmation: "TENHO INTERESSE" }) });
   closeModal();
-  await loadData(); toast("Interesse registrado. Agora prepare o currículo.");
+  await loadData(); toast("Interesse registrado. Agora gere o currículo ATS.");
   showJobDetail(jobId);
 }
 
@@ -1738,7 +1761,7 @@ async function authorizeAutomaticApplication(jobId: string) {
   const result = await openDialog({
     title: "Autorizar envio automático",
     confirmLabel: "Autorizar envio",
-    validate: () => (fresh ? null : "Confirme que a vaga continua aberta (Verificar agora) antes de autorizar."),
+    validate: (form) => (fresh ? typedConfirmationError(form, "AUTORIZO") : "Confirme que a vaga continua aberta (Verificar agora) antes de autorizar."),
     onRender: (form) => {
       const button = form.querySelector<HTMLButtonElement>("[data-dialog-check-liveness]");
       const status = form.querySelector<HTMLElement>("[data-liveness-status]");
@@ -1764,7 +1787,7 @@ async function authorizeAutomaticApplication(jobId: string) {
         }).catch((error) => { if (status) status.textContent = error instanceof Error ? error.message : "Falha ao registrar a confirmação."; });
       });
     },
-    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button> <button type="button" class="text-button" data-dialog-confirm-open hidden>Conferi no portal: está aberta</button></div></div>`}${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque a confirmação para autorizar." /> <span>Autorizo o envio automático desta candidatura.</span></label>`
+    body: `${fresh ? "" : `<div class="notice warning"><span aria-hidden="true">!</span><div><span data-liveness-status role="status">${escapeHtml(job.opening_status === "closed" ? "A vaga consta como encerrada." : "A vaga não foi confirmada aberta nas últimas 24 h.")}</span> <button type="button" class="secondary-button" data-dialog-check-liveness>Verificar agora</button> <button type="button" class="text-button" data-dialog-confirm-open hidden>Conferi no portal: está aberta</button></div></div>`}${blockedBlockers(job).length ? `<div class="notice warning"><span aria-hidden="true">!</span><div><strong>Esta vaga tem eliminatório(s) para o seu perfil.</strong><ul>${blockedBlockers(job).map((blocker) => `<li>${escapeHtml(blocker.label)}: ${escapeHtml(blocker.reason)}</li>`).join("")}</ul>Você pode autorizar mesmo assim; a decisão é sua.</div></div>` : ""}<p>O executor configurado no Hermes vai preencher a candidatura e parar antes do envio: você confere a captura e confirma com ENVIAR no painel.</p><dl class="summary-list"><div><dt>Vaga</dt><dd>${escapeHtml(job.title)} · ${escapeHtml(job.company)}</dd></div><div><dt>Currículo</dt><dd>${escapeHtml(resume.title)} (versão ${escapeHtml(resume.version)})</dd></div><div><dt>Link</dt><dd>${escapeHtml(job.application_url)}</dd></div></dl><p class="muted-text">Vale só para esta vaga e esta versão do currículo. Se o link da vaga mudar, a autorização é revogada. Você pode revogar a qualquer momento antes do envio.</p><p>Autorizo o envio automático desta candidatura.</p>${typedConfirmationField("AUTORIZO", "authorize-confirmation")}`
   });
   if (!result) return;
   const application = existing ?? await fetchJson<Application>("/api/applications", { method: "POST", body: JSON.stringify({ job_id: jobId, resume_id: resume.id, automation_mode: "assisted" }) });

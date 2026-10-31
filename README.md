@@ -52,9 +52,9 @@ As capacidades internas de cada agente são `browser.read`, `jobs.create`, `jobs
 ## Fluxo controlado pelo usuário
 
 1. O agente registra a vaga. O registro fica como `found` e `pending`.
-2. O usuário marca interesse com a ação explícita **Tenho interesse**.
+2. O usuário marca interesse com a ação explícita **Tenho interesse**, digitando `TENHO INTERESSE` (maiúsculas ou minúsculas) para confirmar.
 3. O usuário (botão **Gerar currículo ATS** na vaga) ou o agente gera o currículo ATS só com as informações confirmadas do perfil; o usuário pode editar o texto, que passa de novo pela checagem de fatos. Gerar de novo substitui o rascunho anterior da vaga.
-4. O usuário revisa e aprova a versão salva digitando `APROVO`.
+4. O usuário revisa e aprova a versão salva digitando `APROVO` no diálogo de aprovação (maiúsculas ou minúsculas; o painel só envia depois que a palavra confere).
 5. O usuário escolhe o envio manual ou digita `AUTORIZO` para permitir automação naquela vaga e naquela versão do currículo.
 
 Aprovar um currículo não autoriza envio automático. A fila `GET /api/authorized-applications` só inclui autorizações atuais, para currículo ainda aprovado e na mesma versão autorizada. Alterar o currículo ou retirar o interesse invalida a autorização. Um executor Browser Harness do Hermes precisa consultar essa rota para realizar qualquer ação no portal; este repositório fornece o contrato e a fila, mas não executa candidaturas por conta própria. O app só registra uma candidatura enviada quando recebe a confirmação correspondente.
