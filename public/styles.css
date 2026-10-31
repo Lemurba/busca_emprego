@@ -217,6 +217,8 @@ h3 { margin-bottom: 4px; color: var(--heading); font-size: var(--type-body); }
 .score.mid { color: var(--orange-fg); }
 .score.low { color: var(--muted); }
 .score.low::before { background: transparent; box-shadow: inset 0 0 0 2px currentColor; }
+.score.unrated { color: var(--muted); font-weight: 600; }
+.score.unrated::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
 .tag { padding: 4px 8px; color: var(--neutral-fg); border-radius: 6px; background: var(--neutral-bg); font-size: var(--type-xs); }
 
@@ -712,3 +714,20 @@ body.auth-required .app-shell, body.auth-required .mobile-tabbar { display: none
 .diff-line.add { color: var(--teal-fg); background: var(--teal-bg); }
 .diff-line.del { color: var(--red-fg); background: var(--red-bg); text-decoration: line-through; }
 .subsection-title { margin-top: 18px; }
+
+/* Fontes (§1.3): prontidão calculada e ações por fonte; no celular as ações vão para baixo. */
+.source-table td.source-actions .button-row { justify-content: flex-end; margin-top: 0; }
+.dialog fieldset.form-field { margin: 12px 0 0; padding: 0; border: 0; }
+.dialog fieldset.form-field legend { padding: 0; font-weight: 700; }
+@media (max-width: 600px) {
+  .source-table td:first-child { padding-right: 0; }
+  .source-table td.source-actions { position: static; padding-top: 8px; }
+  .source-table td.source-actions .button-row { justify-content: flex-start; }
+}
+
+/* Mapa (§5 P2-21): vagas sem coordenadas listadas abaixo do mapa. */
+.map-missing { margin-top: 10px; font-size: var(--type-sm); }
+.map-missing summary { cursor: pointer; font-weight: 700; }
+.map-missing ul { margin: 6px 0 0; padding: 0; list-style: none; }
+.map-missing li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 2px 0; }
+.map-missing li small { color: var(--muted); }

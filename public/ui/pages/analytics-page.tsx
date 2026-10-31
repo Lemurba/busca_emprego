@@ -183,6 +183,9 @@ function MapPanel({ data, filtered, lifecycleMeta, onSelectJob, onMapChange }: {
   const { mapEnabled, mapExpanded, selectedJobId, visualFilter } = appState();
   const locations = Object.entries(filtered.reduce<Record<string, number>>((acc, job) => { acc[job.location] = (acc[job.location] ?? 0) + 1; return acc; }, {})).sort((a, b) => b[1] - a[1]);
   const jobRows = filtered.slice(0, 6);
+  // Escopo reduzido do mapa (§5 P2-21): sem serviço de geocodificação, só aparecem vagas com
+  // latitude/longitude informadas; as demais ficam listadas aqui para a pessoa completar.
+  const missing = filtered.filter((job) => !hasCoordinates(job));
   return (
     <section class={`panel map-panel map-shell${mapEnabled && mapExpanded ? " is-expanded" : ""}`}>
       <div class="map-panel-head">
@@ -229,6 +232,18 @@ function MapPanel({ data, filtered, lifecycleMeta, onSelectJob, onMapChange }: {
             }) : <p class="map-caption">Nenhuma vaga corresponde ao filtro.</p>}
           </div>
           <p class="map-caption">Selecione uma vaga para centralizar o mapa. Vagas sem latitude e longitude não aparecem.</p>
+          {missing.length ? (
+            <details class="map-missing">
+              <summary>{`${missing.length} ${missing.length === 1 ? "vaga sem coordenadas" : "vagas sem coordenadas"} fora do mapa`}</summary>
+              <p class="map-caption">O Radar não geocodifica endereços automaticamente. Para uma vaga aparecer no mapa, abra a vaga, clique em “Editar vaga” e informe latitude e longitude em “Coordenadas no mapa” (ou envie as coordenadas pela API de agentes).</p>
+              <ul>
+                {missing.slice(0, 20).map((job) => (
+                  <li key={job.id}><button type="button" class="text-button" data-detail={job.id}>{`${job.title} · ${job.company}`}</button><small>{job.location}</small></li>
+                ))}
+              </ul>
+              {missing.length > 20 ? <p class="map-caption">{`e mais ${missing.length - 20}.`}</p> : null}
+            </details>
+          ) : null}
         </div>
       </div>
     </section>

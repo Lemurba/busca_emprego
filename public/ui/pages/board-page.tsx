@@ -39,7 +39,9 @@ type CardProps = Omit<BoardPageProps, "title" | "statusColumns"> & {
 };
 
 /** Mesmas faixas do domínio (calculateScore): ≥ 80 match forte, ≥ 65 vale olhar. */
-function ScoreBadge({ score }: { score: number }) {
+function ScoreBadge({ score, evaluated = true }: { score: number; evaluated?: boolean }) {
+  // QA-12: sem nota registrada, "Não avaliada" em vez de 0%.
+  if (!evaluated) return <span class="score unrated" title="Aderência ainda não calculada: o agente avaliador não registrou nota para esta vaga">Não avaliada</span>;
   const tone = score >= 80 ? "high" : score >= 65 ? "mid" : "low";
   return <span class={`score ${tone}`} title="Aderência: estimativa de quanto a vaga combina com seu perfil (não é nota de ATS)">{score}%</span>;
 }
@@ -75,7 +77,7 @@ function JobCard({ job, columns, statusLabels, lifecycleMeta, allowedMoves, sala
     >
       <div class="job-card-top">
         <h3><button type="button" class="card-title-button" data-detail={job.id}>{job.title}</button></h3>
-        <ScoreBadge score={job.match_score} />
+        <ScoreBadge score={job.match_score} evaluated={job.match_evaluated !== false} />
       </div>
       <p><strong>{job.company}</strong> · {job.location}</p>
       <div class="job-card-meta">

@@ -25,6 +25,10 @@ export type OperationsPageProps = {
   formatDate: (value: string | null | undefined) => string;
   roundStatus: (status: string) => Tone;
   readiness: (status: string | null | undefined) => Tone;
+  /** Motivo da prontidão calculada em texto para a pessoa. */
+  readinessReason: (reason: string | null | undefined) => string;
+  /** Nome da fonte pelo id (as rodadas guardam só os ids). */
+  sourceName: (id: string) => string;
   questionStatusLabel: (status: string) => string;
   profileStatusLabel: (status: string) => string;
   factTypeLabel: (type: string) => string;
@@ -179,18 +183,20 @@ export function OperationsPage(props: OperationsPageProps) {
         </div>
       </section>
       <section class="panel section-spaced">
-        <div class="section-head flush"><div><h2>Prontidão das fontes</h2><p>As buscas usam só fontes que passaram no teste de acesso.</p></div><button type="button" class="text-button" data-page="settings">Editar fontes →</button></div>
+        <div class="section-head flush"><div><h2>Prontidão das fontes</h2><p>As buscas usam só fontes com termos aceitos e teste de acesso aprovado.</p></div><button type="button" class="text-button" data-page="settings">Editar fontes →</button></div>
         <div class="table-wrap flat">
           <table class="data-table responsive-table">
             <thead><tr><th>Fonte</th><th>Prontidão</th><th>Detalhe</th><th>Último teste</th></tr></thead>
             <tbody>
               {data.sourceConfigs.length ? data.sourceConfigs.map((source) => {
-                const readiness = props.readiness(source.readiness_status);
+                // I49-07: a prontidão calculada (a da rodada), não só o último teste gravado.
+                const effective = source.effectiveReadiness ?? { status: source.readiness_status ?? "configured", reason: source.readiness_reason ?? "" };
+                const readiness = props.readiness(effective.status);
                 return (
                   <tr key={source.id}>
                     <td data-label="Fonte"><strong>{source.name}</strong><small>{source.domain}</small></td>
                     <td data-label="Prontidão"><span class={`status-pill ${readiness.tone}`}>{readiness.label}</span></td>
-                    <td data-label="Detalhe">{source.readiness_reason || "Ainda não testada"}</td>
+                    <td data-label="Detalhe">{effective.status === "ready" ? (source.readiness_reason || "Teste de acesso aprovado") : props.readinessReason(effective.reason)}</td>
                     <td data-label="Último teste">{formatDate(source.last_smoke_test_at)}</td>
                   </tr>
                 );
@@ -200,7 +206,10 @@ export function OperationsPage(props: OperationsPageProps) {
         </div>
       </section>
       <section class="panel section-spaced">
-        <div class="section-head flush"><div><h2>Rodadas de busca</h2><p>Cada rodada guarda o perfil usado e o resultado.</p></div></div>
+        <div class="section-head flush">
+          <div><h2>Rodadas de busca</h2><p>Cada rodada guarda o perfil usado e o resultado. A coleta é feita pelos agentes do Hermes.</p></div>
+          <button type="button" class="primary-button" data-action="start-round">Iniciar rodada</button>
+        </div>
         <div class="table-wrap flat">
           <table class="data-table responsive-table">
             <thead><tr><th>Início</th><th>Estado</th><th>Fontes</th><th>Resultado</th></tr></thead>
@@ -212,7 +221,7 @@ export function OperationsPage(props: OperationsPageProps) {
                   <tr key={round.id ?? index}>
                     <td data-label="Início"><strong>{formatDate(round.started_at)}</strong></td>
                     <td data-label="Estado"><span class={`status-pill ${status.tone}`}>{status.label}</span></td>
-                    <td data-label="Fontes">{(round.source_ids ?? []).length}</td>
+                    <td data-label="Fontes">{(round.source_ids ?? []).map(props.sourceName).join(", ") || "—"}</td>
                     <td data-label="Resultado">{`${counters.received ?? 0} recebidas · ${counters.accepted ?? 0} aceitas`}</td>
                   </tr>
                 );
