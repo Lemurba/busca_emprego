@@ -308,6 +308,56 @@ try {
       const run = await svc("POST", `/api/agents/${writer.id}/runs`, { id: "run-auth-gates", status: "running" });
       assert.equal(run.status, 201, JSON.stringify(run.data));
       assert.equal(run.data.agent_name, writer.name);
+
+      // Agente do cabeçalho (ator da auditoria) diferente do agente da rota: recusado.
+      const scout = (await svc("GET", "/api/agents/published")).data.find((agent) => agent.role_type === "source_scout" && agent.enabled);
+      assert.ok(scout);
+      const asScout = (method, path, body) => call({ ...svcHeaders, "x-radar-agent-id": scout.id }, method, path, body);
+      for (const [method, path, body] of [
+        ["POST", `/api/agents/${writer.id}/runs`, { status: "running" }],
+        ["POST", `/api/agents/${writer.id}/jobs`, { title: "X", company: "Y", source: "fixture", source_url: "https://jobs.example.test/x" }],
+        ["POST", `/api/agents/${writer.id}/batches`, { source_id: "gupy", items: [] }],
+        ["POST", `/api/agents/${writer.id}/jobs/${job.data.id}/enrichment`, { patch: {}, evidence_source_url: "https://jobs.example.test/x" }],
+      ]) {
+        const mismatch = await asScout(method, path, body);
+        assert.equal(mismatch.status, 409, `${method} ${path} com outro agente no cabeçalho: ${JSON.stringify(mismatch.data)}`);
+        assert.equal(mismatch.data.error, "agent.binding.mismatch");
+      }
+      assert.equal((await asScout("POST", `/api/agents/${scout.id}/runs`, { status: "running" })).status, 201, "mesmo agente no cabeçalho e na rota");
+      // Execução só de agente publicado e ativo, como o lote: pausar vale na hora.
+      const paused = await human("POST", "/api/agents", { name: "Agente pausado", role_type: "custom" });
+      assert.equal(paused.status, 201, JSON.stringify(paused.data));
+      assert.equal((await human("PATCH", `/api/agents/${paused.data.id}`, { enabled: false })).status, 200);
+      const pausedRun = await svc("POST", `/api/agents/${paused.data.id}/runs`, { status: "running" });
+      assert.equal(pausedRun.status, 403, JSON.stringify(pausedRun.data));
+      assert.ok(["agent.disabled", "agent.not_published"].includes(pausedRun.data.error), JSON.stringify(pausedRun.data));
+      // Lote do agente: domínios permitidos conferidos na API, não só no MCP.
+      const outside = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: scout.source_ids[0] ?? "gupy", items: [{ job_url: "https://evil.example.com/vaga/1", title: "X", company: "Y" }] });
+      assert.equal(outside.data?.error, "agent.domain.forbidden", JSON.stringify(outside.data));
+      // 25 itens com descrição longa (> 1 MB no total) cabem no limite do lote do agente.
+      const domain = scout.allowed_domains[0];
+      const longItems = Array.from({ length: 25 }, (_, index) => ({ job_url: `https://${domain}/vaga/${index}`, title: `Vaga ${index}`, company: "Empresa", description: "d".repeat(45_000) }));
+      const large = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: scout.source_ids[0] ?? "gupy", items: longItems });
+      assert.notEqual(large.status, 413, JSON.stringify(large.data));
+      assert.notEqual(large.data?.error, "payload_too_large");
+
+      // Atrás do proxy TLS, o MCP sem RADAR_FORWARDED_PROTO=https recebe 426 em toda ferramenta
+      // (por isso o env de cada servidor MCP repassa a variável); referência não resolvida é ignorada.
+      for (const proto of [undefined, "$\{env:RADAR_FORWARDED_PROTO}"]) {
+        if (proto === undefined) delete process.env.RADAR_FORWARDED_PROTO;
+        else process.env.RADAR_FORWARDED_PROTO = proto;
+        const plain = createRadarMcpServer({ role: "leitura" });
+        const plainClient = new Client({ name: "radar-auth-gates-tls", version: "1.0.0" });
+        const [left, right] = InMemoryTransport.createLinkedPair();
+        await Promise.all([plainClient.connect(left), plain.connect(right)]);
+        try {
+          const response = await plainClient.callTool({ name: "radar_list_sources", arguments: {} });
+          assert.equal(response.isError, true);
+          assert.equal(JSON.parse(response.content[0].text).error.code, "TLS_REQUIRED");
+        } finally {
+          await plainClient.close();
+        }
+      }
     } finally {
       await client.close();
       for (const name of ["RADAR_API_URL", "RADAR_INTERNAL_SERVICE_TOKEN", "RADAR_FORWARDED_PROTO"]) delete process.env[name];

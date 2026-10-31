@@ -7,6 +7,7 @@ import { z } from "zod";
 import { AGENT_ROLE_SCOPES } from "./agent-defaults.js";
 import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
 import { messageForCode, statusForCode, toDomainError, userMessage } from "./errors.js";
+import { SCREENSHOT_BASE64_MAX } from "./http-schemas.js";
 import { RADAR_MCP_ROLES, RADAR_MCP_TOOLS, type RadarMcpRole } from "./mcp-tools.js";
 import { registerProcess } from "./process-registry.js";
 
@@ -40,7 +41,8 @@ import { registerProcess } from "./process-registry.js";
  */
 
 class ToolError extends Error {
-  constructor(readonly code: string, message: string, readonly status?: number, readonly details?: unknown, readonly requestId?: string) {
+  /** `httpStatus`: status HTTP real da API (o `status` exposto pode manter o contrato antigo). */
+  constructor(readonly code: string, message: string, readonly status?: number, readonly details?: unknown, readonly requestId?: string, readonly httpStatus = status) {
     super(message);
     this.name = "ToolError";
   }
@@ -48,6 +50,10 @@ class ToolError extends Error {
 
 /** Mensagens pt-BR para os códigos estáveis devolvidos pelo núcleo (src/db.ts) via API. */
 const SAFE_MESSAGES: Record<string, string> = {
+  // Credencial do MCP (não a sessão do dashboard): token ausente, errado ou de outra instalação.
+  "unauthorized": "Token de serviço recusado pela API: confira RADAR_INTERNAL_SERVICE_TOKEN no env do servidor MCP (o mesmo do .env.local).",
+  "internal_token_required": "Token de serviço recusado pela API: confira RADAR_INTERNAL_SERVICE_TOKEN no env do servidor MCP (o mesmo do .env.local).",
+  "validation.id.invalid": "Identificador inválido.",
   "agent.not_found": "Agente não encontrado.",
   "agent.jobs.create.forbidden": "O agente não tem permissão para registrar vagas.",
   "agent.jobs.create_existing.forbidden": "A vaga já existe; use o enriquecimento.",
@@ -184,7 +190,20 @@ type ApiConfig = { baseUrl: string; token: string; forwardedProto: string; servi
 type RequestOptions = { body?: unknown; agentId?: string };
 
 const API_TIMEOUT_MS = 30_000;
-const segment = (value: string) => encodeURIComponent(value.trim());
+/**
+ * Um segmento de caminho da API. `.`/`..` sobrevivem ao encodeURIComponent e o fetch os
+ * colapsaria, levando a ferramenta a outra rota; ids assim são recusados.
+ */
+const segment = (value: string) => {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed === "." || trimmed === "..") throw new ToolError("validation.id.invalid", SAFE_MESSAGES["validation.id.invalid"]!, 400);
+  return encodeURIComponent(trimmed);
+};
+/** Proto declarado ao proxy TLS do dashboard; referência não resolvida ou vazia é ignorada. */
+const forwardedProtoFrom = (value: string | undefined) => {
+  const proto = String(value ?? "").trim().toLowerCase();
+  return proto === "http" || proto === "https" ? proto : "";
+};
 
 /**
  * Converte a resposta de erro da API (`{ error, message, details }`) no erro da ferramenta:
@@ -201,6 +220,9 @@ function apiError(status: number, data: unknown): ToolError {
   if (base === "AUTOMATION_DISABLED") return new ToolError("automation_disabled", "Candidatura automática pausada (kill-switch do painel ou RADAR_AUTO_APPLICATION_ENABLED).", status);
   // Legado: frase pt-BR do núcleo sem código (o servidor a devolve como request.rejected).
   if (base === "request.rejected") return new ToolError("radar.rule_violation", serverMessage, status);
+  // Legado: frase "… não encontrad…" do núcleo (o servidor a devolve como not_found/404). Em
+  // processo era radar.rule_violation/400; o 404 real segue em httpStatus para orNull.
+  if (base === "not_found" && serverMessage !== "Rota não encontrada.") return new ToolError("radar.rule_violation", serverMessage, 400, undefined, requestId, status);
   const code = base.startsWith("validation.") ? raw : base;
   return new ToolError(code, SAFE_MESSAGES[base] ?? serverMessage, status, body.details, requestId);
 }
@@ -246,7 +268,7 @@ function apiConfigFrom(role: string, options: RadarMcpServerOptions): ApiConfig 
   return {
     baseUrl: baseUrl.replace(/\/+$/u, ""),
     token: String(options.serviceToken ?? process.env.RADAR_INTERNAL_SERVICE_TOKEN ?? "").trim(),
-    forwardedProto: String(process.env.RADAR_FORWARDED_PROTO ?? "").trim(),
+    forwardedProto: forwardedProtoFrom(process.env.RADAR_FORWARDED_PROTO),
     serviceName: `mcp-${role}`,
   };
 }
@@ -315,7 +337,7 @@ async function orNull<T>(work: Promise<T>): Promise<T | null> {
   try {
     return await work;
   } catch (error) {
-    if (error instanceof ToolError && error.status === 404) return null;
+    if (error instanceof ToolError && error.httpStatus === 404) return null;
     throw error;
   }
 }
@@ -481,7 +503,7 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }));
 
   if (has("radar_ingest_batch")) server.registerTool("radar_ingest_batch", {
-    description: "Ingere um lote (até 25 itens) de uma fonte numa rodada de busca, com deduplicação, ocorrências e supressão (escopo jobs.create; URLs nos domínios permitidos). Sem round_id, inicia uma rodada para a fonte; envie next_cursor enquanto houver mais lotes.",
+    description: "Ingere um lote (até 25 itens) de uma fonte numa rodada de busca, com deduplicação, ocorrências e supressão (escopo jobs.create; URLs nos domínios permitidos). Sem round_id, inicia uma rodada para a fonte; envie next_cursor enquanto houver mais lotes. O corpo do lote vai até 8 MB (payload_too_large acima disso): divida lotes com descrições longas.",
     inputSchema: {
       agent_id: agentId,
       source_id: z.string().min(1),
@@ -675,6 +697,8 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
     const agent = await agentFor(agent_id, "application.prepare");
     requireAllowedDomain(agent, observed_url);
     await requireClaimHolder(api, application_id, worker_id);
+    // Mesmo limite da API: acima dele o esquema HTTP responderia invalid_body, não o código estável.
+    if (screenshot_base64.length > SCREENSHOT_BASE64_MAX) throw new ToolError("application.evidence.screenshot_too_large", SAFE_MESSAGES["application.evidence.screenshot_too_large"]!, 400);
     const requested = await api.post(`/api/applications/${segment(application_id)}/final-confirmation`, { worker_id, observed_url, fields_summary, screenshot_base64 }, actingAs(agent));
     return { application: await applicationView(api, application_id), evidence_id: requested.evidence_id };
   }));

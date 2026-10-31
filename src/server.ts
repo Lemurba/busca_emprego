@@ -15,7 +15,7 @@ import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { getResumeFactChecks, resolveResumeFact } from "./db.js";
-import { getApplication, getApplicationAuthorization, getPublishedAgentConfig, ingestJobFromAgent, listPublishedAgentConfigs, recordAgentRunForAgent, validateSourceBatch } from "./db.js";
+import { assertAgentUrlAllowed, getApplication, getApplicationAuthorization, getPublishedAgentConfig, ingestJobFromAgent, listPublishedAgentConfigs, recordAgentRunForAgent, validateSourceBatch } from "./db.js";
 import { connectorRoutes } from "./connectors/routes.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -192,13 +192,24 @@ function isServiceActor(actor: string) {
   return actor.startsWith("service:") || actor.startsWith("agent:");
 }
 
-/** Agente publicado e ativo com a capacidade nos escopos publicados (rotas de agente do MCP, #10). */
-function requirePublishedAgent(agentId: string, capability: string) {
+/** Agente publicado e ativo com a capacidade (se pedida) nos escopos publicados (rotas de agente do MCP, #10). */
+function requirePublishedAgent(agentId: string, capability?: string) {
   const { agent, published } = getPublishedAgentConfig(agentId, projectId);
   if (!published) throw new HttpError(403, "agent.not_published", "O agente não tem versão publicada.");
   if (!agent.enabled || !published.enabled) throw new HttpError(403, "agent.disabled", "O agente está desativado.");
-  if (!published.tool_scopes.includes(capability)) throw new HttpError(403, "agent.capability.forbidden", `O agente não tem o escopo ${capability}.`);
+  if (capability && !published.tool_scopes.includes(capability)) throw new HttpError(403, "agent.capability.forbidden", `O agente não tem o escopo ${capability}.`);
   return published;
+}
+
+/**
+ * Rotas /api/agents/{id}/*: o agente do caminho é quem escreve. Se o chamador declarou outro
+ * em `x-radar-agent-id`, a auditoria (`agent:<header>`) divergiria da escrita: recusa (409).
+ */
+function requirePathAgent(actor: string, agentId: string) {
+  if (actor.startsWith("agent:") && actor !== `agent:${agentId}`) {
+    throw new HttpError(409, "agent.binding.mismatch", "O agente do cabeçalho x-radar-agent-id difere do agente da rota.");
+  }
+  return agentId;
 }
 
 /**
@@ -267,6 +278,8 @@ function attachment(res: ServerResponse, mimeType: string, fileName: string, dat
 const S = "([^/]+)";
 /** Captura PNG de até 2 MB em base64 (~2,8 MB) + resumo dos campos. */
 const FINAL_CONFIRMATION_BODY_LIMIT = 4 * 1024 * 1024;
+/** Lote de agente: até 25 itens completos (descrições longas); acima disso, 413 e o agente divide o lote. */
+const AGENT_BATCH_BODY_LIMIT = 8 * 1024 * 1024;
 const r = (path: string) => new RegExp(`^${path.replaceAll("{id}", S)}$`, "u");
 
 const routes: Route[] = [
@@ -331,21 +344,28 @@ const routes: Route[] = [
   { method: "GET", pattern: r("/api/agents/{id}/published"), handler: ({ res, params }) => ok(res, 200, getPublishedAgentConfig(params[0]!, projectId)) },
   // Rotas de agente do servidor MCP (#10, só token de serviço): a identidade vem do caminho e o
   // domínio confere escopos e domínios permitidos da versão publicada.
-  { method: "POST", pattern: r("/api/agents/{id}/jobs"), handler: ({ res, params, body }) => ok(res, 201, ingestJobFromAgent(params[0]!, validateBody(schemas.jobCreate, body) as never, projectId)) },
-  { method: "POST", pattern: r("/api/agents/{id}/jobs/{id}/enrichment"), handler: ({ res, params, body }) => {
+  { method: "POST", pattern: r("/api/agents/{id}/jobs"), handler: ({ actor, res, params, body }) => ok(res, 201, ingestJobFromAgent(requirePathAgent(actor, params[0]!), validateBody(schemas.jobCreate, body) as never, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/jobs/{id}/enrichment"), handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.agentEnrichment, body);
-    ok(res, 200, enrichJobFromAgent(params[0]!, params[1]!, input.patch, input.evidence_source_url, String(input.evidence_excerpt ?? ""), projectId));
+    ok(res, 200, enrichJobFromAgent(requirePathAgent(actor, params[0]!), params[1]!, input.patch, input.evidence_source_url, String(input.evidence_excerpt ?? ""), projectId));
   } },
-  // Lote validado antes de abrir a rodada: lote inválido não deixa rodada órfã.
-  { method: "POST", pattern: r("/api/agents/{id}/batches"), handler: ({ res, params, body }) => {
+  // Lote validado antes de abrir a rodada: lote inválido não deixa rodada órfã. Domínios
+  // permitidos conferidos aqui também (como em ingestJobFromAgent), não só no MCP.
+  { method: "POST", pattern: r("/api/agents/{id}/batches"), bodyLimit: AGENT_BATCH_BODY_LIMIT, handler: ({ actor, res, params, body }) => {
     const input = validateBody(schemas.agentBatch, body);
-    const agent = requirePublishedAgent(params[0]!, "jobs.create");
+    const agent = requirePublishedAgent(requirePathAgent(actor, params[0]!), "jobs.create");
     const batch = { source_id: input.source_id, items: input.items, next_cursor: input.next_cursor ?? null };
-    validateSourceBatch(input.source_id, batch);
+    const { items } = validateSourceBatch(input.source_id, batch);
+    for (const item of items) {
+      for (const field of ["source_url", "job_url", "linkedin_post_url", "application_url"] as const) assertAgentUrlAllowed(agent, item[field]);
+    }
     const roundId = input.round_id ?? String(startSearchRound({ source_ids: [input.source_id] }, projectId, `agent:${agent.id}`).id);
     ok(res, 200, { round_id: roundId, ...ingestRoundBatch(roundId, input.source_id, batch, projectId, agent.id) });
   } },
-  { method: "POST", pattern: r("/api/agents/{id}/runs"), handler: ({ res, params, body }) => ok(res, 201, recordAgentRunForAgent(params[0]!, validateBody(schemas.agentRunReport, body), projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/runs"), handler: ({ actor, res, params, body }) => {
+    const agent = requirePublishedAgent(requirePathAgent(actor, params[0]!));
+    ok(res, 201, recordAgentRunForAgent(agent.id, validateBody(schemas.agentRunReport, body), projectId));
+  } },
   { method: "POST", pattern: r("/api/agents"), handler: ({ actor, res, body }) => ok(res, 201, createAgentConfig(validateBody(schemas.agentCreate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/agents/{id}/versions"), handler: ({ res, params }) => ok(res, 200, listAgentConfigVersions(params[0]!, projectId)) },
   { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => ok(res, 200, publishAgentConfigVersion(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },

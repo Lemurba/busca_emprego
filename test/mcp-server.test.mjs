@@ -138,6 +138,12 @@ try {
     const jobId = created.job.id;
     assert.equal((await ok("radar_get_job", { job_id: jobId })).job.title, "Analista de Produto");
     await refused("radar_get_job", { job_id: "inexistente" }, "job.not_found");
+    // `.`/`..` colapsariam no fetch e levariam a ferramenta a outra rota da API.
+    for (const job_id of [".", "..", " .. "]) {
+      const before = spy.calls.length;
+      await refused("radar_get_job", { job_id }, "validation.id.invalid");
+      assert.equal(spy.calls.length, before, `${JSON.stringify(job_id)} não chega à API`);
+    }
 
     // ---- agent_id obrigatório, agente desativado, domínio fora do allowlist, capacidade ----
     await refused("radar_discover_job", { source: "gupy", title: "X", company: "Y", source_url: "https://portal.gupy.io/job/9" });
@@ -158,6 +164,10 @@ try {
     store.recordJobDecision(jobId, "interested", "TENHO INTERESSE");
     const resume = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV Produto", content: "Experiência confirmada" });
     assert.ok(resume.resume.id);
+    // Frase legada "Vaga não encontrada." do núcleo: mesmo contrato de antes da API (rule_violation/400).
+    const missing = JSON.parse((await refused("radar_create_resume", { agent_id: writer.id, job_id: "vaga-inexistente", title: "CV" }, "radar.rule_violation")).content[0].text);
+    assert.equal(missing.error.status, 400);
+    assert.equal(missing.error.message, "Vaga não encontrada.");
     assert.deepEqual(resume.fact_check, { pending: [], warnings: [] });
     // #31: fatos inventados voltam para o agente como pendências que bloqueiam o APROVO.
     const invented = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV inventado", content: "Aumentei as vendas em 40% na Google usando Elixir." });
@@ -245,6 +255,8 @@ try {
     assert.equal((await ok("radar_get_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" })).confirmation.status, "not_requested");
     await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: TINY_PNG_BASE64 }, "application.claim.worker_mismatch");
     await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: Buffer.from("não é png").toString("base64") }, "application.evidence.screenshot_invalid");
+    // Acima do limite da API (2 MB decodificados) e dentro do esquema da ferramenta: código estável, não invalid_body.
+    await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: "A".repeat(2_850_000) }, "application.evidence.screenshot_too_large");
     const requested = await ok("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: TINY_PNG_BASE64 });
     assert.equal(requested.application.status, "awaiting_final_confirmation");
     assert.ok(requested.evidence_id);
@@ -330,7 +342,8 @@ try {
     const [left, right] = InMemoryTransport.createLinkedPair();
     await Promise.all([wrongClient.connect(left), wrong.connect(right)]);
     connections.push({ client: wrongClient, server: wrong });
-    await refused("radar_list_sources", {}, "unauthorized", wrongClient);
+    const wrongToken = JSON.parse((await refused("radar_list_sources", {}, "unauthorized", wrongClient)).content[0].text);
+    assert.match(wrongToken.error.message, /RADAR_INTERNAL_SERVICE_TOKEN/u, "aponta para o token do MCP, não para a sessão do dashboard");
     assert.ok((await ok("radar_list_sources", {}, online)).sources.length > 0);
     assert.throws(() => createRadarMcpServer({ role: "leitura", apiUrl: "ftp://radar" }), /RADAR_API_URL inválida/u);
   });

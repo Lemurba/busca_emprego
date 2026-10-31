@@ -34,7 +34,7 @@ const optUrl = z.string().max(4_000).refine((value) => value === "" || isHttpUrl
 /** URL obrigatória http(s). */
 const reqUrl = z.string().min(1).max(4_000).refine((value) => isHttpUrl(value), { message: "url.scheme.invalid" });
 /** Captura PNG de até 2 MB decodificados (base64 ≈ 4/3), opcionalmente com prefixo data:. */
-const SCREENSHOT_BASE64_MAX = Math.ceil((2 * 1024 * 1024) / 3) * 4 + 64;
+export const SCREENSHOT_BASE64_MAX = Math.ceil((2 * 1024 * 1024) / 3) * 4 + 64;
 
 const jobFields = {
   id: optId,

@@ -3027,7 +3027,7 @@ export function listHumanQuestions(applicationId?: string) {
   return (rows as Record<string, unknown>[]).map((row) => ({ ...row, required: Number(row.required ?? 1) === 1, choices: parseJsonArray(row.choices_json) }));
 }
 
-function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
+export function assertAgentUrlAllowed(agent: Pick<AgentConfig, "allowed_domains">, value: unknown) {
   if (!value) return;
   const canonicalUrl = canonicalizeJobUrl(String(value));
   const hostname = new URL(canonicalUrl).hostname.toLowerCase();
