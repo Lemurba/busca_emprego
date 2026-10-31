@@ -1,5 +1,7 @@
 # Crítica de design, UI e UX — Radar de Vagas — 2026-10-11
 
+> **Documento histórico (11/10/2026).** Crítica da interface em `4193615`, antes da migração das páginas para Preact (`public/ui/pages/*.tsx`); os `arquivo:linha` de `public/app.ts` referem-se àquele commit. O que restou da §12 está em [`docs/backlog-triagem-2026-10-30.md`](backlog-triagem-2026-10-30.md) e na seção “Status da aplicação” de [`docs/auditoria-2026-10-30.md`](auditoria-2026-10-30.md#status-da-aplicação).
+
 Escopo: frontend do dashboard em `main` (`4193615`): `public/index.html`, `public/app.ts` e `public/styles.css`, mais os cabeçalhos HTTP de `src/server.ts` que afetam a interface. Todos os achados vêm da leitura do código, com `arquivo:linha`. Os contrastes foram calculados pela fórmula WCAG 2.x a partir das cores declaradas no CSS. A interface não foi aberta num navegador para este relatório. Itens marcados com **(provável)** dependem do comportamento do navegador e precisam ser confirmados na tela.
 
 Severidade:
