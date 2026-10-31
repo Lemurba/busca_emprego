@@ -35,6 +35,8 @@ const STATUS_RULES: Array<[RegExp, number]> = [
   [/^resume\.unverified_facts$/u, 409],
   // #49: já há um rascunho de perfil aberto (nova versão espera o atual ser confirmado ou descartado).
   [/^profile\.draft_exists$/u, 409],
+  // #49: rascunho mais velho que o perfil ativo (confirmá-lo desfaria a versão nova).
+  [/^profile\.draft_stale$/u, 409],
   [/^resume\.pdf_parse_failed$/u, 409],
   [/^validation\./u, 422],
   [/^(?:PDF|PROFILE|ATS|ROUND|BASE_RESUME|SUBMISSION|SCHEMA_INVALID)_?/u, 422],
@@ -113,6 +115,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "profile.draft_required": "Só um perfil em rascunho pode ser alterado: crie uma nova versão a partir do perfil confirmado.",
   "profile.confirmed_required": "A nova versão parte do perfil confirmado (ativo).",
   "profile.draft_exists": "Já existe um perfil em rascunho: revise-o ou descarte-o antes de criar outra versão.",
+  "profile.draft_stale": "Este rascunho é mais antigo que o perfil ativo: descarte-o e crie uma nova versão a partir do perfil ativo.",
   "profile.fact.not_found": "Essa informação não existe neste perfil. Atualize a página.",
   "profile.fact.state.invalid": "Estado ou origem da informação do perfil inválido.",
   "profile.fact.evidence.required": "Esta informação precisa de evidência (página ou trecho) para ser confirmada.",

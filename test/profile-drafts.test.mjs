@@ -78,7 +78,9 @@ describe("#49: descartar rascunho e nova versão", () => {
     assert.throws(() => store.createProfileNewVersion(active.id, "service:hermes"), /profile\.new_version\.forbidden/u);
     const next = store.createProfileNewVersion(active.id, "human:dashboard");
     assert.equal(next.status, "draft");
-    assert.equal(next.version, active.version + 1);
+    // Versão descartada não é reaproveitada: N+1 parte da maior entre a ativa e a última descartada.
+    const lastDeleted = Number(store.db.prepare("SELECT MAX(CAST(json_extract(payload,'$.version') AS INTEGER)) AS v FROM audit_events WHERE entity_type='profile' AND event_type='draft_deleted'").get().v ?? 0);
+    assert.equal(next.version, Math.max(active.version, lastDeleted) + 1);
     assert.equal(next.source, active.source);
     assert.equal(next.context.confirmed_facts, undefined, "confirmed_facts é recalculado na confirmação");
     const pairs = (facts) => facts.map((fact) => `${fact.type}:${fact.state}`).sort();
@@ -96,6 +98,7 @@ describe("#49: descartar rascunho e nova versão", () => {
 
 describe("QA-10: origem do perfil", () => {
   test("import de JSON Resume é json_resume, inclusive na nova versão; perfil do PDF é pdf", () => {
+    discardAllDrafts();
     const imported = store.importJsonResumeProfile(sample, "human:dashboard");
     assert.equal(imported.source, "json_resume");
     assert.equal(imported.base_resume_id, null);
@@ -106,5 +109,85 @@ describe("QA-10: origem do perfil", () => {
     store.deleteDraftProfile(next.id, "human:dashboard");
     assert.equal(store.createProfessionalProfile({ context: { name: "Manual" } }, "human:dashboard").source, "pdf");
     discardAllDrafts();
+  });
+});
+
+describe("QA-10: um rascunho por vez e versões", () => {
+  test("import de JSON Resume com rascunho aberto é profile.draft_exists; descartado não reaproveita a versão", () => {
+    discardAllDrafts();
+    const first = store.importJsonResumeProfile(sample, "service:hermes");
+    assert.throws(() => store.importJsonResumeProfile(sample, "service:hermes"), /profile\.draft_exists/u);
+    assert.deepEqual(draftIds(), [first.id]);
+    store.deleteDraftProfile(first.id, "human:dashboard");
+    const second = store.importJsonResumeProfile(sample, "human:dashboard");
+    assert.equal(second.version, first.version + 1, "“Rascunho vN” nunca volta para outro perfil");
+    discardAllDrafts();
+  });
+
+  test("checagem de fatos do currículo num perfil JSON Resume mantém a origem json_resume", () => {
+    discardAllDrafts();
+    const imported = store.importJsonResumeProfile(sample, "human:dashboard");
+    store.reviewAllProfileFacts(imported.id, "confirmed", "human:dashboard");
+    const confirmed = store.confirmProfessionalProfile(imported.id, "human:dashboard");
+    const job = store.upsertJob({ id: "qa10-json-job", title: "Backend", company: "Contratante", source: "fixture", source_url: "https://jobs.example/qa10-json" });
+    store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
+    const resume = store.createResume({ job_id: job.id, title: "CV", content: "Liderei a migração para a nuvem na Globex." });
+    const claim = store.getResumeFactChecks(resume.id).pending.find((row) => row.claim_text === "Globex");
+    assert.ok(claim, "empresa nova é afirmação pendente");
+    store.resolveResumeFact(resume.id, claim.claim_id, { action: "confirm" }, "human:dashboard");
+    const active = store.getActiveProfile();
+    assert.equal(active.version, confirmed.version + 1);
+    assert.equal(active.source, "json_resume", "a cópia de version_from_resume_fact não volta a ser pdf");
+  });
+
+  test("rascunho mais velho que o perfil ativo não é confirmado (profile.draft_stale)", () => {
+    discardAllDrafts();
+    const active = store.getActiveProfile();
+    const stale = store.createProfileNewVersion(active.id, "human:dashboard");
+    const job = store.upsertJob({ id: "stale-job", title: "Backend", company: "Contratante", source: "fixture", source_url: "https://jobs.example/stale" });
+    store.recordJobDecision(job.id, "interested", "TENHO INTERESSE");
+    const resume = store.createResume({ job_id: job.id, title: "CV", content: "Liderei a migração para a nuvem na Initech." });
+    const claim = store.getResumeFactChecks(resume.id).pending.find((row) => row.claim_text === "Initech");
+    store.resolveResumeFact(resume.id, claim.claim_id, { action: "confirm" }, "human:dashboard");
+    const newer = store.getActiveProfile();
+    assert.ok(newer.version > stale.version, "a checagem confirmou uma versão acima do rascunho aberto");
+    assert.throws(() => store.confirmProfessionalProfile(stale.id, "human:dashboard"), /profile\.draft_stale/u);
+    assert.equal(store.getActiveProfile().id, newer.id, "o perfil ativo não volta para trás");
+    assert.ok(store.getActiveProfile().facts.some((fact) => fact.value === "Initech"));
+    discardAllDrafts();
+  });
+});
+
+describe("QA-04: entrevista humana x respostas repassadas", () => {
+  test("resposta da pessoa substitui a proposta do agente; agente depois dela é ignorado; Confirmar todos não pega repassadas", () => {
+    discardAllDrafts();
+    const draft = store.createProfessionalProfile({ facts: [
+      { type: "accepted_locations", value: ["SP"], origin: "derived" },
+      { type: "skills", value: ["SQL"], origin: "derived", evidence_excerpt: "SQL no resumo" },
+    ] }, "human:dashboard");
+    store.answerProfileInterview(draft.id, "work_models", ["onsite"], "agent:preferencias");
+    store.answerProfileInterview(draft.id, "years_experience", 4, "service:hermes");
+    let listed = store.getBootstrap().draftProfiles.find((item) => item.id === draft.id);
+    assert.deepEqual(listed.facts.filter((fact) => fact.interview_proposal).map((fact) => fact.type).sort(), ["work_models", "years_experience"]);
+
+    // Sem evidência e eliminatório: responder na entrevista resolve (a proposta é rejeitada).
+    store.answerProfileInterview(draft.id, "accepted_locations", ["Lisboa"], "human:dashboard");
+    store.answerProfileInterview(draft.id, "work_models", ["remote"], "human:dashboard");
+    const relayedAfter = store.answerProfileInterview(draft.id, "work_models", ["hybrid"], "agent:preferencias");
+    assert.equal(relayedAfter.already_answered, true);
+    const state = (type) => store.listProfileFacts(draft.id).filter((fact) => fact.type === type).map((fact) => [fact.origin, fact.state, fact.value]).sort();
+    assert.deepEqual(state("accepted_locations"), [["derived", "rejected", ["SP"]], ["user", "confirmed", ["Lisboa"]]]);
+    assert.deepEqual(state("work_models"), [["derived", "rejected", ["onsite"]], ["user", "confirmed", ["remote"]]]);
+
+    const reviewed = store.reviewAllProfileFacts(draft.id, "confirmed", "human:dashboard");
+    assert.equal(reviewed.confirmed, 1, "só o fato com evidência do currículo");
+    assert.equal(reviewed.skipped, 1, "a resposta repassada (years_experience) fica para revisão uma a uma");
+    assert.deepEqual(state("years_experience"), [["derived", "proposed", 4]]);
+    listed = store.getBootstrap().draftProfiles.find((item) => item.id === draft.id);
+    assert.equal(listed.pending, 1);
+    const years = listed.facts.find((fact) => fact.type === "years_experience");
+    store.reviewProfileFact(years.id, "confirmed", "human:dashboard", draft.id);
+    const confirmed = store.confirmProfessionalProfile(draft.id, "human:dashboard");
+    assert.deepEqual(confirmed.snapshot.facts.filter((fact) => fact.type === "work_models").map((fact) => fact.value), [["remote"]], "só a resposta da pessoa vale");
   });
 });

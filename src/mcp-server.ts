@@ -130,6 +130,7 @@ const SAFE_MESSAGES: Record<string, string> = {
   "human_question.answer.invalid": "Resposta vazia ou longa demais.",
   "profile.not_found": "Rascunho de perfil não encontrado.",
   "profile.draft_required": "Não há perfil em rascunho: peça à pessoa para criar uma nova versão do perfil no dashboard antes da entrevista.",
+  "profile.draft_ambiguous": "Há mais de um perfil em rascunho: informe profile_id (o rascunho que a pessoa está revisando).",
   "profile.interview.invalid": "Resposta inválida: informe a pergunta e um valor; listas aceitam só textos, números ou sim/não.",
   "profile.fact.invalid": "Resposta inválida para este eliminatório (veja o formato na descrição da ferramenta).",
 };
@@ -690,10 +691,10 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   })));
 
   if (has("radar_answer_profile_interview")) server.registerTool("radar_answer_profile_interview", {
-    description: "Entrevistador de preferências (escopo preferences.write) grava a resposta da pessoa a uma pergunta da entrevista no perfil em RASCUNHO (o mais recente, ou profile_id). A resposta vira fato PROPOSTO: só vale para os eliminatórios depois que a pessoa a confirma no dashboard. Formatos dos eliminatórios: accepted_locations = lista de locais; work_models = lista com remote, hybrid, onsite; work_authorization = {countries: [...], needs_sponsorship: true|false}; years_experience = número. Sem rascunho → profile.draft_required (a pessoa cria uma nova versão no dashboard).",
+    description: "Entrevistador de preferências (escopo preferences.write) grava a resposta da pessoa a uma pergunta da entrevista no perfil em RASCUNHO (o mais recente, ou profile_id). A resposta vira fato PROPOSTO: só vale para os eliminatórios depois que a pessoa a confirma no dashboard. Formatos dos eliminatórios: accepted_locations = lista de locais; work_models = lista com remote, hybrid, onsite; work_authorization = {countries: [...], needs_sponsorship: true|false}; years_experience = número. Sem rascunho → profile.draft_required (a pessoa cria uma nova versão no dashboard); com mais de um rascunho, informe profile_id (profile.draft_ambiguous). Pergunta já respondida pela pessoa no dashboard → already_answered, nada é gravado.",
     inputSchema: {
       agent_id: agentId,
-      profile_id: z.string().min(1).optional().describe("Rascunho do perfil; sem ele, usa o rascunho mais recente."),
+      profile_id: z.string().min(1).optional().describe("Rascunho do perfil; obrigatório quando há mais de um rascunho, senão usa o único aberto."),
       question_key: z.string().min(1).max(80).describe("Chave da pergunta: accepted_locations, work_models, work_authorization, years_experience ou outro tipo de fato."),
       answer: z.union([
         z.string().max(2_000), z.number(), z.boolean(),
@@ -704,11 +705,24 @@ export function createRadarMcpServer(options: RadarMcpServerOptions = {}) {
   }, async ({ agent_id, profile_id, question_key, answer }) => execute(() => {
     const agent = agentFor(agent_id, "preferences.write");
     const drafts = listDraftProfiles(PROJECT_ID);
+    // Com mais de um rascunho, adivinhar o mais recente podia gravar num rascunho que a pessoa não está revisando.
+    if (!profile_id && drafts.length > 1) throw new ToolError("profile.draft_ambiguous", SAFE_MESSAGES["profile.draft_ambiguous"]!);
     const draft = profile_id ? drafts.find((item) => item.id === profile_id) : drafts[0];
     if (!draft) throw new ToolError("profile.draft_required", SAFE_MESSAGES["profile.draft_required"]!);
     // Ator agent:* → fato proposto (answerProfileInterview), nunca declaração humana confirmada.
-    answerProfileInterview(draft.id, question_key, answer, `agent:${agent.id}`, PROJECT_ID);
+    const result = answerProfileInterview(draft.id, question_key, answer, `agent:${agent.id}`, PROJECT_ID);
     const current = listDraftProfiles(PROJECT_ID).find((item) => item.id === draft.id);
+    if (result.already_answered) {
+      return {
+        profile_id: draft.id,
+        version: draft.version,
+        proposed: false,
+        already_answered: true,
+        pending_review: current?.pending ?? 0,
+        missing_blockers: current?.missing_blockers ?? [],
+        next_step: "A pessoa já respondeu esta pergunta no dashboard; a resposta dela prevalece e nada foi gravado. Se ela quiser mudar, é ela quem corrige na entrevista do rascunho.",
+      };
+    }
     return {
       profile_id: draft.id,
       version: draft.version,

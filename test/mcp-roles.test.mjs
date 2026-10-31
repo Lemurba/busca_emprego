@@ -184,6 +184,17 @@ try {
     assert.equal(fact.origin, "derived");
     assert.deepEqual(fact.value, ["remote", "hybrid"]);
     await refused(preferencias, "radar_answer_profile_interview", { ...answer, question_key: "years_experience", answer: "muitos" }, "profile.fact.invalid");
+
+    // A pessoa já respondeu no dashboard: o agente não grava nada por cima.
+    store.answerProfileInterview(draft.id, "accepted_locations", ["Lisboa"], "human:dashboard");
+    const ignored = await ok(preferencias, "radar_answer_profile_interview", { ...answer, question_key: "accepted_locations", answer: ["Porto"] });
+    assert.equal(ignored.already_answered, true);
+    assert.equal(ignored.proposed, false);
+    assert.deepEqual(store.listProfileFacts(draft.id).filter((item) => item.type === "accepted_locations").map((item) => [item.origin, item.value]), [["user", ["Lisboa"]]]);
+    // Com mais de um rascunho, o agente precisa dizer qual (não adivinha o mais recente).
+    const other = store.createProfessionalProfile({ context: { name: "Outro rascunho" } }, "human:dashboard");
+    await refused(preferencias, "radar_answer_profile_interview", answer, "profile.draft_ambiguous");
+    assert.equal((await ok(preferencias, "radar_answer_profile_interview", { ...answer, profile_id: other.id })).profile_id, other.id);
   });
 } finally {
   delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
