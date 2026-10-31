@@ -16,6 +16,7 @@ import { validateJsonResume } from "./json-resume.js";
 import { checkJobLivenessNow, listJobsForLivenessCheck } from "./db.js";
 import { automationOverview, cancelFinalConfirmation, confirmFinalSubmission, getApplicationEvidence, pollFinalConfirmation, requestFinalConfirmation, updateAutomationSettings } from "./db.js";
 import { getResumeFactChecks, resolveResumeFact } from "./db.js";
+import { assertAgentUrlAllowed, getApplication, getApplicationAuthorization, getPublishedAgentConfig, ingestJobFromAgent, listPublishedAgentConfigs, recordAgentRunForAgent, validateSourceBatch } from "./db.js";
 import { connectorRoutes } from "./connectors/routes.js";
 import { schemas, validateBody } from "./http-schemas.js";
 import { DEFAULT_BODY_LIMIT, HttpError, MUTATING_METHODS, SESSION_COOKIE, SessionStore, UPLOAD_BODY_LIMIT, assertSafeMutation, AuthFailureLimiter, clearedSessionCookie, clientAddress, errorResponse, isHostAllowed, isTlsRequest, parseAllowedHosts, parseCookies, readJsonBody, safeEqual, sessionCookie, sessionTtlMs } from "./http-security.js";
@@ -104,7 +105,10 @@ function isInternalRequest(method: string | undefined, pathname: string) {
       || /^\/api\/rounds\/[^/]+\/(?:batch|status)$/u.test(pathname)
       || /^\/api\/jobs\/[^/]+\/score$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
-    );
+      // #10: rotas de agente do servidor MCP (ingestão, lote, enriquecimento e execuções).
+      || /^\/api\/agents\/[^/]+\/(?:jobs|batches|runs|jobs\/[^/]+\/enrichment)$/u.test(pathname)
+    )
+    || method === "GET" && /^\/api\/applications\/[^/]+\/authorization$/u.test(pathname);
 }
 
 function isAutomationRequest(method: string | undefined, pathname: string) {
@@ -112,7 +116,8 @@ function isAutomationRequest(method: string | undefined, pathname: string) {
     || method === "POST" && (
       /^\/api\/applications\/[^/]+\/(?:authorize-auto|claim|heartbeat|questions|submit|fail|final-confirmation|final-confirmation\/poll|confirm-final)$/u.test(pathname)
       || /^\/api\/human-questions\/[^/]+\/(?:delivery|answer)$/u.test(pathname)
-    );
+    )
+    || method === "GET" && /^\/api\/applications\/[^/]+\/authorization$/u.test(pathname);
 }
 
 /**
@@ -151,6 +156,21 @@ function serviceName(req: IncomingMessage) {
 }
 
 /**
+ * Ator do token de serviço. O servidor MCP (#10) declara o agente em `x-radar-agent-id`:
+ * a auditoria grava `agent:<agent_id>` (#19). O agente precisa existir no projeto; o
+ * cabeçalho só rotula, não dá permissão além das do token de serviço.
+ */
+function serviceActor(req: IncomingMessage) {
+  const header = req.headers["x-radar-agent-id"];
+  const agentId = (typeof header === "string" ? header : "").trim();
+  if (!agentId) return `service:${serviceName(req)}`;
+  if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(agentId) || !listAgentConfigs(projectId).some((agent) => agent.id === agentId)) {
+    throw new HttpError(404, "agent.not_found", "Agente não encontrado.");
+  }
+  return `agent:${agentId}`;
+}
+
+/**
  * Autentica e devolve o ator derivado da credencial (#19): `human:dashboard` para a sessão,
  * `service:<nome>` para o token de serviço. Agentes MCP gravam `agent:<agent_id>`.
  */
@@ -158,19 +178,39 @@ function authenticate(req: IncomingMessage, pathname: string): string {
   if (isInternalRequest(req.method, pathname)) {
     if (!serviceToken()) throw new HttpError(503, "internal_token_not_configured", "O token de serviço interno não está configurado no servidor.");
     if (!hasServiceToken(req)) throw new HttpError(401, "internal_token_required", "Esta rota aceita somente o token de serviço interno.");
-    return `service:${serviceName(req)}`;
+    return serviceActor(req);
   }
   if (hasSession(req)) return "human:dashboard";
   if (hasServiceToken(req)) {
     if (isHumanOnlyRequest(req.method, pathname)) throw new HttpError(403, "human_session_required", "Esta decisão é humana: confirme pelo dashboard.");
-    return `service:${serviceName(req)}`;
+    return serviceActor(req);
   }
   throw new HttpError(401, "unauthorized", "Sessão ausente ou expirada. Abra o link de acesso enviado pelo Hermes.");
 }
 
-/** Ator do token de serviço (Hermes, scripts): só propõe; quem declara ou confirma é o humano. */
+/** Ator do token de serviço (Hermes, scripts, agentes MCP): só propõe; quem declara ou confirma é o humano. */
 function isServiceActor(actor: string) {
-  return actor.startsWith("service:");
+  return actor.startsWith("service:") || actor.startsWith("agent:");
+}
+
+/** Agente publicado e ativo com a capacidade (se pedida) nos escopos publicados (rotas de agente do MCP, #10). */
+function requirePublishedAgent(agentId: string, capability?: string) {
+  const { agent, published } = getPublishedAgentConfig(agentId, projectId);
+  if (!published) throw new HttpError(403, "agent.not_published", "O agente não tem versão publicada.");
+  if (!agent.enabled || !published.enabled) throw new HttpError(403, "agent.disabled", "O agente está desativado.");
+  if (capability && !published.tool_scopes.includes(capability)) throw new HttpError(403, "agent.capability.forbidden", `O agente não tem o escopo ${capability}.`);
+  return published;
+}
+
+/**
+ * Rotas /api/agents/{id}/*: o agente do caminho é quem escreve. Se o chamador declarou outro
+ * em `x-radar-agent-id`, a auditoria (`agent:<header>`) divergiria da escrita: recusa (409).
+ */
+function requirePathAgent(actor: string, agentId: string) {
+  if (actor.startsWith("agent:") && actor !== `agent:${agentId}`) {
+    throw new HttpError(409, "agent.binding.mismatch", "O agente do cabeçalho x-radar-agent-id difere do agente da rota.");
+  }
+  return agentId;
 }
 
 /**
@@ -239,6 +279,8 @@ function attachment(res: ServerResponse, mimeType: string, fileName: string, dat
 const S = "([^/]+)";
 /** Captura PNG de até 2 MB em base64 (~2,8 MB) + resumo dos campos. */
 const FINAL_CONFIRMATION_BODY_LIMIT = 4 * 1024 * 1024;
+/** Lote de agente: até 25 itens completos (descrições longas); acima disso, 413 e o agente divide o lote. */
+const AGENT_BATCH_BODY_LIMIT = 8 * 1024 * 1024;
 const r = (path: string) => new RegExp(`^${path.replaceAll("{id}", S)}$`, "u");
 
 const routes: Route[] = [
@@ -300,6 +342,33 @@ const routes: Route[] = [
 
   // Agentes
   { method: "GET", pattern: r("/api/agents"), handler: ({ res }) => ok(res, 200, listAgentConfigs(projectId)) },
+  // Snapshots publicados (rascunho nunca aparece): o catálogo que agentes e o MCP enxergam.
+  { method: "GET", pattern: r("/api/agents/published"), handler: ({ res }) => ok(res, 200, listPublishedAgentConfigs(projectId)) },
+  { method: "GET", pattern: r("/api/agents/{id}/published"), handler: ({ res, params }) => ok(res, 200, getPublishedAgentConfig(params[0]!, projectId)) },
+  // Rotas de agente do servidor MCP (#10, só token de serviço): a identidade vem do caminho e o
+  // domínio confere escopos e domínios permitidos da versão publicada.
+  { method: "POST", pattern: r("/api/agents/{id}/jobs"), handler: ({ actor, res, params, body }) => ok(res, 201, ingestJobFromAgent(requirePathAgent(actor, params[0]!), validateBody(schemas.jobCreate, body) as never, projectId)) },
+  { method: "POST", pattern: r("/api/agents/{id}/jobs/{id}/enrichment"), handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.agentEnrichment, body);
+    ok(res, 200, enrichJobFromAgent(requirePathAgent(actor, params[0]!), params[1]!, input.patch, input.evidence_source_url, String(input.evidence_excerpt ?? ""), projectId));
+  } },
+  // Lote validado antes de abrir a rodada: lote inválido não deixa rodada órfã. Domínios
+  // permitidos conferidos aqui também (como em ingestJobFromAgent), não só no MCP.
+  { method: "POST", pattern: r("/api/agents/{id}/batches"), bodyLimit: AGENT_BATCH_BODY_LIMIT, handler: ({ actor, res, params, body }) => {
+    const input = validateBody(schemas.agentBatch, body);
+    const agent = requirePublishedAgent(requirePathAgent(actor, params[0]!), "jobs.create");
+    const batch = { source_id: input.source_id, items: input.items, next_cursor: input.next_cursor ?? null };
+    const { items } = validateSourceBatch(input.source_id, batch);
+    for (const item of items) {
+      for (const field of ["source_url", "job_url", "linkedin_post_url", "application_url"] as const) assertAgentUrlAllowed(agent, item[field]);
+    }
+    const roundId = input.round_id ?? String(startSearchRound({ source_ids: [input.source_id] }, projectId, `agent:${agent.id}`).id);
+    ok(res, 200, { round_id: roundId, ...ingestRoundBatch(roundId, input.source_id, batch, projectId, agent.id) });
+  } },
+  { method: "POST", pattern: r("/api/agents/{id}/runs"), handler: ({ actor, res, params, body }) => {
+    const agent = requirePublishedAgent(requirePathAgent(actor, params[0]!));
+    ok(res, 201, recordAgentRunForAgent(agent.id, validateBody(schemas.agentRunReport, body), projectId));
+  } },
   { method: "POST", pattern: r("/api/agents"), handler: ({ actor, res, body }) => ok(res, 201, createAgentConfig(validateBody(schemas.agentCreate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/agents/{id}/versions"), handler: ({ res, params }) => ok(res, 200, listAgentConfigVersions(params[0]!, projectId)) },
   { method: "POST", pattern: r("/api/agents/{id}/publish"), handler: ({ actor, res, params, body }) => ok(res, 200, publishAgentConfigVersion(params[0]!, String(validateBody(schemas.agentVersion, body).version_id ?? ""), actor, projectId)) },
@@ -396,7 +465,8 @@ const routes: Route[] = [
   { method: "POST", pattern: r("/api/possible-duplicates/{id}/resolve"), handler: ({ actor, res, params, body }) => ok(res, 200, resolvePossibleDuplicate(params[0]!, String(validateBody(schemas.duplicateResolve, body).status ?? "") as "merged" | "distinct" | "dismissed", actor)) },
 
   // Currículos adaptados
-  { method: "POST", pattern: r("/api/resumes"), handler: ({ actor, res, body }) => ok(res, 201, createResume(validateBody(schemas.resumeCreate, body) as never, actor)) },
+  // Rascunho de agente MCP (`agent:*`) é do redator: entra na revisão de conteúdo inventado.
+  { method: "POST", pattern: r("/api/resumes"), handler: ({ actor, res, body }) => ok(res, 201, createResume({ ...validateBody(schemas.resumeCreate, body), ...(actor.startsWith("agent:") ? { generation_source: "writer" } : {}) } as never, actor)) },
   { method: "POST", pattern: r("/api/resumes/generate"), handler: ({ actor, res, body }) => ok(res, 201, generateAtsResume(validateBody(schemas.resumeGenerate, body), actor, projectId)) },
   { method: "GET", pattern: r("/api/resumes/{id}/files/(pdf|docx)"), handler: async ({ res, params }) => {
     const resume = getResume(params[0]!);
@@ -448,6 +518,13 @@ const routes: Route[] = [
   // Candidaturas
   { method: "POST", pattern: r("/api/applications"), handler: ({ actor, res, body }) => ok(res, 201, createApplication(validateBody(schemas.applicationCreate, body) as never, actor)) },
   { method: "GET", pattern: r("/api/authorized-applications"), handler: ({ res }) => ok(res, 200, listAuthorizedApplications()) },
+  { method: "GET", pattern: r("/api/applications/{id}"), handler: ({ res, params }) => {
+    const application = getApplication(params[0]!);
+    if (!application) throw new HttpError(404, "application.not_found", "Candidatura não encontrada.");
+    ok(res, 200, application);
+  } },
+  // Autorização vigente (sem nonce) para o executor conferir URL e hash antes de agir (#10).
+  { method: "GET", pattern: r("/api/applications/{id}/authorization"), handler: ({ res, params }) => ok(res, 200, getApplicationAuthorization(params[0]!)) },
   { method: "POST", pattern: r("/api/applications/{id}/claim"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.applicationClaim, body);
     ok(res, 200, claimAuthorizedApplication(params[0]!, String(input.worker_id ?? ""), String(input.nonce ?? "")));
@@ -492,7 +569,7 @@ const routes: Route[] = [
   // Preferências e perguntas humanas
   { method: "GET", pattern: r("/api/preferences"), handler: ({ res }) => ok(res, 200, listPreferenceState(projectId)) },
   { method: "PATCH", pattern: r("/api/preference-rules/{id}"), handler: ({ res, params, body }) => ok(res, 200, setPreferenceRuleState(params[0]!, String(validateBody(schemas.preferenceRule, body).state ?? ""))) },
-  { method: "GET", pattern: r("/api/human-questions"), handler: ({ res }) => ok(res, 200, listHumanQuestions()) },
+  { method: "GET", pattern: r("/api/human-questions"), handler: ({ req, res }) => ok(res, 200, listHumanQuestions(new URL(req.url ?? "/", "http://radar.invalid").searchParams.get("application_id") || undefined)) },
   { method: "POST", pattern: r("/api/human-questions/{id}/delivery"), handler: ({ res, params, body }) => {
     const input = validateBody(schemas.humanDelivery, body);
     ok(res, 200, markHumanQuestionDelivery(params[0]!, Boolean(input.delivered), input.message_ref == null ? undefined : String(input.message_ref), input.error == null ? undefined : String(input.error)));

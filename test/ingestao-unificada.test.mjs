@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { startRadarServer } from "./helpers/radar-server.mjs";
 
 // Issues #13 (regras "Não tenho interesse" ocultam vagas em todo caminho) e #15 (ingestão
 // única: identidade, dedup multi-chave e ocorrências iguais no lote e no MCP).
@@ -16,6 +17,10 @@ const [{ createRadarMcpServer }, store] = await Promise.all([
   import("../src/mcp-server.ts"),
   import("../src/db.ts"),
 ]);
+// #10: o MCP chama a API HTTP do dashboard (servidor real sobre o mesmo banco do teste).
+const api = await startRadarServer({ dbPath: process.env.RADAR_DB_PATH });
+process.env.RADAR_API_URL = api.url;
+process.env.RADAR_INTERNAL_SERVICE_TOKEN = api.token;
 const server = createRadarMcpServer({ role: "coleta" });
 const client = new Client({ name: "radar-ingestao-test", version: "1.0.0" });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -162,6 +167,7 @@ try {
 } finally {
   await client.close();
   await server.close();
+  await api.stop();
   store.db.close();
   rmSync(directory, { recursive: true, force: true });
 }

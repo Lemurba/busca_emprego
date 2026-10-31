@@ -70,6 +70,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PDF_SIGNATURE_INVALID: "O arquivo enviado não parece ser um PDF válido.",
   "workflow.version_conflict": "A vaga foi alterada em outra tela. Atualize e tente de novo.",
   "application.url_mismatch": "A URL observada não corresponde à URL autorizada.",
+  "application.authorization.unavailable": "Autorização indisponível, expirada, já usada ou desatualizada.",
+  "agent_run.agent_mismatch": "A execução pertence a outro agente.",
   "application.url.insecure": "A candidatura automática exige que a URL de candidatura use HTTPS.",
   "application.url.required": "A vaga não tem URL de candidatura.",
   "job.archived": "Esta vaga foi excluída. Restaure-a antes de alterá-la.",

@@ -2286,6 +2286,19 @@ export function listAuthorizedApplications() {
     ORDER BY applications.auto_authorized_at ASC`).all(now());
 }
 
+/**
+ * Autorização vigente de uma candidatura para o executor (#10): `issued` pelo TTL da emissão,
+ * `claimed` pelo lease do heartbeat (#18). Sem `nonce`: ele só sai na fila (GET /api/authorized-applications).
+ */
+export function getApplicationAuthorization(applicationId: string) {
+  const row = db.prepare(`SELECT auth.id, auth.state, auth.application_url, auth.application_url_hash, auth.expires_at, auth.lease_expires_at, auth.claimed_by, auth.job_id
+      FROM applications JOIN application_authorizations auth ON auth.id = applications.authorization_id
+      WHERE applications.id = ?`).get(applicationId) as Record<string, unknown> | undefined;
+  const validUntil = String(row?.state === "claimed" ? (row.lease_expires_at ?? row.expires_at) : row?.expires_at);
+  if (!row || !["issued", "claimed"].includes(String(row.state)) || validUntil <= now()) throw new DomainError("application.authorization.unavailable", 409);
+  return row;
+}
+
 /** Etapa exibida quando o lease vence: o envio pode ou não ter acontecido no portal. */
 const LEASE_EXPIRED_STEP = "Resultado desconhecido — verificar no portal";
 /** Pergunta humana ativa pausa a execução: o lease não vence enquanto o executor espera a resposta. */
@@ -2610,6 +2623,18 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
       cost=COALESCE(excluded.cost,agent_runs.cost),latency_ms=COALESCE(excluded.latency_ms,agent_runs.latency_ms)`).run(id, input.agent_name, input.status, input.started_at ?? timestamp, input.finished_at ?? (input.status === "running" ? null : timestamp), input.found_count ?? 0, input.message ?? "", input.agent_id ?? null, versionId, snapshot ? JSON.stringify(snapshot) : null, input.model_effective ?? null, input.input_tokens ?? null, input.output_tokens ?? null, input.cost ?? null, input.latency_ms ?? null);
   audit("agent_run", id, "status", { status: input.status, found_count: input.found_count ?? 0, agent_id: input.agent_id ?? null, config_version_id: versionId });
   return listAgentRuns().find((run) => run.id === id) ?? null;
+}
+
+/**
+ * Execução registrada por um agente (MCP, #10): o nome vem da configuração e uma execução
+ * pertence ao agente que a abriu — outro agente não a reescreve.
+ */
+export function recordAgentRunForAgent(agentId: string, input: Omit<Partial<AgentRun>, "agent_id" | "agent_name"> & { status: AgentRun["status"] }, projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
+  if (!agent) throw new Error("agent.not_found");
+  const existing = input.id ? db.prepare("SELECT agent_id FROM agent_runs WHERE id=?").get(input.id) as { agent_id: string | null } | undefined : undefined;
+  if (existing && existing.agent_id !== agentId) throw new DomainError("agent_run.agent_mismatch", 409);
+  return recordAgentRun({ ...input, agent_id: agentId, agent_name: agent.name });
 }
 
 const feedbackDetailByReason: Record<string, Set<string>> = {
@@ -3002,7 +3027,7 @@ export function listHumanQuestions(applicationId?: string) {
   return (rows as Record<string, unknown>[]).map((row) => ({ ...row, required: Number(row.required ?? 1) === 1, choices: parseJsonArray(row.choices_json) }));
 }
 
-function assertAgentUrlAllowed(agent: AgentConfig, value: unknown) {
+export function assertAgentUrlAllowed(agent: Pick<AgentConfig, "allowed_domains">, value: unknown) {
   if (!value) return;
   const canonicalUrl = canonicalizeJobUrl(String(value));
   const hostname = new URL(canonicalUrl).hostname.toLowerCase();
@@ -3027,6 +3052,13 @@ function publishedAgentConfig(agentId: string, projectId: string): AgentConfig |
     max_output_tokens: snapshot.max_output_tokens ?? null, max_cost_per_run: snapshot.max_cost_per_run ?? null, fallback_policy: snapshot.fallback_policy ?? "none",
     structured_output_required: snapshot.structured_output_required !== false
   };
+}
+
+/** Agente vivo e o snapshot publicado (null sem publicação): base do portão de agente do MCP (#10). */
+export function getPublishedAgentConfig(agentId: string, projectId = "busca-emprego") {
+  const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
+  if (!agent) throw new Error("agent.not_found");
+  return { agent, published: publishedAgentConfig(agentId, projectId) };
 }
 
 /** Snapshots publicados de todos os agentes do projeto (o que listagem e execuções enxergam). */

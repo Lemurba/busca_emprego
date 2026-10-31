@@ -8,6 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { markJobOpen } from "./helpers/liveness.mjs";
 import { FIELDS_SUMMARY, TINY_PNG_BASE64 } from "./helpers/final-confirmation.mjs";
 import { confirmedProfile } from "./helpers/profile.mjs";
+import { recordApiCalls, startRadarServer } from "./helpers/radar-server.mjs";
 
 const directory = mkdtempSync(join(tmpdir(), "radar-mcp-test-"));
 process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
@@ -19,6 +20,12 @@ const [{ createRadarMcpServer, RADAR_MCP_TOOLS, RADAR_MCP_ROLES }, store] = awai
   import("../src/mcp-server.ts"),
   import("../src/db.ts"),
 ]);
+
+// #10: o MCP fala só com a API HTTP do dashboard (servidor real, mesmo banco do teste).
+const api = await startRadarServer({ dbPath: process.env.RADAR_DB_PATH });
+process.env.RADAR_API_URL = api.url;
+process.env.RADAR_INTERNAL_SERVICE_TOKEN = api.token;
+const spy = recordApiCalls(api.url);
 
 /** Um servidor MCP por papel (issue #12); `route` escolhe o cliente pelo papel dono da ferramenta. */
 const connections = [];
@@ -131,6 +138,12 @@ try {
     const jobId = created.job.id;
     assert.equal((await ok("radar_get_job", { job_id: jobId })).job.title, "Analista de Produto");
     await refused("radar_get_job", { job_id: "inexistente" }, "job.not_found");
+    // `.`/`..` colapsariam no fetch e levariam a ferramenta a outra rota da API.
+    for (const job_id of [".", "..", " .. "]) {
+      const before = spy.calls.length;
+      await refused("radar_get_job", { job_id }, "validation.id.invalid");
+      assert.equal(spy.calls.length, before, `${JSON.stringify(job_id)} não chega à API`);
+    }
 
     // ---- agent_id obrigatório, agente desativado, domínio fora do allowlist, capacidade ----
     await refused("radar_discover_job", { source: "gupy", title: "X", company: "Y", source_url: "https://portal.gupy.io/job/9" });
@@ -151,6 +164,10 @@ try {
     store.recordJobDecision(jobId, "interested", "TENHO INTERESSE");
     const resume = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV Produto", content: "Experiência confirmada" });
     assert.ok(resume.resume.id);
+    // Frase legada "Vaga não encontrada." do núcleo: mesmo contrato de antes da API (rule_violation/400).
+    const missing = JSON.parse((await refused("radar_create_resume", { agent_id: writer.id, job_id: "vaga-inexistente", title: "CV" }, "radar.rule_violation")).content[0].text);
+    assert.equal(missing.error.status, 400);
+    assert.equal(missing.error.message, "Vaga não encontrada.");
     assert.deepEqual(resume.fact_check, { pending: [], warnings: [] });
     // #31: fatos inventados voltam para o agente como pendências que bloqueiam o APROVO.
     const invented = await ok("radar_create_resume", { agent_id: writer.id, job_id: jobId, title: "CV inventado", content: "Aumentei as vendas em 40% na Google usando Elixir." });
@@ -238,6 +255,8 @@ try {
     assert.equal((await ok("radar_get_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1" })).confirmation.status, "not_requested");
     await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w2", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: TINY_PNG_BASE64 }, "application.claim.worker_mismatch");
     await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: Buffer.from("não é png").toString("base64") }, "application.evidence.screenshot_invalid");
+    // Acima do limite da API (2 MB decodificados) e dentro do esquema da ferramenta: código estável, não invalid_body.
+    await refused("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: "A".repeat(2_850_000) }, "application.evidence.screenshot_too_large");
     const requested = await ok("radar_request_final_confirmation", { agent_id: assistant.id, application_id: first.application.id, worker_id: "w1", observed_url: submitUrl, fields_summary: FIELDS_SUMMARY, screenshot_base64: TINY_PNG_BASE64 });
     assert.equal(requested.application.status, "awaiting_final_confirmation");
     assert.ok(requested.evidence_id);
@@ -271,13 +290,71 @@ try {
     const everything = outputs.join("\n");
     assert.doesNotMatch(everything, /"nonce"/u);
     for (const nonce of nonces) assert.ok(!everything.includes(nonce), "nonce vazou em saída de ferramenta");
+
+    // ---- #10: tudo passou pela API com o token de serviço, sem sessão e sem rota humana ----
+    assert.ok(spy.calls.length > 40, "as ferramentas deveriam chamar a API HTTP");
+    for (const call of spy.calls) {
+      assert.equal(call.headers["x-radar-service-token"], api.token, `${call.method} ${call.path} sem token de serviço`);
+      assert.equal(call.headers.cookie, undefined, "o MCP nunca usa a sessão do dashboard");
+      assert.notEqual(call.error, "human_session_required", `${call.method} ${call.path} é rota humana`);
+      assert.notEqual(call.status, 401, `${call.method} ${call.path} recusou a credencial`);
+    }
+    // Escrita em nome de agente vai com x-radar-agent-id (ator agent:<id> na auditoria, #19).
+    const writes = spy.calls.filter((call) => call.method === "POST" && call.status < 400);
+    assert.ok(writes.length > 0 && writes.every((call) => call.headers["x-radar-agent-id"]), "escrita sem x-radar-agent-id");
+  });
+
+  await test("#10: o MCP não abre o SQLite e falha fechado sem API ou sem token", async () => {
+    // Carregar o módulo (e criar um servidor) num processo novo não cria nem abre o banco.
+    const untouched = join(directory, "nunca-aberto.sqlite");
+    const { spawnSync } = await import("node:child_process");
+    const { existsSync } = await import("node:fs");
+    const probe = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+      "const { createRadarMcpServer } = await import('./src/mcp-server.ts'); createRadarMcpServer({ role: 'leitura' }); console.log('ok');"], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env, RADAR_DB_PATH: untouched },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.match(probe.stdout, /ok/u);
+    assert.equal(existsSync(untouched), false, "o módulo do MCP abriu o SQLite");
+
+    const online = await connect("leitura");
+    const down = createRadarMcpServer({ role: "leitura", apiUrl: "http://127.0.0.1:9" });
+    const downClient = new Client({ name: "radar-mcp-test-down", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([downClient.connect(clientTransport), down.connect(serverTransport)]);
+    connections.push({ client: downClient, server: down });
+    await refused("radar_list_sources", {}, "radar_api.unavailable", downClient);
+    const noToken = createRadarMcpServer({ role: "leitura", serviceToken: "" });
+    const previous = process.env.RADAR_INTERNAL_SERVICE_TOKEN;
+    delete process.env.RADAR_INTERNAL_SERVICE_TOKEN;
+    const tokenless = createRadarMcpServer({ role: "leitura" });
+    process.env.RADAR_INTERNAL_SERVICE_TOKEN = previous;
+    for (const server of [noToken, tokenless]) {
+      const client = new Client({ name: "radar-mcp-test-token", version: "1.0.0" });
+      const [left, right] = InMemoryTransport.createLinkedPair();
+      await Promise.all([client.connect(left), server.connect(right)]);
+      connections.push({ client, server });
+      await refused("radar_list_sources", {}, "internal_token_not_configured", client);
+    }
+    // Token errado: a API recusa (401) e o erro chega estável ao agente.
+    const wrong = createRadarMcpServer({ role: "leitura", serviceToken: "token-errado" });
+    const wrongClient = new Client({ name: "radar-mcp-test-wrong", version: "1.0.0" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await Promise.all([wrongClient.connect(left), wrong.connect(right)]);
+    connections.push({ client: wrongClient, server: wrong });
+    const wrongToken = JSON.parse((await refused("radar_list_sources", {}, "unauthorized", wrongClient)).content[0].text);
+    assert.match(wrongToken.error.message, /RADAR_INTERNAL_SERVICE_TOKEN/u, "aponta para o token do MCP, não para a sessão do dashboard");
+    assert.ok((await ok("radar_list_sources", {}, online)).sources.length > 0);
+    assert.throws(() => createRadarMcpServer({ role: "leitura", apiUrl: "ftp://radar" }), /RADAR_API_URL inválida/u);
   });
 } finally {
   delete process.env.RADAR_AUTO_APPLICATION_ENABLED;
+  spy.restore();
   for (const { client, server } of connections) {
     await client.close();
     await server.close();
   }
+  await api.stop();
   store.db.close();
   rmSync(directory, { recursive: true, force: true });
 }

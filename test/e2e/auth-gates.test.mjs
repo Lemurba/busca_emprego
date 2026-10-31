@@ -259,6 +259,111 @@ try {
     assert.equal(otherHistory.find((item) => item.event === "job.decision")?.actor, "human:dashboard");
   });
 
+  // #10: o MCP não abre o SQLite; fala com esta API pelo token de serviço e grava agent:<agent_id> (#19).
+  await test("#10/#19: radar_create_resume passa pela API e registra o agente redator como ator", async () => {
+    Object.assign(process.env, { RADAR_API_URL: base, RADAR_INTERNAL_SERVICE_TOKEN: serviceToken, RADAR_FORWARDED_PROTO: "https" });
+    const { createRadarMcpServer } = await import("../../dist/src/mcp-server.js");
+    const mcp = createRadarMcpServer({ role: "curriculo" });
+    const client = new Client({ name: "radar-auth-gates-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([client.connect(clientTransport), mcp.connect(serverTransport)]);
+    try {
+      const writer = (await svc("GET", "/api/agents/published")).data.find((agent) => agent.role_type === "resume_writer" && agent.enabled);
+      assert.ok(writer);
+      const job = await svc("POST", "/api/jobs", { title: "Vaga MCP", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/mcp" });
+      assert.equal(job.status, 201, JSON.stringify(job.data));
+      assert.equal((await human("POST", `/api/jobs/${job.data.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" })).status, 200);
+      const response = await client.callTool({ name: "radar_create_resume", arguments: { agent_id: writer.id, job_id: job.data.id, title: "CV MCP", content: "Experiência confirmada" } });
+      assert.notEqual(response.isError, true, response.content?.[0]?.text);
+      assert.equal(response.structuredContent.resume.generation_source, "writer");
+      const history = (await svc("GET", `/api/jobs/${job.data.id}/history`)).data;
+      assert.equal(history.find((item) => item.kind === "transition" && item.to_status === "resume")?.actor, `agent:${writer.id}`);
+      assert.equal(history.find((item) => item.event === "resume.created")?.actor, `agent:${writer.id}`);
+
+      // Ator agent:* continua sendo serviço: portões humanos e "só propõe" valem igual.
+      const asAgent = (method, path, body) => call({ ...svcHeaders, "x-radar-agent-id": writer.id }, method, path, body);
+      const decision = await asAgent("POST", `/api/jobs/${job.data.id}/decision`, { decision: "interested", confirmation: "TENHO INTERESSE" });
+      assert.equal(decision.status, 403);
+      assert.equal(decision.data.error, "human_session_required");
+      const profile = await asAgent("POST", "/api/profiles", {});
+      assert.equal(profile.status, 201, JSON.stringify(profile.data));
+      const declared = await asAgent("POST", `/api/profiles/${profile.data.id}/facts`, { type: "skill", value: "SQL", origin: "user" });
+      assert.equal(declared.status, 403, "agente não declara fato em nome do usuário");
+      const unknown = await call({ ...svcHeaders, "x-radar-agent-id": "agente-inexistente" }, "POST", "/api/resumes", { job_id: job.data.id, title: "CV" });
+      assert.equal(unknown.status, 404);
+      assert.equal(unknown.data.error, "agent.not_found");
+
+      // Rotas de agente do MCP: só o token de serviço (a sessão recebe 401).
+      for (const [method, path, body] of [
+        ["POST", `/api/agents/${writer.id}/runs`, { status: "running" }],
+        ["POST", `/api/agents/${writer.id}/jobs`, { title: "X", company: "Y", source: "fixture", source_url: "https://jobs.example.test/x" }],
+        ["POST", `/api/agents/${writer.id}/batches`, { source_id: "gupy", items: [] }],
+        ["POST", `/api/agents/${writer.id}/jobs/${job.data.id}/enrichment`, { patch: {}, evidence_source_url: "https://jobs.example.test/x" }],
+        ["GET", "/api/applications/inexistente/authorization"],
+      ]) {
+        const refused = await human(method, path, body);
+        assert.equal(refused.status, 401, `${method} ${path} com sessão: ${JSON.stringify(refused.data)}`);
+        assert.equal(refused.data.error, "internal_token_required");
+      }
+      const run = await svc("POST", `/api/agents/${writer.id}/runs`, { id: "run-auth-gates", status: "running" });
+      assert.equal(run.status, 201, JSON.stringify(run.data));
+      assert.equal(run.data.agent_name, writer.name);
+
+      // Agente do cabeçalho (ator da auditoria) diferente do agente da rota: recusado.
+      const scout = (await svc("GET", "/api/agents/published")).data.find((agent) => agent.role_type === "source_scout" && agent.enabled);
+      assert.ok(scout);
+      const asScout = (method, path, body) => call({ ...svcHeaders, "x-radar-agent-id": scout.id }, method, path, body);
+      for (const [method, path, body] of [
+        ["POST", `/api/agents/${writer.id}/runs`, { status: "running" }],
+        ["POST", `/api/agents/${writer.id}/jobs`, { title: "X", company: "Y", source: "fixture", source_url: "https://jobs.example.test/x" }],
+        ["POST", `/api/agents/${writer.id}/batches`, { source_id: "gupy", items: [] }],
+        ["POST", `/api/agents/${writer.id}/jobs/${job.data.id}/enrichment`, { patch: {}, evidence_source_url: "https://jobs.example.test/x" }],
+      ]) {
+        const mismatch = await asScout(method, path, body);
+        assert.equal(mismatch.status, 409, `${method} ${path} com outro agente no cabeçalho: ${JSON.stringify(mismatch.data)}`);
+        assert.equal(mismatch.data.error, "agent.binding.mismatch");
+      }
+      assert.equal((await asScout("POST", `/api/agents/${scout.id}/runs`, { status: "running" })).status, 201, "mesmo agente no cabeçalho e na rota");
+      // Execução só de agente publicado e ativo, como o lote: pausar vale na hora.
+      const paused = await human("POST", "/api/agents", { name: "Agente pausado", role_type: "custom" });
+      assert.equal(paused.status, 201, JSON.stringify(paused.data));
+      assert.equal((await human("PATCH", `/api/agents/${paused.data.id}`, { enabled: false })).status, 200);
+      const pausedRun = await svc("POST", `/api/agents/${paused.data.id}/runs`, { status: "running" });
+      assert.equal(pausedRun.status, 403, JSON.stringify(pausedRun.data));
+      assert.ok(["agent.disabled", "agent.not_published"].includes(pausedRun.data.error), JSON.stringify(pausedRun.data));
+      // Lote do agente: domínios permitidos conferidos na API, não só no MCP.
+      const outside = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: scout.source_ids[0] ?? "gupy", items: [{ job_url: "https://evil.example.com/vaga/1", title: "X", company: "Y" }] });
+      assert.equal(outside.data?.error, "agent.domain.forbidden", JSON.stringify(outside.data));
+      // 25 itens com descrição longa (> 1 MB no total) cabem no limite do lote do agente.
+      const domain = scout.allowed_domains[0];
+      const longItems = Array.from({ length: 25 }, (_, index) => ({ job_url: `https://${domain}/vaga/${index}`, title: `Vaga ${index}`, company: "Empresa", description: "d".repeat(45_000) }));
+      const large = await svc("POST", `/api/agents/${scout.id}/batches`, { source_id: scout.source_ids[0] ?? "gupy", items: longItems });
+      assert.notEqual(large.status, 413, JSON.stringify(large.data));
+      assert.notEqual(large.data?.error, "payload_too_large");
+
+      // Atrás do proxy TLS, o MCP sem RADAR_FORWARDED_PROTO=https recebe 426 em toda ferramenta
+      // (por isso o env de cada servidor MCP repassa a variável); referência não resolvida é ignorada.
+      for (const proto of [undefined, "$\{env:RADAR_FORWARDED_PROTO}"]) {
+        if (proto === undefined) delete process.env.RADAR_FORWARDED_PROTO;
+        else process.env.RADAR_FORWARDED_PROTO = proto;
+        const plain = createRadarMcpServer({ role: "leitura" });
+        const plainClient = new Client({ name: "radar-auth-gates-tls", version: "1.0.0" });
+        const [left, right] = InMemoryTransport.createLinkedPair();
+        await Promise.all([plainClient.connect(left), plain.connect(right)]);
+        try {
+          const response = await plainClient.callTool({ name: "radar_list_sources", arguments: {} });
+          assert.equal(response.isError, true);
+          assert.equal(JSON.parse(response.content[0].text).error.code, "TLS_REQUIRED");
+        } finally {
+          await plainClient.close();
+        }
+      }
+    } finally {
+      await client.close();
+      for (const name of ["RADAR_API_URL", "RADAR_INTERNAL_SERVICE_TOKEN", "RADAR_FORWARDED_PROTO"]) delete process.env[name];
+    }
+  });
+
   await test("#20: 20 falhas de um IP não trancam outro IP nem o token válido", async () => {
     const attacker = "203.0.113.5";
     for (let attempt = 0; attempt < 20; attempt++) assert.equal((await auth("errado", attacker)).status, 401);
@@ -292,28 +397,4 @@ try {
   await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 2000); });
 }
 
-// #19: escrita pelo MCP grava agent:<agent_id> (processo separado do servidor HTTP acima).
-process.env.RADAR_DB_PATH = join(directory, "mcp.sqlite");
-const [{ createRadarMcpServer }, store] = await Promise.all([import("../../dist/src/mcp-server.js"), import("../../dist/src/db.js")]);
-const mcp = createRadarMcpServer({ role: "curriculo" });
-const client = new Client({ name: "radar-auth-gates-test", version: "1.0.0" });
-const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-await Promise.all([client.connect(clientTransport), mcp.connect(serverTransport)]);
-try {
-  await test("#19: radar_create_resume registra o agente redator como ator", async () => {
-    const writer = store.listAgentConfigs().find((agent) => agent.role_type === "resume_writer" && agent.enabled);
-    assert.ok(writer);
-    const job = store.upsertJob({ id: "job-mcp-actor", title: "Vaga MCP", company: "Empresa", source: "fixture", source_url: "https://jobs.example.test/mcp" });
-    store.recordJobDecision(job.id, "interested", "TENHO INTERESSE", "human:dashboard");
-    const response = await client.callTool({ name: "radar_create_resume", arguments: { agent_id: writer.id, job_id: job.id, title: "CV MCP", content: "Experiência confirmada" } });
-    assert.notEqual(response.isError, true, response.content?.[0]?.text);
-    assert.equal(response.structuredContent.resume.generation_source, "writer");
-    const history = store.listJobHistory(job.id);
-    assert.equal(history.find((item) => item.kind === "transition" && item.to_status === "resume")?.actor, `agent:${writer.id}`);
-    assert.equal(history.find((item) => item.event === "resume.created")?.actor, `agent:${writer.id}`);
-  });
-} finally {
-  await client.close();
-  rmSync(directory, { recursive: true, force: true });
-}
-
+rmSync(directory, { recursive: true, force: true });

@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { startRadarServer } from "./helpers/radar-server.mjs";
 
 // Issues #11 (rascunho de prompt não vale até publicação; conteúdo web não confiável)
 // e #12 (servidor MCP por papel, agente fixo por processo).
@@ -20,6 +21,10 @@ const [{ createRadarMcpServer, RADAR_MCP_ROLES, RADAR_MCP_TOOLS }, store] = awai
   import("../src/mcp-server.ts"),
   import("../src/db.ts"),
 ]);
+// #10: o MCP chama a API HTTP do dashboard (servidor real sobre o mesmo banco do teste).
+const api = await startRadarServer({ dbPath: process.env.RADAR_DB_PATH });
+process.env.RADAR_API_URL = api.url;
+process.env.RADAR_INTERNAL_SERVICE_TOKEN = api.token;
 
 const connections = [];
 async function connect(role, agentId = null) {
@@ -63,10 +68,24 @@ try {
       assert.deepEqual(included, [...RADAR_MCP_ROLES[role].tools].sort(), `tools.include de ${name} difere do papel ${role}`);
       assert.match(block, /trust: untrusted/u, `${name} sem trust: untrusted`);
       if (RADAR_MCP_ROLES[role].binding_required) assert.match(block, /RADAR_MCP_AGENT_ID:/u, `${name} precisa de RADAR_MCP_AGENT_ID`);
+      // #10: o MCP fala com a API (URL + token de serviço por referência), nunca com o banco.
+      assert.match(block, /RADAR_API_URL: "\$\{env:RADAR_API_URL\}"/u, `${name} sem RADAR_API_URL`);
+      assert.match(block, /RADAR_INTERNAL_SERVICE_TOKEN: "\$\{env:RADAR_INTERNAL_SERVICE_TOKEN\}"/u, `${name} sem o token de serviço`);
+      // Ambiente filtrado: sem o repasse, o dashboard com RADAR_TRUST_PROXY_TLS=true responde 426.
+      assert.match(block, /RADAR_FORWARDED_PROTO: "\$\{env:RADAR_FORWARDED_PROTO\}"/u, `${name} sem RADAR_FORWARDED_PROTO`);
+      assert.doesNotMatch(block, /RADAR_DB_PATH/u, `${name} ainda aponta para o SQLite`);
     }
     assert.deepEqual(configuredRoles.sort(), ["coleta", "coordenador", "curriculo", "executor"]);
     const pluginServers = JSON.parse(readFileSync(join(repoRoot, "hermes/plugin/mcp.json"), "utf8")).mcpServers;
     assert.deepEqual(Object.keys(pluginServers).sort(), [...blocks.keys()].sort(), "hermes/plugin/mcp.json diverge do config.example.yaml");
+    // Referência literal do Hermes: `$` + `{env:VAR}` (não é template do JavaScript).
+    const envRef = (name) => `$\{env:${name}}`;
+    for (const [name, spec] of Object.entries(pluginServers)) {
+      assert.equal(spec.env.RADAR_API_URL, envRef("RADAR_API_URL"), `${name} sem RADAR_API_URL`);
+      assert.equal(spec.env.RADAR_INTERNAL_SERVICE_TOKEN, envRef("RADAR_INTERNAL_SERVICE_TOKEN"), `${name} sem o token de serviço`);
+      assert.equal(spec.env.RADAR_FORWARDED_PROTO, envRef("RADAR_FORWARDED_PROTO"), `${name} sem RADAR_FORWARDED_PROTO`);
+      assert.equal(spec.env.RADAR_DB_PATH, undefined, `${name} ainda aponta para o SQLite`);
+    }
 
     // ---- #12: ferramentas do executor só existem no servidor do executor ----
     const executorOnly = ["radar_claim_application", "radar_submit_application", "radar_fail_application"];
@@ -164,6 +183,7 @@ try {
     await client.close();
     await server.close();
   }
+  await api.stop();
   store.db.close();
   rmSync(directory, { recursive: true, force: true });
 }
