@@ -76,9 +76,11 @@ try {
     assert.deepEqual(configuredRoles.sort(), ["coleta", "coordenador", "curriculo", "executor"]);
     const pluginServers = JSON.parse(readFileSync(join(repoRoot, "hermes/plugin/mcp.json"), "utf8")).mcpServers;
     assert.deepEqual(Object.keys(pluginServers).sort(), [...blocks.keys()].sort(), "hermes/plugin/mcp.json diverge do config.example.yaml");
+    // Referência literal do Hermes: `$` + `{env:VAR}` (não é template do JavaScript).
+    const envRef = (name) => `$\{env:${name}}`;
     for (const [name, spec] of Object.entries(pluginServers)) {
-      assert.equal(spec.env.RADAR_API_URL, "${env:RADAR_API_URL}", `${name} sem RADAR_API_URL`);
-      assert.equal(spec.env.RADAR_INTERNAL_SERVICE_TOKEN, "${env:RADAR_INTERNAL_SERVICE_TOKEN}", `${name} sem o token de serviço`);
+      assert.equal(spec.env.RADAR_API_URL, envRef("RADAR_API_URL"), `${name} sem RADAR_API_URL`);
+      assert.equal(spec.env.RADAR_INTERNAL_SERVICE_TOKEN, envRef("RADAR_INTERNAL_SERVICE_TOKEN"), `${name} sem o token de serviço`);
       assert.equal(spec.env.RADAR_DB_PATH, undefined, `${name} ainda aponta para o SQLite`);
     }
 
