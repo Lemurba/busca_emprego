@@ -84,7 +84,7 @@ type Application = { id: string; job_id: string; resume_id: string | null; statu
 type Company = { name: string; jobs: number; average_salary: number | null; locations: string[]; sources: string[] };
 type AgentRun = { id: string; agent_name: string; status: string; started_at: string; finished_at: string | null; found_count: number; message: string };
 type AgentConfig = { id: string; name: string; description: string; role_type: string; enabled: boolean; source_ids: string[]; allowed_domains: string[]; tool_scopes: string[]; browser_enabled: boolean; can_create_jobs: boolean; can_edit_jobs: boolean; editable_fields: string[]; concurrency: number; timeout_seconds: number; prompt: string; memory_enabled: boolean; hermes_prompt_optimization: boolean; version: number; published_version_id: string | null; draft_version_id: string | null };
-type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null; readiness_status?: string; readiness_reason?: string; last_smoke_test_at?: string | null };
+type SourceConfig = { id: string; name: string; source_type: string; domain: string; enabled: boolean; auth_strategy: string; secret_ref: string | null; browser_profile_id: string | null; terms_approved_at: string | null; readiness_status?: string; readiness_reason?: string; last_smoke_test_at?: string | null; effectiveReadiness?: { status: string; reason: string } };
 type ArchivedJob = { id: string; title: string; company: string; location: string; source: string; archived_at: string; archived_reason: string | null };
 type SuppressedJob = { id: string; title: string; company: string; location: string; source: string; updated_at: string; rule_ids: string[]; rules: { id: string; reason: string; state: string; match_json: Record<string, unknown> }[] };
 type EnrichmentEvent = { id: string; job_id: string; agent_id: string; source_url: string; fields_changed: string; evidence_excerpt: string; created_at: string };
@@ -136,8 +136,24 @@ const roundStatusLabels: Record<string, string> = { running: "Em execução", co
 const roundStatusTone: Record<string, string> = { completed: "teal", failed: "red", cancelled: "red" };
 const questionStatusLabels: Record<string, string> = { pending: "Aguardando envio", delivered: "Enviada no Telegram", delivery_failed: "Falha no envio", answered: "Respondida" };
 const versionStatusLabels: Record<string, string> = { published: "Publicada", draft: "Rascunho", superseded: "Substituída", archived: "Arquivada" };
-const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Bloqueada", configured: "Aguardando teste", pending: "Aguardando teste", degraded: "Instável" };
-const readinessTone: Record<string, string> = { ready: "teal", blocked: "red" };
+const readinessLabels: Record<string, string> = { ready: "Pronta", blocked: "Bloqueada", configured: "Aguardando teste", pending: "Aguardando teste", degraded: "Instável", not_ready: "Não pronta", paused: "Pausada" };
+const readinessTone: Record<string, string> = { ready: "teal", blocked: "red", not_ready: "red", paused: "neutral" };
+/** Motivos da prontidão calculada (sourceReadiness em src/db.ts); texto livre do teste passa como está. */
+const readinessReasonLabels: Record<string, string> = {
+  "source.disabled": "Fonte pausada: fica fora das buscas.",
+  "source.authentication.required": "Falta a referência de acesso (segredo no Hermes ou perfil do navegador).",
+  "source.terms.not_approved": "Termos de uso ainda não aceitos.",
+  "source.smoke_test.required": "Falta o teste de acesso.",
+  "source.config_changed": "A configuração mudou: refaça o teste de acesso."
+};
+function readinessReasonLabel(reason: string | null | undefined) {
+  const text = String(reason ?? "").trim();
+  return readinessReasonLabels[text] ?? (text || "Ainda não testada");
+}
+/** Prontidão calculada da fonte (a da rodada); bancos sem o campo caem no último teste gravado. */
+function effectiveReadiness(source: SourceConfig) {
+  return source.effectiveReadiness ?? { status: source.readiness_status ?? "configured", reason: source.readiness_reason ?? "" };
+}
 const profileStatusLabels: Record<string, string> = { confirmed: "Confirmado", draft: "Rascunho", needs_review: "Em revisão" };
 const factTypeLabels: Record<string, string> = {
   name: "Nome", contact_email: "E-mail", contact_phone: "Telefone", professional_link: "Link profissional", summary: "Resumo", skills: "Habilidades", skill: "Habilidade",
@@ -684,6 +700,8 @@ const operationsPage = preactPage(OperationsPage, () => ({
   formatDate,
   roundStatus: (status: string) => ({ label: label(roundStatusLabels, status), tone: roundStatusTone[status] ?? "orange" }),
   readiness: (status: string | null | undefined) => ({ label: label(readinessLabels, status ?? "configured"), tone: readinessTone[status ?? ""] ?? "orange" }),
+  readinessReason: readinessReasonLabel,
+  sourceName: (id: string) => currentData().sourceConfigs.find((source) => source.id === id)?.name ?? id,
   questionStatusLabel: (status: string) => label(questionStatusLabels, status),
   profileStatusLabel: (status: string) => label(profileStatusLabels, status),
   factTypeLabel: (type: string) => label(factTypeLabels, type),
@@ -715,6 +733,8 @@ const settingsPage = preactPage(SettingsPage, () => ({
   title: pageMeta.settings.label,
   sourceTypeLabel: (type: string) => label(sourceTypeLabels, type),
   authLabel: (strategy: string) => label(authLabels, strategy),
+  readiness: (status: string | null | undefined) => ({ label: label(readinessLabels, status ?? "configured"), tone: readinessTone[status ?? ""] ?? "orange" }),
+  readinessReason: readinessReasonLabel,
   formatDate,
   onPrefChange: setBrowserPref,
   connectors: { fetchJson, formatDate, toast, confirm: confirmDialog }
@@ -844,7 +864,7 @@ const errorMessages: Record<string, string> = {
   "profile.interview.invalid": "Resposta inválida: listas aceitam só textos, números ou sim/não.",
   "profile.fact.evidence.required": "Esta informação precisa de evidência (página ou trecho) para ser confirmada.",
   ROUND_NO_SOURCES: "Nenhuma fonte ativa para iniciar a rodada.",
-  ROUND_SOURCES_NOT_READY: "Nenhuma fonte está pronta para a rodada.",
+  ROUND_SOURCES_NOT_READY: "Nenhuma fonte está pronta para a rodada. Em Configurações, aceite os termos e registre o teste de acesso de pelo menos uma fonte.",
   ATS_REVIEW_REQUIRED: "O currículo precisa passar na revisão ATS (ou ter uma justificativa de exceção com pelo menos 10 caracteres) antes da aprovação.",
   ILLEGAL_TRANSITION: "Essa mudança de etapa não é permitida.",
   PRECONDITION_FAILED: "Faltam informações para essa mudança de etapa.",
@@ -871,6 +891,7 @@ const errorMessages: Record<string, string> = {
   "agent.name.invalid": "Informe um nome válido para o agente.",
   "agent.has_history.disable_instead": "Este agente já tem histórico: pause-o em vez de excluir.",
   "source.in_use.disable_instead": "Esta fonte está em uso: desative-a em vez de excluir.",
+  "source.not_found": "Fonte não encontrada. Atualize a página.",
   "possible_duplicate.not_found": "Essa duplicidade já foi resolvida.",
   "job.not_found": "Vaga não encontrada. Atualize a página.",
   "resume.pdf_parse_failed": "O teste de leitura do PDF falhou: corrija o conteúdo do currículo. Esse bloqueio não aceita justificativa.",
@@ -1239,6 +1260,74 @@ function showSourceModal(id?: string) {
       <div class="form-field full"><label for="source-profile">Perfil do navegador (id)</label><input class="input" id="source-profile" name="browser_profile_id" value="${escapeHtml(source?.browser_profile_id ?? "")}" placeholder="glassdoor" autocomplete="off" /><small class="field-hint">Logins de portal ficam no cofre do Hermes (<code>hermes vault add</code> na máquina do Hermes). Aqui vai só o id do perfil. Nunca digite senha ou token neste formulário.</small></div>
       <label class="setting-toggle full"><span><strong>Fonte ativa</strong><small>Fontes pausadas ficam fora das próximas buscas.</small></span><input type="checkbox" name="enabled" ${source?.enabled === false ? "" : "checked"} /></label>
     </div><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar fonte</button></div></form>`);
+}
+
+/* Fontes: aceite de termos (portão humano), teste de acesso, exclusão e rodada (§1.3, §2). */
+
+function sourceById(id: string) {
+  const source = currentData().sourceConfigs.find((item) => item.id === id);
+  if (!source) throw new Error("Fonte não encontrada. Atualize a página.");
+  return source;
+}
+
+/** Texto curto da prontidão depois de uma ação: o que ainda falta para a fonte entrar nas buscas. */
+function readinessOutcome(source: SourceConfig | null | undefined) {
+  if (!source) return "";
+  const readiness = effectiveReadiness(source);
+  return readiness.status === "ready" ? "A fonte está pronta para as buscas." : `Ainda falta: ${readinessReasonLabel(readiness.reason)}`;
+}
+
+async function acceptSourceTerms(id: string) {
+  const source = sourceById(id);
+  const site = externalLink(`https://${source.domain}`, source.domain, "");
+  const result = await openDialog({
+    title: `Aceitar os termos de uso de ${source.name}?`,
+    confirmLabel: "Aceitar termos",
+    body: `<p>Os agentes do Hermes só coletam vagas em ${site || escapeHtml(source.domain)} depois do seu aceite. Leia os termos de uso do site e confirme que a coleta automatizada de vagas é permitida para você.</p><p class="muted-text">O aceite fica registrado com data e é refeito se o domínio da fonte mudar.</p><label class="check-row"><input type="checkbox" name="confirmed" required data-message="Marque que leu os termos de uso para aceitar." /> <span>Li os termos de uso de ${escapeHtml(source.domain)} e aceito a coleta de vagas nesta fonte.</span></label>`
+  });
+  if (!result) return;
+  const updated = await fetchJson<SourceConfig>(`/api/sources/${encodeURIComponent(id)}/terms`, { method: "POST", body: "{}" });
+  await loadData();
+  toast(`Termos de ${source.name} aceitos. ${readinessOutcome(updated)}`);
+}
+
+async function recordSourceSmokeTest(id: string) {
+  const source = sourceById(id);
+  const result = await openDialog({
+    title: `Teste de acesso: ${source.name}`,
+    confirmLabel: "Registrar resultado",
+    body: `<p>Abra ${escapeHtml(source.domain)} com o acesso configurado (${escapeHtml(label(authLabels, source.auth_strategy))}) e confira se a busca de vagas carrega. Os agentes também registram este teste quando rodam a verificação no Hermes.</p><fieldset class="form-field full"><legend>Resultado</legend><label class="check-row"><input type="radio" name="status" value="ready" required data-message="Escolha o resultado do teste." /> <span>Passou: a busca de vagas abriu normalmente.</span></label><label class="check-row"><input type="radio" name="status" value="blocked" /> <span>Falhou: login, bloqueio ou página fora do ar.</span></label></fieldset><div class="form-field"><label for="smoke-reason">O que aconteceu (obrigatório se falhou)</label><textarea class="textarea" id="smoke-reason" name="reason" maxlength="240"></textarea></div>`,
+    validate: (form) => {
+      const data = new FormData(form);
+      return data.get("status") === "blocked" && !String(data.get("reason") ?? "").trim() ? "Descreva o que falhou no teste." : null;
+    }
+  });
+  if (!result) return;
+  const status = String(result.get("status") ?? "");
+  const reason = String(result.get("reason") ?? "").trim() || "Teste de acesso registrado no painel.";
+  const updated = await fetchJson<SourceConfig>(`/api/sources/${encodeURIComponent(id)}/readiness`, { method: "POST", body: JSON.stringify({ status, reason }) });
+  await loadData();
+  toast(status === "ready" ? `Teste de ${source.name} registrado. ${readinessOutcome(updated)}` : `Falha de ${source.name} registrada: a fonte fica fora das buscas.`, status !== "ready");
+}
+
+async function deleteSource(id: string) {
+  const source = sourceById(id);
+  if (!await confirmDialog(`Excluir a fonte ${source.name}?`, "A configuração e o aceite dos termos são removidos. Vagas já encontradas continuam no painel. Fontes usadas por agentes não podem ser excluídas: pause-as em Editar.", "Excluir fonte", true)) return;
+  await fetchJson(`/api/sources/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await loadData();
+  toast(`Fonte ${source.name} excluída.`);
+}
+
+/** Inicia uma rodada com as fontes prontas; a coleta em si é dos agentes do Hermes. */
+async function startRound() {
+  const data = currentData();
+  const ready = data.sourceConfigs.filter((source) => effectiveReadiness(source).status === "ready");
+  const ignored = data.sourceConfigs.filter((source) => source.enabled && effectiveReadiness(source).status !== "ready").length;
+  if (!await confirmDialog("Iniciar uma rodada de busca?", `${ready.length ? `Fontes prontas: ${ready.map((source) => source.name).join(", ")}.` : "Nenhuma fonte está pronta agora."}${ignored ? ` ${ignored} fonte(s) ativa(s) sem aceite de termos ou sem teste ficam de fora.` : ""} Os agentes do Hermes fazem a coleta; nenhuma candidatura é enviada.`, "Iniciar rodada")) return;
+  const round = await fetchJson<{ source_ids?: string[] }>("/api/rounds", { method: "POST", body: "{}" });
+  await loadData();
+  const count = round.source_ids?.length ?? 0;
+  toast(`Rodada iniciada com ${count} fonte${count === 1 ? "" : "s"}. Acompanhe o resultado em ${pageMeta.operations.label}.`);
 }
 
 async function showAgentHistory(agentId: string) {
@@ -1882,6 +1971,10 @@ async function handleAction(target: HTMLElement) {
     case "undo-decision": await undoDecision(jobId); return;
     case "add-agent": showAgentModal(); return;
     case "add-source": showSourceModal(); return;
+    case "accept-source-terms": await acceptSourceTerms(action.dataset.sourceId ?? ""); return;
+    case "smoke-source": await recordSourceSmokeTest(action.dataset.sourceId ?? ""); return;
+    case "delete-source": await deleteSource(action.dataset.sourceId ?? ""); return;
+    case "start-round": await startRound(); return;
     case "mark-applied": await markApplied(jobId); return;
     case "mark-interested": await markInterested(jobId); return;
     case "not-interested": await markNotInterested(jobId); return;

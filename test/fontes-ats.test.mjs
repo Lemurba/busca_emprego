@@ -31,3 +31,14 @@ test("QA-18: job.discovered com opening_status grava opening_checked_at", () => 
 
   assert.throws(() => store.ingestSourceItems("fixture", [{ source_id: "fixture", title: "X", company: "Y", job_url: "https://jobs.example/qa18/5", opening_status: "open", opening_checked_at: "ontem" }]), /SCHEMA_INVALID:source\.items\.0\.opening_checked_at/u);
 });
+
+test("I49-07: bootstrap expõe a prontidão calculada de cada fonte", () => {
+  store.upsertSourceConfig({ id: "fonte-s3", name: "Fonte S3", source_type: "job_board", domain: "fonte-s3.example", enabled: true, auth_strategy: "none" }, "tester");
+  const readiness = () => store.getBootstrap().sourceConfigs.find((source) => source.id === "fonte-s3").effectiveReadiness;
+  assert.deepEqual(readiness(), { status: "not_ready", reason: "source.terms.not_approved" });
+  store.setSourceReadiness("fonte-s3", "ready", "teste manual", "tester");
+  assert.equal(readiness().status, "not_ready", "teste aprovado não basta sem os termos aceitos");
+  assert.equal(store.approveSourceTerms("fonte-s3", "human:dashboard").effectiveReadiness.status, "ready");
+  store.upsertSourceConfig({ id: "fonte-s3", name: "Fonte S3", source_type: "job_board", domain: "fonte-s3.example", enabled: false, auth_strategy: "none" }, "tester");
+  assert.deepEqual(readiness(), { status: "paused", reason: "source.disabled" });
+});

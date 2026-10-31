@@ -236,6 +236,15 @@ export function listSourceConfigs(projectId = "busca-emprego"): SourceConfigReco
   return (db.prepare("SELECT * FROM source_configs WHERE project_id=? ORDER BY name").all(projectId) as Record<string, unknown>[]).map(mapSourceConfig);
 }
 
+/**
+ * I49-07: fontes com a prontidão CALCULADA (`effectiveReadiness`), a mesma que a rodada usa.
+ * `readiness_status` é só o último teste gravado: sem termos aceitos ou com a fonte pausada,
+ * a rodada descarta a fonte mesmo que o teste tenha passado.
+ */
+export function listSourceConfigsWithReadiness(projectId = "busca-emprego") {
+  return listSourceConfigs(projectId).map((source) => ({ ...source, effectiveReadiness: sourceReadiness(source) }));
+}
+
 export function listAgentConfigVersions(agentId: string, projectId = "busca-emprego") {
   if (!db.prepare("SELECT id FROM agent_configs WHERE id=? AND project_id=?").get(agentId, projectId)) throw new Error("agent.not_found");
   return (db.prepare("SELECT id,agent_id,version,status,checksum,created_by,created_at,published_by,published_at FROM agent_config_versions WHERE agent_id=? ORDER BY version DESC").all(agentId) as Record<string, unknown>[])
@@ -318,7 +327,7 @@ export function getBootstrap(projectId = "busca-emprego") {
     companies: listCompanies(),
     agentRuns: listAgentRuns(),
     agentConfigs: listAgentConfigs(projectId),
-    sourceConfigs: listSourceConfigs(projectId),
+    sourceConfigs: listSourceConfigsWithReadiness(projectId),
     enrichmentEvents: listJobEnrichmentEvents(),
     archivedJobs: listArchivedJobs(projectId),
     suppressedJobs,
@@ -703,7 +712,7 @@ export function validateSourceBatch(sourceId: string, batch: Record<string, unkn
   return { items, nextCursor: batch.next_cursor == null ? null : String(batch.next_cursor) };
 }
 
-function sourceReadiness(source: SourceConfigRecord) {
+function sourceReadiness(source: SourceConfigRecord): { status: string; reason: string } {
   const reason = source.readiness_reason ?? "";
   if (!source.enabled) return { status: "paused", reason: "source.disabled" };
   if (source.auth_strategy !== "none" && !source.secret_ref && !source.browser_profile_id) return { status: "not_ready", reason: "source.authentication.required" };
@@ -719,7 +728,7 @@ export function setSourceReadiness(id: string, status: string, reason = "", acto
     .run(status, reason.slice(0, 240), timestamp, timestamp, id, projectId);
   if (!result.changes) throw new Error("source.not_found");
   audit("source_config", id, "readiness_changed", { status, reason: reason.slice(0, 120), actor, project_id: projectId });
-  return listSourceConfigs(projectId).find((source) => source.id === id) ?? null;
+  return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
 
 export function approveSourceTerms(id: string, actor = "user", projectId = "busca-emprego") {
@@ -728,7 +737,7 @@ export function approveSourceTerms(id: string, actor = "user", projectId = "busc
     .run(timestamp, actor, timestamp, id, projectId);
   if (!result.changes) throw new Error("source.not_found");
   audit("source_config", id, "terms_approved", { actor, project_id: projectId });
-  return listSourceConfigs(projectId).find((source) => source.id === id) ?? null;
+  return listSourceConfigsWithReadiness(projectId).find((source) => source.id === id) ?? null;
 }
 
 function getRound(roundId: string, projectId = "busca-emprego"): any {
