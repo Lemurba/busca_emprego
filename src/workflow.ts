@@ -171,8 +171,6 @@ const RULES: Readonly<Record<WorkflowCommand, Rule>> = {
   withdraw_interest: { from: ["selected"], to: "review", validate: required("reason") },
 };
 
-export const workflowRules = RULES;
-
 export function getAllowedCommands(status: JobStatus): WorkflowCommand[] {
   return (Object.entries(RULES) as Array<[WorkflowCommand, Rule]>)
     .filter(([, rule]) => rule.from.includes(status))
@@ -220,10 +218,4 @@ export function executeWorkflowCommand(state: WorkflowState, input: TransitionIn
       evidence_ref: input.evidence_ref?.trim() || null, created_at: createdAt, version, cycle, data,
     },
   };
-}
-
-export const transitionWorkflow = executeWorkflowCommand;
-
-export function isWorkflowError(error: unknown): error is WorkflowError {
-  return error instanceof WorkflowError;
 }

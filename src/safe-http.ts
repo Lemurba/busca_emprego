@@ -73,7 +73,7 @@ export function pinnedLookup(addresses: readonly ResolvedAddress[]) {
 }
 
 /** Rejeita com `timeout` quando o sinal aborta antes da promessa terminar. */
-export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | null | undefined, url?: string): Promise<T> {
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | null | undefined, url?: string): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) return Promise.reject(new SafeHttpError("timeout", "Tempo esgotado.", url));
   return new Promise<T>((resolvePromise, reject) => {

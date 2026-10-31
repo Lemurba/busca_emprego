@@ -1,4 +1,5 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { sha256Hex, urlHash } from "../hash.js";
 import type { DatabaseSync } from "node:sqlite";
 import { atsFamilyFor, isAtsUrl } from "../ats-domains.js";
 import { canonicalizeJobUrl } from "../domain.js";
@@ -39,11 +40,11 @@ import { idFor, now } from "./util.js";
  * `createExecutor(deps)` passando a conexão e as funções internas que ele reaproveita.
  */
 
-export const FINAL_CONFIRMATION_TEXT = "ENVIAR";
+const FINAL_CONFIRMATION_TEXT = "ENVIAR";
 export const SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
-export const FIELDS_SUMMARY_MAX_ITEMS = 100;
-export const FIELD_LABEL_MAX = 200;
-export const FIELD_VALUE_MAX = 500;
+const FIELDS_SUMMARY_MAX_ITEMS = 100;
+const FIELD_LABEL_MAX = 200;
+const FIELD_VALUE_MAX = 500;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PAUSED_STEP = "Automação pausada (kill-switch)";
 
@@ -62,16 +63,8 @@ export function assertAtsUrl(db: DatabaseSync, url: unknown, settings: Automatio
   if (!isAtsUrl(url, settings.ats_allowlist)) throw new Error("application.domain.not_ats");
 }
 
-export function urlHash(url: string) {
-  return createHash("sha256").update(canonicalizeJobUrl(url)).digest("hex");
-}
-
-function sha256Hex(value: string | Uint8Array) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 /** Decodifica o PNG da captura (base64 estrito, até 2 MB, assinatura PNG). */
-export function decodePngScreenshot(value: unknown): Buffer {
+function decodePngScreenshot(value: unknown): Buffer {
   const raw = String(value ?? "").replace(/^data:image\/png;base64,/u, "").replace(/\s+/gu, "");
   if (!raw || raw.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(raw)) throw new Error("application.evidence.screenshot_invalid");
   if (Math.floor((raw.length * 3) / 4) > SCREENSHOT_MAX_BYTES + 2) throw new Error("application.evidence.screenshot_too_large");
@@ -82,7 +75,7 @@ export function decodePngScreenshot(value: unknown): Buffer {
 }
 
 /** Resumo dos campos preenchidos: até 100 itens {label, value}, textos curtos e sem controle. */
-export function validateFieldsSummary(value: unknown): FieldSummary[] {
+function validateFieldsSummary(value: unknown): FieldSummary[] {
   if (!Array.isArray(value) || value.length > FIELDS_SUMMARY_MAX_ITEMS) throw new Error("application.evidence.fields_invalid");
   const clean = (text: unknown, max: number) => {
     if (typeof text !== "string" && typeof text !== "number" && typeof text !== "boolean") throw new Error("application.evidence.fields_invalid");
@@ -100,7 +93,7 @@ export function validateFieldsSummary(value: unknown): FieldSummary[] {
 }
 
 /** Limite diário (global e, se configurado, por ATS) já atingido para esta URL? */
-export function dailyLimitFor(db: DatabaseSync, applicationUrl: string, settings: AutomationSettings = readAutomationSettings(db), nowMs = Date.now()) {
+function dailyLimitFor(db: DatabaseSync, applicationUrl: string, settings: AutomationSettings = readAutomationSettings(db), nowMs = Date.now()) {
   const usage = automationUsage(db, settings, nowMs);
   if (usage.total >= settings.daily_limit) return { scope: "global" as const, limit: settings.daily_limit, used: usage.total, date: usage.date, ats: null };
   if (settings.per_ats_limit != null) {

@@ -1,11 +1,12 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { AGENT_ROLE_SCOPES } from "./agent-defaults.js";
-import { canonicalizeJobUrl, DomainValidationError } from "./domain.js";
+import { agentUrlAllowed, DomainValidationError } from "./domain.js";
+import { urlHash } from "./hash.js";
 import { messageForCode, statusForCode, toDomainError, userMessage } from "./errors.js";
 import { SCREENSHOT_BASE64_MAX } from "./http-schemas.js";
 import { RADAR_MCP_ROLES, RADAR_MCP_TOOLS, type RadarMcpRole } from "./mcp-tools.js";
@@ -327,14 +328,9 @@ async function requireAgent(api: RadarApi, scope: ServerScope, agentId: string |
   return published;
 }
 
-function urlHash(url: string) {
-  return createHash("sha256").update(canonicalizeJobUrl(url)).digest("hex");
-}
-
-/** Mesma regra de domínio de `assertAgentUrlAllowed` (src/db/agents.ts): host igual ou subdomínio. */
+/** Mesma regra de domínio de `assertAgentUrlAllowed` (src/db/agents.ts): `agentUrlAllowed` de src/domain.ts. */
 function requireAllowedDomain(agent: PublishedAgent, url: string) {
-  const hostname = new URL(canonicalizeJobUrl(url)).hostname.toLowerCase();
-  if (!agent.allowed_domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) {
+  if (!agentUrlAllowed(agent.allowed_domains, url)) {
     throw new ToolError("agent.domain.forbidden", "Domínio fora da lista permitida do agente.");
   }
 }

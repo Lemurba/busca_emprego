@@ -14,7 +14,7 @@ const companyFields = {
 };
 
 // Corpos estritos (F14), como em src/http-schemas.ts: campo desconhecido → 400 invalid_body.
-export const connectorSchemas = {
+const connectorSchemas = {
   companyCreate: z.strictObject(companyFields),
   companyPatch: z.strictObject({ name: companyFields.name, query: companyFields.query, enabled: companyFields.enabled }),
   enrichmentResolve: z.strictObject({ status: z.enum(["done", "dismissed"]) }),

@@ -1,6 +1,7 @@
 // Ingestão de itens de fonte: validação do lote, identidade exata, dedup multi-chave, fuzzy,
 // ocorrências, checkpoints de rodada e a fila de possíveis duplicatas.
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "../hash.js";
 import type { Job } from "../types.js";
 import { canonicalizeJobUrl, compareExactIdentity, compareFuzzyDuplicate, companyKey, extractSourceJobId, type FuzzyDuplicateDecision, type FuzzyJobCandidate } from "../domain.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
@@ -17,7 +18,7 @@ export function json(value: unknown): string {
 }
 
 function jobPayloadHash(value: unknown): string {
-  return createHash("sha256").update(json(value)).digest("hex");
+  return sha256Hex(json(value));
 }
 
 const sourceItemFields = new Set([

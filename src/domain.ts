@@ -1,6 +1,7 @@
 /** Deterministic domain rules from the production SDD. No persistence or I/O. */
 
 import { isIP } from "node:net";
+import { hostMatchesDomain } from "./ats-domains.js";
 import { DomainError } from "./errors.js";
 
 /** Campo inválido: sempre 422, com `field` nos detalhes e mensagem pt-BR segura. */
@@ -217,7 +218,7 @@ export interface JobUrlIdentity {
  * portais conhecidos mantém só a allowlist de parâmetros de identidade. Nos demais domínios
  * só o rastreamento conhecido sai, porque a query pode identificar a vaga.
  */
-export function jobUrlIdentity(input: string): JobUrlIdentity {
+function jobUrlIdentity(input: string): JobUrlIdentity {
   const url = assertPublicHttpUrl(input);
 
   url.hash = "";
@@ -298,14 +299,14 @@ export function validateCoordinates(input: Coordinates): FieldValidationResult<C
   return errors.length ? { value: null, fieldErrors: errors } : { value: input, fieldErrors: [] };
 }
 
-export function jaccard<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): number {
+function jaccard<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): number {
   if (left.size === 0 && right.size === 0) return 1;
   let intersection = 0;
   for (const value of left) if (right.has(value)) intersection += 1;
   return intersection / (left.size + right.size - intersection);
 }
 
-export function titleTrigrams(title: string): Set<string> {
+function titleTrigrams(title: string): Set<string> {
   const normalized = normalizeComparableText(title);
   if (!normalized) return new Set();
   if (normalized.length <= 3) return new Set([normalized]);
@@ -366,7 +367,7 @@ function isRemote(value: string | null): boolean {
   return normalized === "remote" || normalized === "remoto" || normalized === "remota";
 }
 
-export function locationsCompatible(left: FuzzyJobCandidate, right: FuzzyJobCandidate): boolean {
+function locationsCompatible(left: FuzzyJobCandidate, right: FuzzyJobCandidate): boolean {
   if (isRemote(left.workModel) && isRemote(right.workModel)) return true;
   if (isRemote(left.workModel) !== isRemote(right.workModel)) return false;
   if (!left.location || !right.location) return false;
@@ -582,4 +583,13 @@ export function compareTotalRejection(
     ? titleScore >= 0.9 && requirementScore! >= 0.6
     : titleScore >= 0.95;
   return { similar, titleSimilarity: titleScore, requirementsSimilarity: requirementScore, familyMatched: false, reason: similar ? (requirementsPresent ? "fallback_title_and_requirements" : "fallback_title_only") : "fallback_rule_not_met" };
+}
+
+/**
+ * Regra de domínio dos agentes (TD-11): o host da URL canônica precisa ser um dos domínios
+ * permitidos ou subdomínio dele. Usada pelo núcleo (`assertAgentUrlAllowed`) e pelo MCP.
+ */
+export function agentUrlAllowed(allowedDomains: readonly string[], url: string): boolean {
+  const hostname = new URL(canonicalizeJobUrl(url)).hostname.toLowerCase();
+  return allowedDomains.some((domain) => hostMatchesDomain(hostname, domain));
 }

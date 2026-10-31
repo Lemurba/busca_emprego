@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../hash.js";
 import { companyKey, normalizeComparableText } from "../domain.js";
 
 // Chaves de deduplicação entre portais, compartilhadas por src/db.ts e pelo backfill do baseline.
@@ -18,5 +18,5 @@ export function jobDescriptionHash(description: unknown, company: unknown): stri
   const text = normalizeComparableText(String(description ?? ""));
   const companyPart = companyKey(String(company ?? ""));
   if (text.length < 200 || !companyPart) return null;
-  return createHash("sha256").update(`${companyPart}|${text}`).digest("hex");
+  return sha256Hex(`${companyPart}|${text}`);
 }

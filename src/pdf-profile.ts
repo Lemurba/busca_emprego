@@ -1,26 +1,25 @@
-import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import { isMainThread, MessageChannel, receiveMessageOnPort, Worker, workerData, type MessagePort } from "node:worker_threads";
 
 export const MAX_PDF_BYTES = 5 * 1024 * 1024;
 /** Tempo máximo da extração via pdfjs antes de marcar o PDF para revisão. */
-export const PDF_EXTRACTION_TIMEOUT_MS = 20_000;
+const PDF_EXTRACTION_TIMEOUT_MS = 20_000;
 /** Tamanho máximo de um stream descomprimido pelo extrator legado (proteção contra bomba de compressão). */
 export const MAX_INFLATED_STREAM_BYTES = 20_000_000;
 /** Soma máxima de bytes descomprimidos por arquivo no extrator legado. */
-export const MAX_INFLATED_TOTAL_BYTES = 50_000_000;
+const MAX_INFLATED_TOTAL_BYTES = 50_000_000;
 /** Limites de memória do worker de extração: um PDF hostil derruba só o worker, não o servidor. */
-export const PDF_WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, codeRangeSizeMb: 64, stackSizeMb: 4 } as const;
+const PDF_WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, codeRangeSizeMb: 64, stackSizeMb: 4 } as const;
 /** Proporção mínima de letras/dígitos entre os caracteres visíveis para aceitar o texto extraído. */
-export const MIN_TEXT_LETTER_RATIO = 0.6;
+const MIN_TEXT_LETTER_RATIO = 0.6;
 /** Proporção máxima de caracteres de controle/privados/substituição tolerada no texto extraído. */
-export const MAX_TEXT_GARBAGE_RATIO = 0.02;
+const MAX_TEXT_GARBAGE_RATIO = 0.02;
 /**
  * Proporção mínima de caracteres do repertório esperado (ASCII, Latin-1/WinAnsi,
  * pontuação geral). Fontes CID sem ToUnicode costumam virar códigos
  * aleatórios fora desse repertório; currículos em outra escrita vão para revisão.
  */
-export const MIN_TEXT_COMMON_RATIO = 0.7;
+const MIN_TEXT_COMMON_RATIO = 0.7;
 
 export type PdfExtractionStatus = "extracted" | "needs_review";
 
@@ -47,10 +46,6 @@ export interface ProposedFact {
   confidence: number;
   /** `needs_review` para palpites de baixa confiança (nome, cargo-alvo). */
   state: "proposed" | "needs_review";
-}
-
-export function sha256(value: Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 export function validatePdf(bytes: Uint8Array, mimeType = "application/pdf"): void {
@@ -679,12 +674,12 @@ export function utf8Size(value: string): number {
 }
 
 /** Ordem de prioridade das chaves de topo ao truncar o contexto; demais chaves seguem na ordem original. */
-export const PROFILE_CONTEXT_PRIORITY = [
+const PROFILE_CONTEXT_PRIORITY = [
   "name", "nome", "headline", "titulo", "title", "summary", "resumo", "target_roles", "cargos_alvo",
   "location", "localizacao", "skills", "competencias", "confirmed_facts", "experience", "experiencia",
   "education", "formacao", "certifications", "certificacoes", "languages", "idiomas", "projects", "projetos",
 ] as const;
-export const PROFILE_CONTEXT_TRUNCATION_KEY = "_truncated";
+const PROFILE_CONTEXT_TRUNCATION_KEY = "_truncated";
 const TRUNCATED_STRING_SUFFIX = "…[truncado]";
 
 interface TruncationStats { omitted: number; truncated: number; stringCap: number }

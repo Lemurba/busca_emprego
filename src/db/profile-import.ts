@@ -1,6 +1,6 @@
 // Importação/exportação JSON Resume (#35) sobre o banco. Funções recebem a conexão (como em
 // agent-configs.ts) para não importar src/db.ts. A exportação é somente leitura.
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../hash.js";
 import type { DatabaseSync } from "node:sqlite";
 import { normalizeComparableText } from "../domain.js";
 import { experienceToWork, factsToJsonResume, type FactLike, type JsonResume, jsonResumeToFacts, validateJsonResume, type WorkEntry } from "../json-resume.js";
@@ -24,7 +24,7 @@ function parseFacts(json: unknown): Row[] {
  * entradas do mesmo tipo voltam na ordem original (o banco ordena por created_at,id, e o id é
  * um hash). Fatos sem ponteiro mantêm a ordem recebida (sort estável).
  */
-export function inDocumentOrder<T extends Row>(facts: readonly T[]): T[] {
+function inDocumentOrder<T extends Row>(facts: readonly T[]): T[] {
   const rank = (fact: Row) => Number(/^\/[A-Za-z]+\/(\d+)(?:\/|$)/u.exec(String(fact.evidence_excerpt ?? ""))?.[1] ?? 0);
   return [...facts].sort((left, right) => rank(left) - rank(right));
 }
@@ -39,7 +39,7 @@ function mapFactRow(row: Row): Row {
  * Fatos confirmados usados na exportação de um currículo: os do snapshot gravado no currículo
  * (`profile_snapshot_id`) ou, sem ele, os do perfil confirmado atual do projeto.
  */
-export function resumeExportFacts(db: DatabaseSync, resume: Pick<Resume, "profile_snapshot_id">, projectId: string): { facts: Row[]; profileSnapshotId: string | null; factsSource: "resume_snapshot" | "active_profile" | "none" } {
+function resumeExportFacts(db: DatabaseSync, resume: Pick<Resume, "profile_snapshot_id">, projectId: string): { facts: Row[]; profileSnapshotId: string | null; factsSource: "resume_snapshot" | "active_profile" | "none" } {
   if (resume.profile_snapshot_id) {
     const snapshot = db.prepare("SELECT id,facts_json FROM profile_snapshots WHERE id=?").get(resume.profile_snapshot_id) as Row | undefined;
     if (snapshot) return { facts: parseFacts(snapshot.facts_json).filter((fact) => fact.state === "confirmed"), profileSnapshotId: String(snapshot.id), factsSource: "resume_snapshot" };
@@ -117,8 +117,8 @@ function approvedAt(db: DatabaseSync, resumeId: string): string | undefined {
   }
 }
 
-export function contentSha256(content: string) {
-  return createHash("sha256").update(content, "utf8").digest("hex");
+function contentSha256(content: string) {
+  return sha256Hex(content);
 }
 
 /** JSON Resume de um currículo adaptado: fatos confirmados + destaques do conteúdo salvo. */
@@ -159,7 +159,7 @@ export function buildProfileJsonResume(db: DatabaseSync, profile: Row): JsonResu
 }
 
 /** Confiança padrão de um fato importado: documento estruturado do próprio usuário, mas ainda sujeito a revisão. */
-export const IMPORT_FACT_CONFIDENCE = 0.9;
+const IMPORT_FACT_CONFIDENCE = 0.9;
 
 /**
  * Valida o documento e devolve os fatos propostos prontos para `addProfileFact`

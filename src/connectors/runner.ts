@@ -16,7 +16,7 @@ import { connectorById } from "./sources.js";
 import { listConnectorCompanies, queueLlmEnrichment, recordConnectorCompanyRun, type ConnectorCompany } from "./store.js";
 import type { ConnectorItem } from "./types.js";
 
-export const CONNECTOR_BATCH_SIZE = 25;
+const CONNECTOR_BATCH_SIZE = 25;
 
 export interface ConnectorRunOptions {
   projectId?: string;

@@ -10,8 +10,8 @@ import { idFor, now } from "./util.js";
 /** Validade da verificação exigida para AUTORIZO. */
 export const LIVENESS_FRESH_MS = 24 * 3_600_000;
 /** Revalidação: vagas com interesse/candidatura a cada 6 h; demais abertas/desconhecidas a cada 48 h. */
-export const LIVENESS_PRIORITY_INTERVAL_MS = 6 * 3_600_000;
-export const LIVENESS_DEFAULT_INTERVAL_MS = 48 * 3_600_000;
+const LIVENESS_PRIORITY_INTERVAL_MS = 6 * 3_600_000;
+const LIVENESS_DEFAULT_INTERVAL_MS = 48 * 3_600_000;
 
 const PRIORITY_STATUSES = new Set(["selected", "resume", "resume_approved", "ready_to_apply", "applying"]);
 const FINISHED_STATUSES = ["applied", "interview_scheduled", "interview_completed", "completed", "discarded", "expired"];
@@ -92,7 +92,7 @@ export function livenessProofAt(db: DatabaseSync, jobId: string): string | null 
 }
 
 /** Prova de vaga aberta ainda válida (últimas 24 h, tolerando 5 min de relógio adiantado). */
-export function livenessProofFresh(proofAt: string | null | undefined, nowMs = Date.now()) {
+function livenessProofFresh(proofAt: string | null | undefined, nowMs = Date.now()) {
   const time = typeof proofAt === "string" ? Date.parse(proofAt) : Number.NaN;
   const age = nowMs - time;
   return !Number.isNaN(time) && age <= LIVENESS_FRESH_MS && age >= -5 * 60_000;
@@ -173,7 +173,7 @@ export function storeFingerprintAndDetectReposts(db: DatabaseSync, jobId: string
 }
 
 /** Diferença mínima entre publicações para a mesma vaga revista contar como repostagem (não só "atualizada"). */
-export const SAME_JOB_REPOST_MIN_GAP_MS = 7 * 86_400_000;
+const SAME_JOB_REPOST_MIN_GAP_MS = 7 * 86_400_000;
 
 /**
  * Vaga revista pela dedup exata/multi-chave (mesmo id na fonte, mesma URL, mesma empresa +

@@ -73,7 +73,7 @@ export function upsertConnectorCompany(input: Record<string, unknown>, actor = "
   return getConnectorCompany(id, projectId)!;
 }
 
-export function getConnectorCompany(id: string, projectId = storeProjectId()): ConnectorCompany | null {
+function getConnectorCompany(id: string, projectId = storeProjectId()): ConnectorCompany | null {
   const row = db.prepare("SELECT * FROM connector_companies WHERE id=? AND project_id=?").get(id, projectId) as Record<string, unknown> | undefined;
   return row ? mapCompany(row) : null;
 }

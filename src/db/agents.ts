@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentConfig, AgentRun } from "../types.js";
 import { DomainError } from "../errors.js";
-import { canonicalizeJobUrl } from "../domain.js";
+import { agentUrlAllowed } from "../domain.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { type configSnapshot, insertAgentConfig, insertAgentVersion, validateAgentConfigInput } from "./agent-configs.js";
 import { now } from "./util.js";
@@ -106,12 +106,10 @@ export function recordAgentRun(input: Partial<AgentRun> & { agent_name: string; 
     versionId = versionId ?? existing.config_version_id;
   }
   if (agentId && (!versionId || !snapshot)) {
-    const agent = db.prepare("SELECT published_version_id FROM agent_configs WHERE id=?").get(agentId) as { published_version_id: string | null } | undefined;
-    if (!agent?.published_version_id) throw new Error("agent.published_version.required");
-    const version = db.prepare("SELECT id,config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { id: string; config_json: string } | undefined;
+    const version = publishedVersion(agentId);
     if (!version) throw new Error("agent.published_version.required");
     versionId = version.id;
-    snapshot = JSON.parse(version.config_json);
+    snapshot = version.snapshot;
   }
   const limits = enforceLimits && agentId && snapshot ? agentRunLimits(snapshot) : null;
   if (limits && current?.status !== "running" && input.status === "running") {
@@ -164,21 +162,28 @@ export function recordAgentRunForAgent(agentId: string, input: Omit<Partial<Agen
   return recordAgentRun({ ...input, agent_id: agentId, agent_name: agent.name });
 }
 
+/** Host igual a um domínio permitido do agente ou subdomínio dele (regra única: `agentUrlAllowed`). */
 export function assertAgentUrlAllowed(agent: Pick<AgentConfig, "allowed_domains">, value: unknown) {
   if (!value) return;
-  const canonicalUrl = canonicalizeJobUrl(String(value));
-  const hostname = new URL(canonicalUrl).hostname.toLowerCase();
-  if (!agent.allowed_domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) {
-    throw new Error("agent.domain.forbidden");
-  }
+  if (!agentUrlAllowed(agent.allowed_domains, String(value))) throw new Error("agent.domain.forbidden");
+}
+
+/**
+ * Versão publicada do agente (TD-11): a única leitura de `published_version_id` → snapshot, usada
+ * pelas execuções (limites), pela rodada, pelo MCP (via getPublishedAgentConfig) e pelos conectores.
+ */
+function publishedVersion(agentId: string): { id: string; snapshot: ReturnType<typeof configSnapshot> } | null {
+  const row = db.prepare(`SELECT v.id,v.config_json FROM agent_configs a JOIN agent_config_versions v ON v.id=a.published_version_id
+    WHERE a.id=? AND v.status='published'`).get(agentId) as { id: string; config_json: string } | undefined;
+  return row ? { id: row.id, snapshot: JSON.parse(row.config_json) as ReturnType<typeof configSnapshot> } : null;
 }
 
 export function publishedAgentConfig(agentId: string, projectId: string): AgentConfig | null {
   const agent = listAgentConfigs(projectId).find((item) => item.id === agentId);
   if (!agent?.published_version_id) return null;
-  const row = db.prepare("SELECT config_json FROM agent_config_versions WHERE id=? AND status='published'").get(agent.published_version_id) as { config_json: string } | undefined;
-  if (!row) return null;
-  const snapshot = JSON.parse(row.config_json) as ReturnType<typeof configSnapshot>;
+  const version = publishedVersion(agentId);
+  if (!version) return null;
+  const snapshot = version.snapshot;
   return {
     ...agent, name: snapshot.name, description: snapshot.description ?? "", role_type: snapshot.role_type as AgentConfig["role_type"], enabled: snapshot.enabled,
     source_ids: snapshot.source_ids, allowed_domains: snapshot.allowed_domains, tool_scopes: snapshot.tool_scopes,

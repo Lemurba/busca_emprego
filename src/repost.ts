@@ -9,11 +9,11 @@ import { createHash } from "node:crypto";
 import { companyKey, normalizeComparableText, titleSimilarity } from "./domain.js";
 
 /** Descrições com menos palavras que isso não geram impressão (texto curto demais para comparar). */
-export const MIN_FINGERPRINT_WORDS = 12;
+const MIN_FINGERPRINT_WORDS = 12;
 /** Distância de Hamming máxima (de 64 bits) para considerar a descrição a mesma. */
-export const REPOST_MAX_HAMMING = 6;
+const REPOST_MAX_HAMMING = 6;
 /** Similaridade mínima de título (trigramas), igual à da deduplicação aproximada. */
-export const REPOST_MIN_TITLE_SIMILARITY = 0.92;
+const REPOST_MIN_TITLE_SIMILARITY = 0.92;
 
 const MASK_64 = (1n << 64n) - 1n;
 

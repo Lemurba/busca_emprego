@@ -55,7 +55,7 @@ function listFromText(value: unknown): string[] | null {
 }
 
 /** Valida o item contra as regras do caminho de ingestão antes de enviá-lo. */
-export function finalizeItem(item: Partial<ConnectorItem> & { source_id: string }): ConnectorItem | null {
+function finalizeItem(item: Partial<ConnectorItem> & { source_id: string }): ConnectorItem | null {
   const title = cleanText(item.title, 300);
   const company = cleanText(item.company, 200);
   const jobUrl = safeUrl(item.job_url);

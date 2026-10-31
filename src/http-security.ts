@@ -128,7 +128,7 @@ export function isHostAllowed(host: string | undefined, allowed: Set<string>): b
   return allowed.has(host.trim().toLowerCase());
 }
 
-export function isLoopbackAddress(address: string | undefined): boolean {
+function isLoopbackAddress(address: string | undefined): boolean {
   if (!address) return false;
   const normalized = address.toLowerCase().replace(/^::ffff:/u, "");
   return normalized === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(normalized);
@@ -186,7 +186,7 @@ export class AuthFailureLimiter {
   }
 }
 
-export function originMatchesHost(origin: string, host: string | undefined): boolean {
+function originMatchesHost(origin: string, host: string | undefined): boolean {
   if (!host) return false;
   const normalizedHost = host.trim().toLowerCase();
   const normalizedOrigin = origin.trim().toLowerCase();

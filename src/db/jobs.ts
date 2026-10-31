@@ -1,6 +1,6 @@
 // Vagas: listagens, cadastro/ingestão (upsertJob), edição humana com proveniência, decisão
 // (TENHO INTERESSE / SEM TEMPO), exclusão reversível, expiração e verificação de vaga viva.
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../hash.js";
 import type { CompanySummary, Job, JobStatus } from "../types.js";
 import { WorkflowError } from "../workflow.js";
 import { deadlinePassed as isDeadlinePassed, isIsoDeadline, resolveTimeZone } from "../deadline.js";
@@ -358,7 +358,7 @@ export function addEvidence(input: {
   db.prepare(`INSERT INTO evidence_records
     (id,project_id,job_id,agent_id,run_id,source_id,source_url,field_path,excerpt,observed_value_hash,observed_value_json,confidence,origin,state,retrieved_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?)`).run(id, input.projectId, input.jobId, input.agentId ?? null, input.runId ?? null, input.sourceId ?? null,
-      input.sourceUrl, input.field, (input.excerpt ?? "").slice(0, 500), createHash("sha256").update(valueJson).digest("hex"), valueJson,
+      input.sourceUrl, input.field, (input.excerpt ?? "").slice(0, 500), sha256Hex(valueJson), valueJson,
       Math.max(0, Math.min(1, input.confidence)), input.origin, timestamp);
   return { id, timestamp };
 }

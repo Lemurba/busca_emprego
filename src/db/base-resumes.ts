@@ -1,6 +1,7 @@
 // Currículos-base em PDF: upload validado, extração de texto, seleção do base e arquivo guardado.
 import type { BaseResume } from "../types.js";
-import { extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts, sha256 } from "../pdf-profile.js";
+import { extractPdfText, extractPdfTextAsync, MAX_PDF_BYTES, type PdfExtraction, proposeFacts } from "../pdf-profile.js";
+import { sha256Hex } from "../hash.js";
 import { audit, db, storeProjectId, tx } from "./handle.js";
 import { idFor, now } from "./util.js";
 import { mapBaseResume } from "./mappers.js";
@@ -56,7 +57,7 @@ function prepareBaseResume(input: BaseResumeUpload) {
   const bytes = Buffer.from(fileData, "base64");
   if (bytes.length > MAX_PDF_BYTES) throw new Error("O PDF deve ter no máximo 5 MB.");
   if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("O arquivo enviado não parece ser um PDF válido.");
-  const checksum = sha256(bytes);
+  const checksum = sha256Hex(bytes);
   if (db.prepare("SELECT id FROM base_resumes WHERE sha256 = ? LIMIT 1").get(checksum)) throw new Error("PDF_DUPLICATE");
   return { title, fileName, fileData, bytes, checksum };
 }

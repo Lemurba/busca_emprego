@@ -16,7 +16,7 @@ function parse(value: string | null | undefined): URL | null {
 }
 
 /** Escolhe a URL e o adaptador: candidatura → vaga → origem; ATS conhecido tem prioridade. */
-export function livenessTarget(job: LivenessJob) {
+function livenessTarget(job: LivenessJob) {
   const urls = [job.application_url, job.job_url, job.source_url].map(parse).filter((url): url is URL => url != null);
   for (const url of urls) {
     for (const adapter of ATS_ADAPTERS) {

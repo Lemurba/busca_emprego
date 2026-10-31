@@ -10,7 +10,7 @@
  * - User-Agent identificado e no máximo 1 requisição por segundo por host.
  */
 import { assertPublicHttpsUrl } from "../domain.js";
-import { readBodyCapped, safeFetch, SafeHttpError, type FetchLike, type LookupAll, type SafeHttpErrorKind } from "../safe-http.js";
+import { readBodyCapped, safeFetch, SafeHttpError, type FetchLike, type LookupAll } from "../safe-http.js";
 
 export { assertPublicResolution, defaultLookup, pinnedHttpsFetch, pinnedLookup } from "../safe-http.js";
 
@@ -18,9 +18,8 @@ export const LIVENESS_USER_AGENT = "RadarVagas/1.0 (+verificação de vaga)";
 export const LIVENESS_TIMEOUT_MS = 10_000;
 export const LIVENESS_MAX_BYTES = 2 * 1024 * 1024;
 export const LIVENESS_MAX_REDIRECTS = 3;
-export const LIVENESS_HOST_INTERVAL_MS = 1_000;
+const LIVENESS_HOST_INTERVAL_MS = 1_000;
 
-export type LivenessFetchErrorKind = SafeHttpErrorKind;
 /** Os erros da verificação são os do transporte seguro compartilhado (src/safe-http.ts). */
 export const LivenessFetchError = SafeHttpError;
 export type LivenessFetchError = SafeHttpError;
@@ -39,7 +38,7 @@ export class HostRateLimiter {
   }
 }
 
-export const defaultRateLimiter = new HostRateLimiter();
+const defaultRateLimiter = new HostRateLimiter();
 
 export interface SafeGetOptions {
   /** Transporte; padrão: node:https com DNS fixado (`pinnedHttpsFetch`). */

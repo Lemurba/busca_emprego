@@ -157,7 +157,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PROFILE_SNAPSHOT_INVALID: "A versão do perfil informada não existe neste projeto ou não é a fixada na rodada.",
 };
 
-export const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";
+const DEFAULT_REJECTION_MESSAGE = "A operação foi recusada pelas regras do Radar.";
 
 /** Mensagem pt-BR para um código (com ou sem sufixo `:detalhe`). */
 export function messageForCode(code: string, fallback = DEFAULT_REJECTION_MESSAGE): string {

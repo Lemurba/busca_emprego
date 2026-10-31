@@ -61,8 +61,3 @@ export function tx<T>(db: DatabaseSync, fn: () => T, mode: TxMode = "IMMEDIATE")
     throw error;
   }
 }
-
-/** Atalho explícito para `tx(db, fn, "IMMEDIATE")`, o modo padrão das escritas do núcleo. */
-export function txImmediate<T>(db: DatabaseSync, fn: () => T): T {
-  return tx(db, fn, "IMMEDIATE");
-}

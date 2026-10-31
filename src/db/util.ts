@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 // Utilitários sem estado compartilhados por src/db.ts e pelas migrações (sem import circular).
@@ -7,9 +6,8 @@ export function now() {
   return new Date().toISOString();
 }
 
-export function idFor(value: string) {
-  return createHash("sha256").update(value).digest("hex").slice(0, 18);
-}
+// Id determinístico: implementação única em src/hash.ts (TD-11).
+export { idFor } from "../hash.js";
 
 export function parseJsonArray(value: unknown): string[] {
   try {

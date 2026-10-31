@@ -20,7 +20,7 @@ export let db: DatabaseSync = closedStore;
 export let dbPath = "";
 let activeProjectId = "";
 
-export const DEFAULT_DB_PATH = "./data/radar.sqlite";
+const DEFAULT_DB_PATH = "./data/radar.sqlite";
 
 export interface OpenStoreOptions {
   /** Arquivo SQLite; padrão RADAR_DB_PATH ou ./data/radar.sqlite. */

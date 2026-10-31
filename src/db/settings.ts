@@ -11,10 +11,10 @@ import { now } from "./util.js";
  * as rotas e ferramentas de automação ficam desligadas, qualquer que seja o valor no banco.
  */
 
-export const AUTOMATION_TIME_ZONE = "America/Sao_Paulo";
-export const DEFAULT_DAILY_LIMIT = 5;
-export const MAX_DAILY_LIMIT = 100;
-export const MAX_ALLOWLIST_ENTRIES = 100;
+const AUTOMATION_TIME_ZONE = "America/Sao_Paulo";
+const DEFAULT_DAILY_LIMIT = 5;
+const MAX_DAILY_LIMIT = 100;
+const MAX_ALLOWLIST_ENTRIES = 100;
 
 export type AutomationSettings = {
   enabled: boolean;

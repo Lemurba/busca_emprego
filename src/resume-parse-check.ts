@@ -15,8 +15,8 @@ import { extractPdfTextAsync, findPhones, type PdfExtraction } from "./pdf-profi
 import { isHeading, renderResumeFile } from "./resume-files.js";
 import type { Resume } from "./types.js";
 
-export const PARSE_CHECK_MIN_TOKEN_RATIO = 0.95;
-export const PARSE_CHECK_TEXT_LIMIT = 20_000;
+const PARSE_CHECK_MIN_TOKEN_RATIO = 0.95;
+const PARSE_CHECK_TEXT_LIMIT = 20_000;
 
 export interface ParseCheckItem {
   key: string;

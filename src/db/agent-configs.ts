@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../hash.js";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_AGENT_PROMPT } from "../agent-defaults.js";
 import { idFor, insertAuditEvent, now } from "./util.js";
@@ -93,7 +93,7 @@ export function configSnapshot(values: ReturnType<typeof validateAgentConfigInpu
 export function insertAgentVersion(db: DatabaseSync, agentId: string, version: number, status: "draft" | "published", values: ReturnType<typeof validateAgentConfigInput>, actor: string) {
   const snapshot = configSnapshot(values);
   const json = JSON.stringify(snapshot);
-  const checksum = createHash("sha256").update(json).digest("hex");
+  const checksum = sha256Hex(json);
   const id = idFor(`agent-version|${agentId}|${version}|${checksum}`);
   const timestamp = now();
   db.prepare(`INSERT INTO agent_config_versions

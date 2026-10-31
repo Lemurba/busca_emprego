@@ -1,6 +1,7 @@
 // Autorização automática (AUTORIZO, #10/#14/#18/#32): assinatura HMAC, claim com lease, heartbeat,
 // expiração, envio e falha registrados só pelo executor dono do claim.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { urlHash } from "../hash.js";
 import type { Application } from "../types.js";
 import { DomainError } from "../errors.js";
 import { isHttpsUrl, canonicalizeJobUrl } from "../domain.js";
@@ -72,7 +73,7 @@ export function authorizeAutoApplication(id: string, resumeId: string, confirmat
   assertAtsUrl(db, applicationUrl);
   // #33: domínio e HTTPS são motivos permanentes e baratos; só então exige a verificação recente de vaga aberta.
   assertJobLivenessFresh(db, job);
-  const applicationUrlHash = createHash("sha256").update(applicationUrl).digest("hex");
+  const applicationUrlHash = urlHash(applicationUrl);
   // #30: id e nonce imprevisíveis (CSPRNG), não derivados de Math.random.
   const authorizationId = randomBytes(32).toString("hex");
   const nonce = randomBytes(32).toString("hex");
@@ -281,7 +282,7 @@ export function assertCurrentAuthorization(value: Record<string, unknown> | unde
   if (!currentUrl) throw new Error("application.authorization.unavailable");
   const canonicalUrl = canonicalizeJobUrl(currentUrl);
   if (!isHttpsUrl(canonicalUrl)) throw new DomainError("application.url.insecure", 422);
-  const currentHash = createHash("sha256").update(canonicalUrl).digest("hex");
+  const currentHash = urlHash(canonicalUrl);
   if (value.application_url !== canonicalUrl || value.application_url_hash !== currentHash) throw new Error("application.authorization.unavailable");
   return value;
 }
